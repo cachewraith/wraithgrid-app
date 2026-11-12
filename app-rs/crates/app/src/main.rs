@@ -10,6 +10,7 @@ mod chat_view;
 mod cli_tty;
 mod dialogs;
 mod keys;
+mod machines_row;
 mod mods_glue;
 mod mods_view;
 mod project_view;

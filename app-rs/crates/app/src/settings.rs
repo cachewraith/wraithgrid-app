@@ -16,6 +16,7 @@ use wraithgrid_core::shortcuts::{
 use wraithgrid_core::types::*;
 
 use crate::about_view::{AboutEvent, AboutView};
+use crate::machines_row::{MachinesEvent, MachinesRow};
 use crate::theme_editor::{ThemeEditor, ThemeEditorEvent};
 use crate::themes_gallery::{ThemesGallery, ThemesGalleryEvent};
 
@@ -43,6 +44,8 @@ const TABS: &[(Tab, &str)] = &[
 pub enum SettingsEvent {
     /// The new settings, and the claude binary override (Agents & CLIs).
     Changed(Box<Settings>, String),
+    /// Advanced → Machines added or removed one (H5).
+    Machines(MachinesEvent),
     Close,
 }
 
@@ -67,6 +70,7 @@ pub struct SettingsView {
     accounts: Vec<(String, String)>,
     inputs: Vec<(Field, Entity<InputState>)>,
     _subscriptions: Vec<Subscription>,
+    machines: Entity<MachinesRow>,
     /// Customize… and Browse community… under Theme; the editor's subscription puts the
     /// chosen theme back if Settings closes while it is open.
     theme_editor: Option<(Entity<ThemeEditor>, Subscription)>,
@@ -130,9 +134,17 @@ impl SettingsView {
             ));
             inputs.push((field, input));
         }
+        let machines = cx.new(|cx| MachinesRow::new(config.machines.clone(), window, cx));
+        subs.push(cx.subscribe(&machines, |_, _, e: &MachinesEvent, cx| {
+            cx.emit(SettingsEvent::Machines(match e {
+                MachinesEvent::Add(m) => MachinesEvent::Add(m.clone()),
+                MachinesEvent::Remove(id) => MachinesEvent::Remove(id.clone()),
+            }))
+        }));
         SettingsView {
             focus: cx.focus_handle(),
             tab: Tab::General,
+            machines,
             settings: s,
             claude_path: config.claude_path.clone(),
             accounts: config
@@ -599,13 +611,32 @@ impl SettingsView {
 
     fn advanced(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let s = self.settings.clone();
-        vec![row(
-            "Command line",
-            "Lets the wraithgrid command, and agents in your panes, list panes, read their screens, type into them, wait for them and open new ones. Only your user can connect; nothing listens on the network.",
-            cx,
-        )
-        .child(toggle("cli", s.cli_access, |s, v| s.cli_access = v, cx))
-        .into_any_element()]
+        vec![
+            row(
+                "Command line",
+                "Lets the wraithgrid command, and agents in your panes, list panes, read their screens, type into them, wait for them and open new ones. Only your user can connect; nothing listens on the network.",
+                cx,
+            )
+            .child(toggle("cli", s.cli_access, |s, v| s.cli_access = v, cx))
+            .into_any_element(),
+            row(
+                "Machines",
+                "Run a workspace's panes on another computer over ssh: right-click the workspace, then Run on. Its agents keep running there when you disconnect or quit. The other computer needs Wraithgrid installed (wraithgrid on PATH) and ssh with a key or agent.",
+                cx,
+            )
+            .child(self.machines.clone())
+            .into_any_element(),
+        ]
+    }
+
+    /// The machines after the window applied a change.
+    pub fn set_machines(
+        &mut self,
+        machines: Vec<wraithgrid_core::config::Machine>,
+        cx: &mut Context<Self>,
+    ) {
+        self.machines
+            .update(cx, |m, cx| m.set_machines(machines, cx));
     }
 
     /// One rebindable shortcut per line: its keys, Change (records the next chord) and Reset.

@@ -8081,6 +8081,7 @@ dependencies = [
  "wraithgrid-core",
  "wraithgrid-git",
  "wraithgrid-mods",
+ "wraithgrid-remote",
  "wraithgrid-schedule",
  "wraithgrid-themes",
  "wraithgrid-usage",

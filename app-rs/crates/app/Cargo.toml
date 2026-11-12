@@ -22,6 +22,7 @@ wraithgrid-core = { path = "../core" }
 wraithgrid-chat = { path = "../chat" }
 wraithgrid-git = { path = "../git" }
 wraithgrid-mods = { path = "../mods" }
+wraithgrid-remote = { path = "../remote" }
 wraithgrid-schedule = { path = "../schedule" }
 wraithgrid-themes = { path = "../themes" }
 wraithgrid-usage = { path = "../usage" }

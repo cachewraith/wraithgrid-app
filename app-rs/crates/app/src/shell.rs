@@ -47,6 +47,9 @@ use crate::terminal::{
 use crate::usage_view::{UsageView, UsageViewEvent};
 
 mod git_button;
+mod machines;
+
+pub use machines::{probe_text, remote_host};
 
 const TITLE_BAR: f32 = 36.0;
 const SAVE_DELAY: Duration = Duration::from_millis(300);
@@ -60,6 +63,8 @@ pub struct Shell {
     chats: HashMap<String, Entity<ChatView>>,
     /// Each chat's status, for its header dot.
     chat_states: HashMap<String, wraithgrid_chat::ChatStatus>,
+    /// Each machine's host (H5), by machine id, with the ssh host it was made for.
+    remotes: HashMap<String, (String, Arc<wraithgrid_remote::RemoteHost>)>,
     /// Scheduled runs started by this launch (`live_key`); others left running are stale.
     live_runs: std::collections::HashSet<String>,
     /// Chat panes opened as terminals this session (until the chat view is ported).
@@ -127,6 +132,7 @@ impl Shell {
             terminals: HashMap::new(),
             chats: HashMap::new(),
             chat_states: HashMap::new(),
+            remotes: HashMap::new(),
             live_runs: Default::default(),
             as_terminal: Vec::new(),
             focused: None,
@@ -690,6 +696,31 @@ impl Shell {
                         let resolved =
                             crate::theme::resolve(this.config(), crate::theme::system_dark(window));
                         crate::theme::apply(&resolved, Some(window), cx);
+                    }
+                }
+                SettingsEvent::Machines(e) => {
+                    match e {
+                        crate::machines_row::MachinesEvent::Add(m) => {
+                            let m = m.clone();
+                            this.update(cx, |c| c.machines.push(m));
+                        }
+                        // Its projects run here again; its panes there keep running.
+                        crate::machines_row::MachinesEvent::Remove(id) => {
+                            let id = id.clone();
+                            this.remotes.remove(&id);
+                            this.update(cx, |c| {
+                                c.machines.retain(|m| m.id != id);
+                                for w in c.workspaces.iter_mut() {
+                                    if w.machine_id.as_deref() == Some(id.as_str()) {
+                                        w.machine_id = None;
+                                    }
+                                }
+                            });
+                        }
+                    }
+                    let machines = this.config().machines.clone();
+                    if let Some(view) = this.settings_view.clone() {
+                        view.update(cx, |v, cx| v.set_machines(machines, cx));
                     }
                 }
                 SettingsEvent::Close => {
@@ -1823,7 +1854,7 @@ impl Shell {
 
     /// Starts an exited pane again: its old process is cleared from the host first.
     fn restart_pane(&mut self, pane_id: String, cx: &mut Context<Self>) {
-        self.host.kill(&pane_id);
+        self.host_for(&pane_id).kill(&pane_id);
         self.router.unregister(&pane_id);
         self.terminals.remove(&pane_id);
         self.focused = Some(pane_id);
@@ -1890,12 +1921,17 @@ impl Shell {
         self.flush();
         self.flush_chats(cx);
         let host = self.host.clone();
+        // A machine's agents keep running there either way.
+        let remotes: Vec<_> = self.remotes.drain().map(|(_, (_, r))| r).collect();
         cx.spawn(async move |_, cx| {
             cx.background_spawn(async move {
                 if keep {
                     host.detach();
                 } else {
                     host.stop_all();
+                }
+                for r in remotes {
+                    r.detach();
                 }
             })
             .await;
@@ -1935,7 +1971,18 @@ impl Shell {
     ) -> String {
         let s = &self.config().settings;
         let acct = account.as_deref().and_then(|id| self.config().account(id));
-        let view = if !shell && chat && acct.is_some_and(|a| a.cli.spec().chat && a.signed_in) {
+        // Chats run on this computer only: a machine's project gets terminals (H5).
+        let remote = self
+            .config()
+            .workspaces
+            .iter()
+            .find(|w| Some(&w.id) == ws.as_ref().or(Some(&self.config().active_workspace)))
+            .is_some_and(|w| w.machine_id.is_some());
+        let view = if !shell
+            && chat
+            && !remote
+            && acct.is_some_and(|a| a.cli.spec().chat && a.signed_in)
+        {
             PaneView::Chat
         } else {
             PaneView::Terminal
@@ -2161,7 +2208,7 @@ impl Shell {
     /// `dropPane`: ends the pane's process (terminal or chat CLI) and removes it; `archive`
     /// keeps it, with its saved chat view, at the top of the project's History.
     fn drop_pane(&mut self, pane_id: &str, archive: bool, cx: &mut Context<Self>) {
-        self.host.kill(pane_id);
+        self.host_for(pane_id).kill(pane_id);
         self.router.unregister(pane_id);
         self.terminals.remove(pane_id);
         if let Some(chat) = self.chats.remove(pane_id) {
@@ -2291,7 +2338,9 @@ impl Shell {
         if let Some(view) = self.terminals.get(&pane.id) {
             return view.clone();
         }
-        let host = self.host.clone();
+        // A machine's pane: its host, and the machine resolves what to run (H5).
+        let remote = self.machine_of_pane(&pane.id).map(|m| self.remote_for(&m));
+        let host = remote.as_ref().map_or(self.host.clone(), |r| r.pane_host());
         let pane_id = pane.id.clone();
         let writer: PaneWriter = {
             let (host, id) = (host.clone(), pane_id.clone());
@@ -2320,6 +2369,12 @@ impl Shell {
                         return;
                     }
                     let spec = SpawnSpec { cols, rows, ..spec };
+                    if let Some(remote) = remote {
+                        if let Err(error) = remote.spawn(&spec) {
+                            core.end(error);
+                        }
+                        return;
+                    }
                     // The provider's shared instructions and skills, linked in first (`syncShared`).
                     if let (false, Some(account)) = (spec.shell, account_id.as_deref()) {
                         crate::mods_glue::sync_before_start(&cfg, account);
