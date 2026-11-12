@@ -3,6 +3,7 @@
 //! the Electron build needs no setup.
 
 mod accounts_view;
+mod branch_picker;
 mod changes;
 mod chat_view;
 mod cli_tty;

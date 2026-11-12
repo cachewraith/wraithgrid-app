@@ -1,8 +1,9 @@
 //! The Changes panel (`DiffPanel.tsx`): the focused pane's repo, its branch and ahead/behind,
-//! the changed files with their diff, and Commit / Pull / Push. Git runs off the UI thread
-//! through the `wraithgrid-git` crate; the panel refreshes every 5 s while it is open.
+//! the changed files with their diff, and Commit / Pull / Push (push, and a pull over
+//! uncommitted changes, after a confirm; the Git menu asks here too, #162). Git runs off the UI
+//! thread through the `wraithgrid-git` crate; the panel refreshes every 5 s while it is open.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -28,8 +29,18 @@ const LANES: [u32; 6] = [0x7c5cff, 0x2dd4bf, 0xf5a524, 0xf43f5e, 0x60a5fa, 0xa3e
 const LANE_W: f32 = 12.0;
 const ROW_H: f32 = 24.0;
 
+/// What the Git menu asks the panel to do (#162): it never sends anything by itself.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum GitAsk {
+    Commit,
+    Pull,
+    Push,
+}
+
 pub struct ChangesPanel {
     tab: Tab,
+    /// A pull or push waiting for its confirm.
+    asking: Option<GitAsk>,
     commits: Vec<GitCommit>,
     graph: Vec<GraphRow>,
     more: bool,
@@ -97,6 +108,7 @@ impl ChangesPanel {
         });
         ChangesPanel {
             tab: Tab::Changes,
+            asking: None,
             commits: vec![],
             graph: vec![],
             more: false,
@@ -164,6 +176,37 @@ impl ChangesPanel {
         })
         .detach();
         cx.notify();
+    }
+
+    pub fn cwd(&self) -> &Path {
+        &self.cwd
+    }
+
+    /// Commit focuses the message; pull and push wait for their confirm (`gitAsk`).
+    pub fn ask(&mut self, what: GitAsk, window: &mut Window, cx: &mut Context<Self>) {
+        self.tab = Tab::Changes;
+        match what {
+            GitAsk::Commit => window.focus(&self.message.focus_handle(cx), cx),
+            _ => self.asking = Some(what),
+        }
+        cx.notify();
+    }
+
+    fn pull(&mut self, cx: &mut Context<Self>) {
+        if self.status.changed > 0 {
+            self.asking = Some(GitAsk::Pull);
+            return cx.notify();
+        }
+        self.run_asked(GitAsk::Pull, cx);
+    }
+
+    fn run_asked(&mut self, what: GitAsk, cx: &mut Context<Self>) {
+        self.asking = None;
+        match what {
+            GitAsk::Pull => self.run("Pull", |g, c| pull_branch(g, c), cx),
+            GitAsk::Push => self.run("Push", |g, c| push_branch(g, c), cx),
+            GitAsk::Commit => self.commit(cx),
+        }
     }
 
     pub fn show_history(&mut self, cx: &mut Context<Self>) {
@@ -315,9 +358,7 @@ impl Render for ChangesPanel {
                     },
                     cx,
                 )
-                .on_click(
-                    cx.listener(|this, _, _, cx| this.run("Pull", |g, c| pull_branch(g, c), cx)),
-                ),
+                .on_click(cx.listener(|this, _, _, cx| this.pull(cx))),
             )
             .child(
                 button(
@@ -329,9 +370,10 @@ impl Render for ChangesPanel {
                     },
                     cx,
                 )
-                .on_click(
-                    cx.listener(|this, _, _, cx| this.run("Push", |g, c| push_branch(g, c), cx)),
-                ),
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.asking = Some(GitAsk::Push);
+                    cx.notify();
+                })),
             );
         let files = self.files.iter().enumerate().map(|(i, f)| {
             let (letter, color) = match f.status {
@@ -479,6 +521,9 @@ impl Render for ChangesPanel {
                     .gap_2()
                     .border_t_1()
                     .border_color(theme.border)
+                    .when_some(self.asking.zip(s.branch.clone()), |d, (what, branch)| {
+                        d.child(self.confirm(what, &branch, cx))
+                    })
                     .child(Input::new(&self.message))
                     .child(
                         div()
@@ -522,6 +567,57 @@ impl Render for ChangesPanel {
 }
 
 impl ChangesPanel {
+    /// "Push main to its remote?" with Cancel and the action (`dp-ask`).
+    fn confirm(&self, what: GitAsk, branch: &str, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let n = self.status.changed;
+        let (text, label) = match what {
+            GitAsk::Push => (format!("Push {branch} to its remote?"), "Push"),
+            GitAsk::Pull if n > 0 => (
+                format!(
+                    "{n} uncommitted {} in this folder. Pull {branch} anyway? git stops if they are in the way.",
+                    if n == 1 { "change" } else { "changes" }
+                ),
+                "Pull",
+            ),
+            _ => (format!("Pull {branch} from its remote?"), "Pull"),
+        };
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .text_xs()
+            .child(div().flex_1().child(text))
+            .child(
+                div()
+                    .id("ask-cancel")
+                    .px_2()
+                    .py(px(2.))
+                    .rounded_md()
+                    .border_1()
+                    .border_color(theme.border)
+                    .cursor_pointer()
+                    .child("Cancel")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.asking = None;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                div()
+                    .id("ask-ok")
+                    .px_2()
+                    .py(px(2.))
+                    .rounded_md()
+                    .bg(theme.primary)
+                    .text_color(theme.primary_foreground)
+                    .cursor_pointer()
+                    .child(label)
+                    .on_click(cx.listener(move |this, _, _, cx| this.run_asked(what, cx))),
+            )
+            .into_any_element()
+    }
+
     fn history(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         if let Some(e) = &self.history_error {

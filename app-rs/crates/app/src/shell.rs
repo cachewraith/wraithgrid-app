@@ -44,6 +44,8 @@ use crate::terminal::{
 };
 use crate::usage_view::{UsageView, UsageViewEvent};
 
+mod git_button;
+
 const TITLE_BAR: f32 = 36.0;
 const SAVE_DELAY: Duration = Duration::from_millis(300);
 
@@ -86,6 +88,8 @@ pub struct Shell {
     changes: Option<Entity<ChangesPanel>>,
     /// Each shown pane folder's branch and changed count, polled.
     git_heads: HashMap<String, wraithgrid_git::GitStatus>,
+    /// The top bar's Git menu, while open (#162).
+    git_menu: Option<git_button::GitMenu>,
     /// usage.json, shared with the poll; and the latest limits per account.
     usage: Arc<std::sync::Mutex<wraithgrid_usage::store::UsageStore>>,
     limits: std::collections::BTreeMap<String, wraithgrid_usage::model::AccountLimits>,
@@ -139,6 +143,7 @@ impl Shell {
             update: UpdateState::Idle,
             changes: None,
             git_heads: HashMap::new(),
+            git_menu: None,
             usage: Arc::new(std::sync::Mutex::new(
                 wraithgrid_usage::store::UsageStore::new(
                     wraithgrid_usage::store::UsageStoreDeps::new(
@@ -464,7 +469,16 @@ impl Shell {
             &dialog,
             window,
             |this, _, event: &NewPaneEvent, window, cx| {
-                if let NewPaneEvent::Start { account, cwd, args } = event {
+                if let NewPaneEvent::Start {
+                    account,
+                    cwd,
+                    args,
+                    worktree_panes,
+                } = event
+                {
+                    if let Some(on) = worktree_panes {
+                        this.remember_worktree_panes(*on, cx);
+                    }
                     let shell = account.is_none();
                     let id = this.add_pane(
                         None,
@@ -488,6 +502,7 @@ impl Shell {
     fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let config = self.config().clone();
         let palette = cx.new(|cx| Palette::new(&config, window, cx));
+        self.add_git_commands(&palette, cx);
         cx.subscribe_in(
             &palette,
             window,
@@ -514,6 +529,9 @@ impl Shell {
                         PaletteAction::Usage => return this.open_usage(window, cx),
                         PaletteAction::Mods => return this.open_mods(window, cx),
                         PaletteAction::Scheduled => return this.open_scheduled(window, cx),
+                        a @ (PaletteAction::SwitchBranch
+                        | PaletteAction::BranchPane
+                        | PaletteAction::OpenBranch) => return this.palette_git(a, window, cx),
                         PaletteAction::ClosePane => {
                             if let Some(id) = this.focused.clone() {
                                 this.close_pane(id, cx);
@@ -581,6 +599,7 @@ impl Shell {
                 let id = self.config().active_workspace.clone();
                 self.open_project(id, window, cx)
             }
+            Ok(hook) if hook.starts_with("git-") => self.open_git_from_env(hook, window, cx),
             _ => {}
         }
     }
@@ -1930,6 +1949,7 @@ impl Shell {
 
     /// Closes a pane: its process stops and it leaves the project.
     fn close_pane(&mut self, pane_id: String, cx: &mut Context<Self>) {
+        let closed = self.closing_pane(&pane_id);
         self.host.kill(&pane_id);
         self.router.unregister(&pane_id);
         self.terminals.remove(&pane_id);
@@ -1941,6 +1961,7 @@ impl Shell {
                 }
             }
         });
+        self.offer_remove_worktree(closed, cx);
     }
 
     /// The pane's terminal view, made the first time it is shown: it reattaches to the
@@ -2107,6 +2128,7 @@ impl Shell {
             })
             .child(div().font_weight(FontWeight::SEMIBOLD).child("Wraithgrid"))
             .child(div().text_color(theme.muted_foreground).child(project))
+            .children(self.git_button(window, cx))
             .child(div().flex_1())
             .when(self.blocked.is_none(), |d| {
                 d.child(
@@ -2684,15 +2706,7 @@ impl Shell {
                         &theme,
                     ))
                     .child(div().font_weight(FontWeight::MEDIUM).child(label))
-                    .when_some(self.git_heads.get(&pane.cwd).filter(|g| g.repo), |d, g| {
-                        let branch = g.branch.clone().unwrap_or_else(|| "detached".into());
-                        let text = if g.changed > 0 {
-                            format!("⑂ {branch} · {}", g.changed)
-                        } else {
-                            format!("⑂ {branch}")
-                        };
-                        d.child(div().text_color(theme.muted_foreground).child(text))
-                    })
+                    .children(self.branch_chip(pane, cx))
                     .child(
                         div()
                             .flex_1()
@@ -2796,6 +2810,8 @@ impl Render for Shell {
             Modal::NewProject(d) => d.clone().into_any_element(),
             Modal::Project(d) => d.clone().into_any_element(),
             Modal::Choice(d) => d.clone().into_any_element(),
+            Modal::Branches(d) => d.clone().into_any_element(),
+            Modal::RemoveWorktree(d) => d.clone().into_any_element(),
         });
         div()
             .id("shell")
@@ -3028,6 +3044,8 @@ enum Modal {
     NewProject(Entity<NewProjectDialog>),
     Project(Entity<ProjectDialog>),
     Choice(Entity<ChoiceDialog>),
+    Branches(Entity<crate::branch_picker::BranchPicker>),
+    RemoveWorktree(Entity<git_button::RemoveWorktreeDialog>),
 }
 
 /// Where the in-app update is (`update-install.ts` phases).
