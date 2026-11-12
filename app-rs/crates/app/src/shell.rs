@@ -48,6 +48,7 @@ use crate::usage_view::{UsageView, UsageViewEvent};
 
 mod git_button;
 mod machines;
+mod team;
 
 pub use machines::{probe_text, remote_host};
 
@@ -403,7 +404,7 @@ impl Shell {
                             .filter(|p| p.id == id)
                         {
                             // A new chat is named after its first message, like a chat app's history.
-                            if !p.has_conversation {
+                            if !p.has_conversation && p.title == auto_title(p.shell, &p.cwd) {
                                 p.title = title.clone();
                             }
                             p.has_conversation = true;
@@ -425,6 +426,7 @@ impl Shell {
                 }
                 ChatViewEvent::Status(status) => {
                     this.chat_states.insert(pane_id.clone(), *status);
+                    this.refresh_project_view(cx);
                     cx.notify();
                 }
                 ChatViewEvent::Choices {
@@ -1280,6 +1282,7 @@ impl Shell {
             },
         )
         .detach();
+        self.wire_team(&view, window, cx);
         window.focus(&view.focus_handle(cx), cx);
         self.project_view = Some(view);
         cx.notify();

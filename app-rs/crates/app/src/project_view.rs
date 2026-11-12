@@ -11,6 +11,8 @@ use gpui_kit::*;
 use wraithgrid_core::config::{Config, Pane};
 use wraithgrid_core::paths::{contract_home, expand_home, home_dir};
 
+use crate::team_section::TeamSection;
+
 pub enum ProjectPageEvent {
     /// Show an open chat.
     Reveal(String),
@@ -70,6 +72,8 @@ pub struct ProjectView {
     statuses: HashMap<String, &'static str>,
     query: Entity<InputState>,
     confirm: Option<Confirm>,
+    /// The project's team (#79), between the header and the search.
+    team: Entity<TeamSection>,
 }
 
 impl ProjectView {
@@ -91,6 +95,7 @@ impl ProjectView {
             }
         })
         .detach();
+        let team = cx.new(|_| TeamSection::new(config.clone(), ws_id.clone(), statuses.clone()));
         ProjectView {
             focus: cx.focus_handle(),
             config,
@@ -98,7 +103,12 @@ impl ProjectView {
             statuses,
             query,
             confirm: None,
+            team,
         }
+    }
+
+    pub fn team(&self) -> Entity<TeamSection> {
+        self.team.clone()
     }
 
     pub fn set_data(
@@ -107,6 +117,8 @@ impl ProjectView {
         statuses: HashMap<String, &'static str>,
         cx: &mut Context<Self>,
     ) {
+        self.team
+            .update(cx, |t, cx| t.set_data(config.clone(), statuses.clone(), cx));
         self.config = config;
         self.statuses = statuses;
         cx.notify();
@@ -374,6 +386,7 @@ impl Render for ProjectView {
                                             })),
                                     ),
                             )
+                            .child(self.team.clone())
                             .when(total > 0, |d| d.child(Input::new(&self.query)))
                             .when(total == 0, |d| {
                                 d.child(

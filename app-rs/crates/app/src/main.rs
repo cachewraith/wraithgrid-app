@@ -19,6 +19,7 @@ mod scheduled_view;
 mod settings;
 mod shell;
 mod shortcuts_sheet;
+mod team_section;
 mod terminal;
 mod theme;
 mod theme_editor;
