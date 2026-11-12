@@ -5,7 +5,7 @@
 
 use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::*;
-use wraithgrid_core::config::Config;
+use wraithgrid_core::config::{Config, Settings};
 use wraithgrid_core::paths::home_dir;
 use wraithgrid_themes::{resolve_active_theme, ResolvedTheme, Rgba as ThemeRgba, ThemeSettings};
 use wraithgrid_themes::{Accent, TerminalPalette, ThemeName, ThemePreference};
@@ -29,20 +29,23 @@ pub fn system_dark(window: &Window) -> bool {
 
 /// The theme the settings and OS mode pick, resolved to colors.
 pub fn resolve(config: &Config, system_dark: bool) -> ResolvedTheme {
-    let s = &config.settings;
-    let settings = ThemeSettings {
+    resolve_active_theme(
+        &theme_settings(&config.settings),
+        system_dark,
+        &wraithgrid_core::paths::themes_root(&home_dir()),
+    )
+}
+
+/// The settings that pick the theme, as the themes crate takes them.
+pub fn theme_settings(s: &Settings) -> ThemeSettings {
+    ThemeSettings {
         preference: ThemePreference::parse(s.theme.as_str()).unwrap_or(ThemePreference::Dark),
         theme_dark: s.theme_dark.clone(),
         theme_light: s.theme_light.clone(),
         accent: Accent::parse(s.accent.as_str()).unwrap_or(Accent::Theme),
         terminal_palette: TerminalPalette::parse(s.terminal_palette.as_str())
             .unwrap_or(TerminalPalette::Match),
-    };
-    resolve_active_theme(
-        &settings,
-        system_dark,
-        &wraithgrid_core::paths::themes_root(&home_dir()),
-    )
+    }
 }
 
 /// What the terminal panes draw with: the theme's (or the fixed palette's) colors.

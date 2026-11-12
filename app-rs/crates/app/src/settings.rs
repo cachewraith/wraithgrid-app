@@ -12,6 +12,9 @@ use wraithgrid_core::config::{Config, Settings};
 use wraithgrid_core::shortcuts::{bindings, label as shortcut_label, Binding};
 use wraithgrid_core::types::*;
 
+use crate::theme_editor::{ThemeEditor, ThemeEditorEvent};
+use crate::themes_gallery::{ThemesGallery, ThemesGalleryEvent};
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
     General,
@@ -58,6 +61,10 @@ pub struct SettingsView {
     accounts: Vec<(String, String)>,
     inputs: Vec<(Field, Entity<InputState>)>,
     _subscriptions: Vec<Subscription>,
+    /// Customize… and Browse community… under Theme; the editor's subscription puts the
+    /// chosen theme back if Settings closes while it is open.
+    theme_editor: Option<(Entity<ThemeEditor>, Subscription)>,
+    themes_gallery: Option<Entity<ThemesGallery>>,
 }
 
 impl SettingsView {
@@ -125,7 +132,86 @@ impl SettingsView {
                 .collect(),
             inputs,
             _subscriptions: subs,
+            theme_editor: None,
+            themes_gallery: None,
         }
+    }
+
+    /// `WRAITHGRID_OPEN=theme-editor|themes`: Appearance with the editor or gallery open.
+    pub fn open_theme_tool(&mut self, editor: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.tab = Tab::Appearance;
+        if editor {
+            self.toggle_theme_editor(window, cx);
+        } else {
+            self.toggle_themes_gallery(window, cx);
+        }
+    }
+
+    /// The editor draws its draft over the whole app until it closes.
+    fn toggle_theme_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.theme_editor.take().is_some() {
+            crate::theme_editor::apply_settings(&self.settings, Some(window), cx);
+            return cx.notify();
+        }
+        let editor = cx.new(|cx| ThemeEditor::new(&self.settings, window, cx));
+        cx.subscribe_in(
+            &editor,
+            window,
+            |this, _, event: &ThemeEditorEvent, window, cx| {
+                if let ThemeEditorEvent::Saved(t) = event {
+                    this.choose_theme(t, window, cx);
+                }
+                this.theme_editor = None;
+                crate::theme_editor::apply_settings(&this.settings, Some(window), cx);
+                cx.notify();
+            },
+        )
+        .detach();
+        let restore =
+            cx.on_release(|this, cx| crate::theme_editor::apply_settings(&this.settings, None, cx));
+        self.theme_editor = Some((editor, restore));
+        cx.notify();
+    }
+
+    fn toggle_themes_gallery(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.themes_gallery.take().is_some() {
+            return cx.notify();
+        }
+        let gallery = cx.new(|cx| ThemesGallery::new(window, cx));
+        cx.subscribe_in(
+            &gallery,
+            window,
+            |this, _, event: &ThemesGalleryEvent, window, cx| {
+                match event {
+                    ThemesGalleryEvent::Use(t) => this.choose_theme(t, window, cx),
+                    ThemesGalleryEvent::Changed => {}
+                    ThemesGalleryEvent::Close => this.themes_gallery = None,
+                }
+                // Theme files may have changed under the same settings.
+                crate::theme_editor::apply_settings(&this.settings, Some(window), cx);
+                cx.notify();
+            },
+        )
+        .detach();
+        self.themes_gallery = Some(gallery);
+        cx.notify();
+    }
+
+    fn choose_theme(
+        &mut self,
+        t: &wraithgrid_themes::AppTheme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let field = if t.mode == wraithgrid_themes::ThemeName::Dark {
+            Field::ThemeDark
+        } else {
+            Field::ThemeLight
+        };
+        let id = t.id.clone();
+        self.input(field)
+            .update(cx, |i, cx| i.set_value(id, window, cx));
+        self.update(cx, |s| crate::theme_editor::choose_theme(s, t));
     }
 
     fn input(&self, field: Field) -> Entity<InputState> {
@@ -343,6 +429,26 @@ impl SettingsView {
                     ),
             )
             .child(hint("Dark theme, then light theme, by id.", cx))
+            .child(chips(vec![
+                chip(
+                    "theme-browse".into(),
+                    "Browse community…",
+                    self.themes_gallery.is_some(),
+                    cx,
+                )
+                .on_click(cx.listener(|this, _, window, cx| this.toggle_themes_gallery(window, cx)))
+                .into_any_element(),
+                chip(
+                    "theme-customize".into(),
+                    "Customize…",
+                    self.theme_editor.is_some(),
+                    cx,
+                )
+                .on_click(cx.listener(|this, _, window, cx| this.toggle_theme_editor(window, cx)))
+                .into_any_element(),
+            ]))
+            .children(self.themes_gallery.clone())
+            .children(self.theme_editor.as_ref().map(|(e, _)| e.clone()))
             .into_any_element(),
             row(
                 "Interface size",
