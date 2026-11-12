@@ -1,5 +1,5 @@
 //! The window's overlays: New pane (`NewPaneDialog.tsx`: Account → Folder → Start, launch args
-//! under More options) and the command palette (`CommandPalette.tsx`: search panes, projects and
+//! and a branch of its own (a git worktree, #162) under More options) and the command palette (`CommandPalette.tsx`: search panes, projects and
 //! commands). Each emits what was chosen; the window carries it out.
 
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -9,7 +9,9 @@ use gpui_kit::*;
 use wraithgrid_core::agent_cli::AgentCli;
 use wraithgrid_core::args::{format_args, parse_args};
 use wraithgrid_core::config::Config;
-use wraithgrid_core::paths::{contract_home, home_dir, resolve_user_path};
+use wraithgrid_core::config::Pane;
+use wraithgrid_core::paths::{contract_home, home_dir, resolve_user_path, worktrees_root};
+use wraithgrid_git::{add_worktree, GitCli, WorktreeFrom};
 
 // ---- New pane ------------------------------------------------------------------------------
 
@@ -18,6 +20,8 @@ pub enum NewPaneEvent {
         account: Option<String>,
         cwd: String,
         args: Vec<String>,
+        /// The project's "Work on a new branch" to remember (#162); None from the Git menu.
+        worktree_panes: Option<bool>,
     },
     Cancel,
 }
@@ -41,7 +45,21 @@ pub struct NewPaneDialog {
     more: bool,
     error: Option<String>,
     shell_name: String,
+    /// "Work on a new branch (git worktree)", and that branch's name.
+    worktree: bool,
+    branch: Entity<InputState>,
+    /// Opened from the Git menu for a pane (`branchFrom`): not remembered for the project.
+    branch_from: bool,
+    busy: bool,
     _subscriptions: Vec<Subscription>,
+}
+
+/// A branch name to start from, free in practice: `task-1105-0942` (month, day, time).
+pub fn suggest_branch<Tz: chrono::TimeZone>(now: chrono::DateTime<Tz>) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    now.format("task-%m%d-%H%M").to_string()
 }
 
 impl NewPaneDialog {
@@ -75,7 +93,17 @@ impl NewPaneDialog {
         });
         let args_state =
             cx.new(|cx| InputState::new(window, cx).placeholder("e.g. --model sonnet"));
-        let subs = [&folder_state, &args_state]
+        let worktree = project.worktree_panes;
+        let branch_state = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("feat/rate-limit")
+                .default_value(if worktree {
+                    suggest_branch(chrono::Local::now())
+                } else {
+                    String::new()
+                })
+        });
+        let subs = [&folder_state, &args_state, &branch_state]
             .into_iter()
             .map(|input| {
                 cx.subscribe_in(
@@ -136,11 +164,56 @@ impl NewPaneDialog {
             more: config.accounts.is_empty(),
             error: None,
             shell_name,
+            worktree,
+            branch: branch_state,
+            branch_from: false,
+            busy: false,
             _subscriptions: subs,
         }
     }
 
+    /// Set up from the Git menu (#162): that pane's folder and account, a new branch suggested,
+    /// so Enter starts it.
+    pub fn branch_from(
+        &mut self,
+        pane: &Pane,
+        config: &Config,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if pane.shell {
+            self.account = None;
+        } else if let Some(id) = pane
+            .account_id
+            .as_ref()
+            .filter(|id| config.account(id).is_some())
+        {
+            self.account = Some(id.clone());
+        }
+        let home = home_dir().to_string_lossy().into_owned();
+        let folder = contract_home(&pane.cwd, &home);
+        self.folder
+            .update(cx, |s, cx| s.set_value(folder, window, cx));
+        self.branch.update(cx, |s, cx| {
+            s.set_value(suggest_branch(chrono::Local::now()), window, cx)
+        });
+        self.worktree = true;
+        self.branch_from = true;
+        self.more = true;
+        window.focus(&self.branch.focus_handle(cx), cx);
+        cx.notify();
+    }
+
+    fn can_start(&self, cx: &App) -> bool {
+        !self.busy
+            && !self.folder.read(cx).value().trim().is_empty()
+            && (!self.worktree || !self.branch.read(cx).value().trim().is_empty())
+    }
+
     fn start(&mut self, cx: &mut Context<Self>) {
+        if !self.can_start(cx) {
+            return;
+        }
         let folder = self.folder.read(cx).value().trim().to_string();
         if folder.is_empty() {
             self.error = Some("Pick a folder.".into());
@@ -153,11 +226,50 @@ impl NewPaneDialog {
             Err(_) => return self.fail(format!("Folder not found: {folder}"), cx),
         }
         let args = parse_args(&self.args.read(cx).value());
-        cx.emit(NewPaneEvent::Start {
-            account: self.account.clone(),
-            cwd: folder,
-            args,
-        });
+        let account = self.account.clone();
+        let worktree_panes = (!self.branch_from).then_some(self.worktree);
+        if !self.worktree {
+            return cx.emit(NewPaneEvent::Start {
+                account,
+                cwd: folder,
+                args,
+                worktree_panes,
+            });
+        }
+        // The worktree first: the pane starts in it, or the dialog stays with git's error.
+        let branch = self.branch.read(cx).value().trim().to_string();
+        self.busy = true;
+        self.error = None;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let made = cx
+                .background_spawn(async move {
+                    let home = home_dir();
+                    add_worktree(
+                        &GitCli::default(),
+                        &resolve_user_path(&folder, &home),
+                        &branch,
+                        &worktrees_root(&home),
+                        false,
+                        WorktreeFrom::New,
+                    )
+                    .map(|dir| contract_home(&dir.to_string_lossy(), &home.to_string_lossy()))
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.busy = false;
+                match made {
+                    Ok(cwd) => cx.emit(NewPaneEvent::Start {
+                        account,
+                        cwd,
+                        args,
+                        worktree_panes,
+                    }),
+                    Err(e) => this.fail(e, cx),
+                }
+            });
+        })
+        .detach();
     }
 
     fn fail(&mut self, error: String, cx: &mut Context<Self>) {
@@ -172,6 +284,12 @@ impl NewPaneDialog {
             "<folder>".to_string()
         } else {
             folder
+        };
+        let branch = self.branch.read(cx).value().trim().to_string();
+        let run_in = if self.worktree && !branch.is_empty() {
+            format!("~/.wraithgrid/worktrees/…/{branch}")
+        } else {
+            folder.clone()
         };
         match self
             .account
@@ -191,7 +309,7 @@ impl NewPaneDialog {
                 } else {
                     format!(" {}", format_args(&args))
                 };
-                format!("{env}{}{args}   (in {folder})", spec.bin)
+                format!("{env}{}{args}   (in {run_in})", spec.bin)
             }
         }
     }
@@ -284,11 +402,22 @@ impl Render for NewPaneDialog {
                 .text_color(theme.muted_foreground)
                 .child(text)
         };
-        let title = if self.account.is_some() {
+        let title = if self.branch_from {
+            "New pane on a new branch"
+        } else if self.account.is_some() {
             "New chat"
         } else {
             "New pane"
         };
+        let can_start = self.can_start(cx);
+        let more_on = [
+            (!self.args.read(cx).value().trim().is_empty()).then_some("args"),
+            self.worktree.then_some("worktree"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" · ");
         div()
             .track_focus(&self.focus)
             .w(px(560.))
@@ -330,6 +459,9 @@ impl Render for NewPaneDialog {
                     } else {
                         "▸ More options"
                     })
+                    .when(!self.more && !more_on.is_empty(), |d| {
+                        d.flex().gap_2().child(more_on)
+                    })
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.more = !this.more;
                         cx.notify();
@@ -338,6 +470,7 @@ impl Render for NewPaneDialog {
             .when(self.more && self.account.is_some(), |d| {
                 d.child(label("Launch args")).child(Input::new(&self.args))
             })
+            .when(self.more, |d| self.worktree_option(d, cx))
             .child(
                 div()
                     .text_xs()
@@ -374,18 +507,105 @@ impl Render for NewPaneDialog {
                             .bg(theme.primary)
                             .text_color(theme.primary_foreground)
                             .cursor_pointer()
-                            .child("Start")
+                            .when(!can_start, |d| d.opacity(0.5))
+                            .child(if self.busy {
+                                "Creating worktree…"
+                            } else {
+                                "Start"
+                            })
                             .on_click(cx.listener(|this, _, _, cx| this.start(cx))),
                     ),
             )
     }
 }
 
+impl NewPaneDialog {
+    /// "Work on a new branch (git worktree)" and the branch's name (#162).
+    fn worktree_option(&self, d: Div, cx: &mut Context<Self>) -> Div {
+        let theme = cx.theme().clone();
+        let hint = |text: String| {
+            div()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child(text)
+        };
+        let toggle = div()
+            .id("np-worktree")
+            .flex()
+            .items_center()
+            .gap_3()
+            .cursor_pointer()
+            .child(
+                div()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child("Work on a new branch (git worktree)"),
+                    )
+                    .child(hint(
+                        "A separate checkout, so edits don't collide with other panes in the repo."
+                            .into(),
+                    )),
+            )
+            .child(switch(self.worktree, &theme))
+            .on_click(cx.listener(|this, _, window, cx| {
+                if !this.worktree && this.branch.read(cx).value().trim().is_empty() {
+                    this.branch.update(cx, |s, cx| {
+                        s.set_value(suggest_branch(chrono::Local::now()), window, cx)
+                    });
+                }
+                this.worktree = !this.worktree;
+                this.error = None;
+                // Shown now: its name is next, and Enter there starts.
+                if this.worktree {
+                    window.focus(&this.branch.focus_handle(cx), cx);
+                }
+                cx.notify();
+            }));
+        d.child(toggle).when(self.worktree, |d| {
+            d.child(hint("New branch".into()))
+                .child(Input::new(&self.branch))
+                .child(hint(format!(
+                    "Branches off the folder's current commit, in ~/.wraithgrid/worktrees.{}",
+                    if self.branch_from {
+                        ""
+                    } else {
+                        " New panes in this project start this way until you turn it off."
+                    }
+                )))
+        })
+    }
+}
+
+/// An on/off switch drawn like the Electron app's `.sw`.
+fn switch(on: bool, theme: &gpui_kit::component::Theme) -> impl IntoElement {
+    div()
+        .w(px(30.))
+        .h(px(18.))
+        .flex_shrink_0()
+        .p(px(2.))
+        .rounded_full()
+        .flex()
+        .when(on, |d| d.justify_end())
+        .bg(if on { theme.primary } else { theme.border })
+        .child(div().size(px(14.)).rounded_full().bg(if on {
+            theme.primary_foreground
+        } else {
+            theme.muted_foreground
+        }))
+}
+
 // ---- Command palette -----------------------------------------------------------------------
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum PaletteAction {
-    FocusPane { workspace: String, pane: String },
+    FocusPane {
+        workspace: String,
+        pane: String,
+    },
     Project(String),
     NewPane,
     NewTerminal,
@@ -397,6 +617,10 @@ pub enum PaletteAction {
     Usage,
     Mods,
     Scheduled,
+    /// The focused pane's branch (#162).
+    SwitchBranch,
+    BranchPane,
+    OpenBranch,
 }
 
 pub enum PaletteEvent {
@@ -501,6 +725,43 @@ impl Palette {
             items,
             selected: 0,
             _subscription: sub,
+        }
+    }
+
+    /// The focused pane's git commands, after Show changes (#162). `local`: worktrees are made
+    /// on this computer only.
+    pub fn add_git_commands(&mut self, branch: Option<String>, local: bool) {
+        let at = self
+            .items
+            .iter()
+            .position(|i| i.action == PaletteAction::Changes)
+            .map_or(self.items.len(), |i| i + 1);
+        let mut add = vec![(
+            "Switch branch…",
+            branch.unwrap_or_else(|| "Command".into()),
+            PaletteAction::SwitchBranch,
+        )];
+        if local {
+            add.push((
+                "New pane on a new branch…",
+                "its own folder (git worktree)".into(),
+                PaletteAction::BranchPane,
+            ));
+            add.push((
+                "Open a branch in a new pane…",
+                "Command".into(),
+                PaletteAction::OpenBranch,
+            ));
+        }
+        for (n, (label, detail, action)) in add.into_iter().enumerate() {
+            self.items.insert(
+                at + n,
+                Item {
+                    label: label.into(),
+                    detail,
+                    action,
+                },
+            );
         }
     }
 
@@ -1272,5 +1533,15 @@ mod tests {
         assert!(super::fuzzy_match("Close pane", "close p"));
         assert!(!super::fuzzy_match("shell", "zsh"));
         assert!(super::fuzzy_match("anything", ""));
+    }
+
+    #[test]
+    fn suggests_a_task_branch_from_the_date_and_time() {
+        use chrono::TimeZone;
+        let at = chrono::Utc.with_ymd_and_hms(2026, 11, 5, 9, 42, 0).unwrap();
+        assert_eq!(super::suggest_branch(at), "task-1105-0942");
+        assert!(wraithgrid_git::valid_branch_name(&super::suggest_branch(
+            chrono::Local::now()
+        )));
     }
 }
