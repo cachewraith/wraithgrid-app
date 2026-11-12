@@ -52,29 +52,29 @@ jobs:
       - name: Checksums
         working-directory: dist
         run: sha256sum -- * > SHA256SUMS.txt && cat SHA256SUMS.txt
+      # Releases go to the public cachewraith/wraithgrid (this source repo is private): installed
+      # copies check it for updates, the website links to it, install.sh downloads from it.
+      # RELEASES_TOKEN: fine-grained token, Contents read/write on cachewraith/wraithgrid only.
       - name: Create GitHub release
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
           TAG: ${{ github.ref_name }}
-        # The body is the version's section of docs/WHATS-NEW.md (what the app's About shows),
-        # then GitHub's generated PR list after a marker the app cuts at. No section: generated
-        # notes only.
+          RELEASES_REPO: cachewraith/wraithgrid
+        # The body is the version's section of docs/WHATS-NEW.md (what the app's About shows). No
+        # PR list: it would link to this private repo.
         run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::Set the RELEASES_TOKEN secret (Contents read/write on $RELEASES_REPO)"
+            exit 1
+          fi
           prerelease=()
           if [[ "$TAG" == *-* ]]; then prerelease=(--prerelease); fi
-          notes=(--generate-notes)
-          if bun scripts/release-notes.ts "$TAG" > notes.md; then
-            generated="$(gh api "repos/$GITHUB_REPOSITORY/releases/generate-notes" \
-              -f tag_name="$TAG" --jq .body || true)"
-            {
-              printf '\n<!-- wraithgrid:footer -->\n\n<details><summary>Pull requests and full changelog</summary>\n\n'
-              printf '%s\n\n</details>\n' "$generated"
-            } >> notes.md
-            notes=(--notes-file notes.md)
+          if ! bun scripts/release-notes.ts "$TAG" > notes.md; then
+            printf 'Wraithgrid %s. See **Settings → About** in the app for what changed.\n' "${TAG#v}" > notes.md
           fi
           gh release create "$TAG" dist/* \
-            --repo "$GITHUB_REPOSITORY" \
+            --repo "$RELEASES_REPO" \
+            --target main \
             --title "Wraithgrid ${TAG#v}" \
-            "${notes[@]}" \
-            --verify-tag \
+            --notes-file notes.md \
             "${prerelease[@]}"
