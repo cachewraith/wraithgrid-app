@@ -16,6 +16,8 @@ mod settings;
 mod shell;
 mod terminal;
 mod theme;
+mod theme_editor;
+mod themes_gallery;
 mod usage_view;
 
 use std::sync::Arc;

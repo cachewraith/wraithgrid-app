@@ -71,8 +71,8 @@ pub use prefs::{
     resolve_theme, Accent, TerminalPalette, ThemeName, ThemePreference, ACCENTS, TERMINAL_PALETTES,
 };
 pub use resolve::{
-    all_themes, drawn_theme, eval_css_color, resolve_active_theme, resolve_ui_theme, ResolvedStyle,
-    ResolvedTerminal, ResolvedTheme, Rgba, ThemeSettings, UiColors,
+    all_themes, drawn_theme, eval_css_color, resolve_active_theme, resolve_draft, resolve_ui_theme,
+    ResolvedStyle, ResolvedTerminal, ResolvedTheme, Rgba, ThemeSettings, UiColors,
 };
 pub use store::{
     delete_theme, import_theme, list_themes, save_theme, theme_file_text, themes_root,

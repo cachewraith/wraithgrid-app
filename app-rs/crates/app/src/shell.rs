@@ -559,6 +559,13 @@ impl Shell {
             Ok("new-pane") => self.open_new_pane(window, cx),
             Ok("palette") => self.open_palette(window, cx),
             Ok("settings") => self.open_settings(window, cx),
+            Ok(what @ ("theme-editor" | "themes")) => {
+                self.open_settings(window, cx);
+                if let Some(view) = self.settings_view.clone() {
+                    let editor = what == "theme-editor";
+                    view.update(cx, |v, cx| v.open_theme_tool(editor, window, cx));
+                }
+            }
             Ok("quit") => self.request_close(window, cx),
             Ok("new-project") => self.open_new_project(window, cx),
             Ok("accounts") => self.open_accounts(window, cx),
