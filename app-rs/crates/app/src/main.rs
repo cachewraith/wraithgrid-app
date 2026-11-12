@@ -1,6 +1,9 @@
 //! Wraithgrid on GPUI (#166, ADR 0005): the same app as the Electron one, reading the same
 //! config and account folders and attaching to the same background host, so updating from
 //! the Electron build needs no setup.
+// A GUI-subsystem binary on Windows, as the Electron one (no console window beside the app);
+// debug builds keep the console for logs.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod accounts_view;
 mod changes;

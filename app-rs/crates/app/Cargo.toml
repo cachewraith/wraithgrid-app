@@ -26,5 +26,9 @@ wraithgrid-schedule = { path = "../schedule" }
 wraithgrid-themes = { path = "../themes" }
 wraithgrid-usage = { path = "../usage" }
 
+# Windows icon resource (build.rs); already in the lock file through GPUI's manifest.
+[build-dependencies]
+embed-resource = "=3.0.12"
+
 [target.'cfg(unix)'.dependencies]
 libc = "=0.2.191"

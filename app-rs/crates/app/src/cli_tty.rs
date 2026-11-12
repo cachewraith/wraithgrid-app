@@ -1,6 +1,8 @@
 //! The local terminal for `wraithgrid attach` (H7): raw mode, size and keyboard input.
 
+#[cfg(unix)]
 use std::io::{Read, Write};
+#[cfg(unix)]
 use std::sync::mpsc;
 
 use wraithgrid_core::cli::Tty;

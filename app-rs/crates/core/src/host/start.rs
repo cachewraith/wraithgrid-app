@@ -15,8 +15,22 @@ pub const HOST_BIN: &str = if cfg!(windows) {
     "wraithgrid-host"
 };
 
-/// This build's host binary: `WRAITHGRID_HOST_BIN`, else beside the app's executable (the
-/// packaged layout), else `host-rs/target/release` of a source checkout above it (development).
+/// Where the Windows and macOS packages keep the host, as the Electron ones do (its
+/// `process.resourcesPath`): `resources\` beside `Wraithgrid.exe`, and `Contents/Resources`
+/// of the app bundle. The Linux packages put it beside the binary.
+fn resources_dir(exe_dir: &Path) -> Option<PathBuf> {
+    if cfg!(windows) {
+        Some(exe_dir.join("resources"))
+    } else if cfg!(target_os = "macos") {
+        exe_dir.parent().map(|contents| contents.join("Resources"))
+    } else {
+        None
+    }
+}
+
+/// This build's host binary: `WRAITHGRID_HOST_BIN`, else beside the app's executable or in
+/// its resources (the packaged layouts), else `host-rs/target/release` of a source checkout
+/// above it (development).
 pub fn host_binary(exe: &Path, env: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
     if let Some(bin) = env("WRAITHGRID_HOST_BIN").filter(|b| !b.is_empty()) {
         return Some(PathBuf::from(bin));
@@ -25,6 +39,12 @@ pub fn host_binary(exe: &Path, env: impl Fn(&str) -> Option<String>) -> Option<P
     let beside = dir.join(HOST_BIN);
     if beside.is_file() {
         return Some(beside);
+    }
+    if let Some(packaged) = resources_dir(dir)
+        .map(|r| r.join(HOST_BIN))
+        .filter(|p| p.is_file())
+    {
+        return Some(packaged);
     }
     dir.ancestors()
         .map(|a| {
@@ -215,6 +235,25 @@ mod tests {
         assert_eq!(
             host_binary(&exe, |_| None),
             Some(dir.join("app-rs/target/debug").join(HOST_BIN))
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[cfg(any(windows, target_os = "macos"))]
+    #[test]
+    fn packaged_host_in_resources() {
+        let dir = std::env::temp_dir().join(format!("wg-hostres-{}", std::process::id()));
+        let (exe_dir, res) = if cfg!(windows) {
+            (dir.clone(), dir.join("resources"))
+        } else {
+            (dir.join("Contents/MacOS"), dir.join("Contents/Resources"))
+        };
+        fs::create_dir_all(&exe_dir).unwrap();
+        fs::create_dir_all(&res).unwrap();
+        fs::write(res.join(HOST_BIN), "").unwrap();
+        assert_eq!(
+            host_binary(&exe_dir.join("Wraithgrid"), |_| None),
+            Some(res.join(HOST_BIN))
         );
         let _ = fs::remove_dir_all(dir);
     }

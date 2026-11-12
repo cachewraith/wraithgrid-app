@@ -7,8 +7,9 @@
 set -euo pipefail
 dist=$1 version=$2 out=$3
 shift 3
-sha512() { sha512sum "$dist/$1" | cut -d' ' -f1 | xxd -r -p | base64 -w0; }
-size() { stat -c %s "$dist/$1"; }
+# openssl and wc work alike on Linux, macOS and Windows' bash (no sha512sum -w0, stat -c, xxd).
+sha512() { openssl dgst -sha512 -binary "$dist/$1" | openssl base64 -A; }
+size() { wc -c <"$dist/$1" | tr -d ' '; }
 {
   echo "version: $version"
   echo "files:"
