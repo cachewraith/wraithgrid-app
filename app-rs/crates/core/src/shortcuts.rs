@@ -158,6 +158,9 @@ pub fn code_for_key(key: &str) -> Option<String> {
         if c.is_ascii_digit() {
             return Some(format!("Digit{c}"));
         }
+        if let Some(i) = SHIFTED_DIGITS.find(c) {
+            return Some(format!("Digit{}", (i + 1) % 10));
+        }
         let named = match c {
             '/' | '?' => "Slash",
             '\\' | '|' => "Backslash",
@@ -185,6 +188,18 @@ pub fn code_for_key(key: &str) -> Option<String> {
     Some(named.into())
 }
 
+/// What Shift turns 1…9, 0 into on a US layout.
+const SHIFTED_DIGITS: &str = "!@#$%^&*()";
+
+/// GPUI on Linux reports Ctrl+Shift+/ as `?` without Shift (it keeps Shift only for
+/// letters), so a shifted symbol means Shift was held.
+fn shift_held(p: &Press) -> bool {
+    let mut chars = p.key.chars();
+    p.shift
+        || matches!((chars.next(), chars.next()),
+            (Some(c), None) if SHIFTED_DIGITS.contains(c) || "~_+{}|:\"<>?".contains(c))
+}
+
 /// A key press with its modifiers, as the UI reports it.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Press<'a> {
@@ -204,6 +219,10 @@ pub fn match_shortcut(p: Press, mac: bool, bindings: &[(ShortcutId, Binding)]) -
         return None;
     }
     let code = code_for_key(p.key)?;
+    let p = Press {
+        shift: shift_held(&p),
+        ..p
+    };
     if let Some((id, _)) = bindings
         .iter()
         .find(|(_, b)| b.code == code && b.shift == p.shift && b.alt == p.alt)
@@ -244,9 +263,148 @@ pub fn match_shortcut(p: Press, mac: bool, bindings: &[(ShortcutId, Binding)]) -
     None
 }
 
+/// The binding a key press asks for while Settings records one (`bindingFromEvent`), or
+/// None for a lone modifier or a key that can't be bound.
+pub fn binding_from_press(p: Press, mac: bool) -> Option<Binding> {
+    let m = if mac { p.meta } else { p.ctrl };
+    if !m || (if mac { p.ctrl } else { p.meta }) {
+        return None;
+    }
+    let code = code_for_key(p.key)?;
+    let bindable = code.strip_prefix("Key").is_some_and(|k| k.len() == 1)
+        || code.starts_with("Digit")
+        || (code.starts_with('F') && code[1..].parse::<u8>().is_ok())
+        || [
+            "Slash",
+            "Backslash",
+            "Period",
+            "Comma",
+            "Semicolon",
+            "Quote",
+            "BracketLeft",
+            "BracketRight",
+            "Backquote",
+        ]
+        .contains(&code.as_str());
+    bindable.then(|| Binding {
+        shift: shift_held(&p),
+        alt: p.alt,
+        code,
+    })
+}
+
+/// What a key code shows as: KeyN → N, Digit3 → 3, Slash → /.
+fn key_name(code: &str) -> String {
+    let named = match code {
+        "Slash" => "/",
+        "Backslash" => "\\",
+        "Period" => ".",
+        "Comma" => ",",
+        "Semicolon" => ";",
+        "Quote" => "'",
+        "BracketLeft" => "[",
+        "BracketRight" => "]",
+        "Backquote" => "`",
+        _ => {
+            return code
+                .strip_prefix("Key")
+                .or_else(|| code.strip_prefix("Digit"))
+                .unwrap_or(code)
+                .to_string()
+        }
+    };
+    named.into()
+}
+
+/// The keys of a chord, one per key cap: `mod`, `shift`, `alt` become Ctrl/Shift/Alt, or
+/// ⌘/⇧/⌥ on macOS; anything else stays as it is.
+pub fn chord_keys(keys: &[&str], mac: bool) -> Vec<String> {
+    keys.iter()
+        .map(|k| {
+            match (*k, mac) {
+                ("mod", false) => "Ctrl",
+                ("shift", false) => "Shift",
+                ("alt", false) => "Alt",
+                ("mod", true) => "⌘",
+                ("shift", true) => "⇧",
+                ("alt", true) => "⌥",
+                (k, _) => k,
+            }
+            .to_string()
+        })
+        .collect()
+}
+
+/// The keys of a binding, one per key cap: ["Ctrl", "Shift", "N"] or ["⌘", "⇧", "N"].
+pub fn binding_keys(b: &Binding, mac: bool) -> Vec<String> {
+    let name = key_name(&b.code);
+    let mut keys = vec!["mod"];
+    if b.shift {
+        keys.push("shift");
+    }
+    if b.alt {
+        keys.push("alt");
+    }
+    keys.push(&name);
+    chord_keys(&keys, mac)
+}
+
+/// How a binding is written: "Ctrl+Shift+N", or "⌘⇧N" on macOS.
+pub fn binding_hint(b: &Binding, mac: bool) -> String {
+    binding_keys(b, mac).join(if mac { "" } else { "+" })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shifted_symbols_mean_shift() {
+        let b = bindings(&[]);
+        // GPUI on Linux: Ctrl+Shift+/ arrives as `?`, Ctrl+Shift+3 as `#`, both without Shift.
+        assert_eq!(
+            match_shortcut(press("?", false, false), false, &b),
+            Some(Action::Shortcut(ShortcutId::Shortcuts))
+        );
+        assert_eq!(
+            match_shortcut(press("#", false, false), false, &b),
+            Some(Action::Workspace(2))
+        );
+        // Ctrl+Shift+- (`_`) is claude's undo, not zoom out.
+        assert_eq!(match_shortcut(press("_", false, false), false, &b), None);
+    }
+
+    #[test]
+    fn recording_and_keys() {
+        let rec = |key, shift, alt| binding_from_press(press(key, shift, alt), false);
+        assert_eq!(
+            rec("t", false, true),
+            Some(Binding {
+                shift: false,
+                alt: true,
+                code: "KeyT".into()
+            })
+        );
+        let slash = rec("?", false, false).unwrap();
+        assert!(slash.shift && slash.code == "Slash");
+        // Arrows, Minus and lone modifiers can't be bound; neither can a chord without Ctrl.
+        assert_eq!(rec("left", true, false), None);
+        assert_eq!(rec("-", true, false), None);
+        assert_eq!(rec("shift", true, false), None);
+        let plain = Press {
+            key: "n",
+            shift: true,
+            ..Press::default()
+        };
+        assert_eq!(binding_from_press(plain, false), None);
+        let b = default_binding(ShortcutId::Shortcuts);
+        assert_eq!(binding_keys(&b, false), ["Ctrl", "Shift", "/"]);
+        assert_eq!(binding_hint(&b, true), "⌘⇧/");
+        assert_eq!(
+            binding_hint(&default_binding(ShortcutId::NewPane), false),
+            "Ctrl+Shift+N"
+        );
+    }
 
     fn press(key: &str, shift: bool, alt: bool) -> Press<'_> {
         Press {
