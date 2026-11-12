@@ -16,6 +16,7 @@ mod runtime;
 mod scheduled_view;
 mod settings;
 mod shell;
+mod team_section;
 mod terminal;
 mod theme;
 mod theme_editor;
