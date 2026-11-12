@@ -29,3 +29,8 @@ wraithgrid-usage = { path = "../usage" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "=0.2.191"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# The tray icon (StatusNotifierItem over D-Bus), as Electron's Linux tray.
+ksni = { version = "=0.3.7", default-features = false, features = ["blocking", "async-io"] }
+png = "=0.17.16"

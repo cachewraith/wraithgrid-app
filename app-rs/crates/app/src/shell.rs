@@ -49,6 +49,7 @@ use crate::usage_view::{UsageView, UsageViewEvent};
 mod git_button;
 mod machines;
 mod team;
+mod tray;
 
 pub use machines::{probe_text, remote_host};
 
@@ -64,6 +65,11 @@ pub struct Shell {
     chats: HashMap<String, Entity<ChatView>>,
     /// Each chat's status, for its header dot.
     chat_states: HashMap<String, wraithgrid_chat::ChatStatus>,
+    /// Shown while the window is closed but the app keeps running (`keepInTray`).
+    tray: Option<crate::tray::Tray>,
+    _tray_tasks: Vec<Task<()>>,
+    /// A window was attached once: later ones are reopens from the tray.
+    opened: bool,
     /// Each machine's host (H5), by machine id, with the ssh host it was made for.
     remotes: HashMap<String, (String, Arc<wraithgrid_remote::RemoteHost>)>,
     /// Scheduled runs started by this launch (`live_key`); others left running are stale.
@@ -133,6 +139,9 @@ impl Shell {
             terminals: HashMap::new(),
             chats: HashMap::new(),
             chat_states: HashMap::new(),
+            tray: None,
+            _tray_tasks: vec![],
+            opened: false,
             remotes: HashMap::new(),
             live_runs: Default::default(),
             as_terminal: Vec::new(),
@@ -389,8 +398,21 @@ impl Shell {
         let views_dir = wraithgrid_core::paths::current_user_data_dir().join("chats");
         let pane_id = pane.id.clone();
         let view = cx.new(|cx| ChatView::new(pane_id.clone(), setup, views_dir, window, cx));
+        self.subscribe_chat(&view, pane_id, window, cx);
+        self.chats.insert(pane.id.clone(), view.clone());
+        view
+    }
+
+    /// The chat view's events, handled in this window (again after the window reopens).
+    fn subscribe_chat(
+        &mut self,
+        view: &Entity<ChatView>,
+        pane_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         cx.subscribe_in(
-            &view,
+            view,
             window,
             move |this, _, event: &ChatViewEvent, window, cx| match event {
                 ChatViewEvent::Submitted { text } => {
@@ -465,8 +487,6 @@ impl Shell {
             },
         )
         .detach();
-        self.chats.insert(pane.id.clone(), view.clone());
-        view
     }
 
     fn select_workspace(&mut self, id: String, cx: &mut Context<Self>) {
@@ -1886,7 +1906,7 @@ impl Shell {
                     c.settings.on_window_close
                 };
                 match mode {
-                    CloseMode::Keep => this.quit(true, cx),
+                    CloseMode::Keep => this.keep_in_tray(window, cx),
                     CloseMode::Stop => this.quit(false, cx),
                     CloseMode::Ask => {
                         let dialog = cx.new(|_| QuitDialog::new(live));
@@ -1904,7 +1924,11 @@ impl Shell {
                                             }
                                         });
                                     }
-                                    this.quit(keep, cx);
+                                    if keep {
+                                        this.keep_in_tray(window, cx);
+                                    } else {
+                                        this.quit(false, cx);
+                                    }
                                 }
                                 QuitEvent::Cancel => this.close_modal(window, cx),
                             },
@@ -1921,6 +1945,8 @@ impl Shell {
 
     /// Saves, then leaves the agents to the host (`keep`) or stops them all, and quits.
     fn quit(&mut self, keep: bool, cx: &mut Context<Self>) {
+        self.tray = None;
+        self._tray_tasks.clear();
         self.flush();
         self.flush_chats(cx);
         let host = self.host.clone();
