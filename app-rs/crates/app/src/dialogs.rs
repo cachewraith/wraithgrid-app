@@ -397,6 +397,7 @@ pub enum PaletteAction {
     Usage,
     Mods,
     Scheduled,
+    Shortcuts,
 }
 
 pub enum PaletteEvent {
@@ -473,6 +474,7 @@ impl Palette {
             ("Usage", PaletteAction::Usage),
             ("Mods", PaletteAction::Mods),
             ("Scheduled chats", PaletteAction::Scheduled),
+            ("Keyboard shortcuts", PaletteAction::Shortcuts),
         ] {
             items.push(Item {
                 label: label.into(),

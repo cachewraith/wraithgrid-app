@@ -9,8 +9,13 @@ use gpui_kit::*;
 use wraithgrid_core::agent_cli::AgentCli;
 use wraithgrid_core::args::{format_args, parse_args};
 use wraithgrid_core::config::{Config, Settings};
-use wraithgrid_core::shortcuts::{bindings, label as shortcut_label, Binding};
+use wraithgrid_core::shortcuts::{
+    binding_from_press, binding_keys, binding_problem, bindings, default_binding, format_binding,
+    label as shortcut_label, Press,
+};
 use wraithgrid_core::types::*;
+
+use crate::about_view::{AboutEvent, AboutView};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
@@ -20,6 +25,7 @@ enum Tab {
     Agents,
     Advanced,
     Keyboard,
+    About,
 }
 
 const TABS: &[(Tab, &str)] = &[
@@ -29,6 +35,7 @@ const TABS: &[(Tab, &str)] = &[
     (Tab::Agents, "Agents & CLIs"),
     (Tab::Advanced, "Advanced"),
     (Tab::Keyboard, "Keyboard"),
+    (Tab::About, "About"),
 ];
 
 pub enum SettingsEvent {
@@ -58,6 +65,10 @@ pub struct SettingsView {
     accounts: Vec<(String, String)>,
     inputs: Vec<(Field, Entity<InputState>)>,
     _subscriptions: Vec<Subscription>,
+    /// The shortcut whose next chord is being recorded (no key is an app shortcut meanwhile).
+    recording: Option<ShortcutId>,
+    shortcut_error: Option<(ShortcutId, String)>,
+    about: Option<Entity<AboutView>>,
 }
 
 impl SettingsView {
@@ -125,7 +136,35 @@ impl SettingsView {
                 .collect(),
             inputs,
             _subscriptions: subs,
+            recording: None,
+            shortcut_error: None,
+            about: None,
         }
+    }
+
+    /// The About tab's body; its "check on launch" switch is a setting like any other.
+    pub fn set_about(&mut self, about: Entity<AboutView>, cx: &mut Context<Self>) {
+        let sub = cx.subscribe(&about, |this, _, event: &AboutEvent, cx| match event {
+            AboutEvent::CheckOnLaunch(on) => {
+                let on = *on;
+                this.update(cx, |s| s.check_updates_on_launch = on);
+            }
+        });
+        self._subscriptions.push(sub);
+        self.about = Some(about);
+    }
+
+    /// Opens a tab by its label ("About").
+    pub fn show_tab(&mut self, label: &str, cx: &mut Context<Self>) {
+        if let Some((tab, _)) = TABS.iter().find(|(_, l)| *l == label) {
+            self.tab = *tab;
+            cx.notify();
+        }
+    }
+
+    /// While a chord is being recorded the window must not act on app shortcuts.
+    pub fn recording(&self) -> bool {
+        self.recording.is_some()
     }
 
     fn input(&self, field: Field) -> Entity<InputState> {
@@ -464,74 +503,133 @@ impl SettingsView {
         .into_any_element()]
     }
 
+    /// One rebindable shortcut per line: its keys, Change (records the next chord) and Reset.
     fn keyboard(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mac = cfg!(target_os = "macos");
-        let rows = bindings(&self.settings.shortcuts)
+        let theme = cx.theme().clone();
+        let small = |id: String, label: &'static str, enabled: bool| {
+            div()
+                .id(SharedString::from(id))
+                .px_2()
+                .py(px(2.))
+                .rounded_md()
+                .border_1()
+                .border_color(theme.border)
+                .text_xs()
+                .when(enabled, |d| {
+                    d.cursor_pointer().hover(|d| d.bg(theme.secondary))
+                })
+                .when(!enabled, |d| d.opacity(0.45))
+                .child(label)
+        };
+        let items: Vec<AnyElement> = bindings(&self.settings.shortcuts)
             .into_iter()
             .map(|(id, b)| {
+                let recording = self.recording == Some(id);
+                let is_default = !self.settings.shortcuts.iter().any(|(s, _)| *s == id);
+                let error = self
+                    .shortcut_error
+                    .as_ref()
+                    .filter(|(e, _)| *e == id)
+                    .map(|(_, m)| m.clone());
+                let keys = if recording {
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child("Press the new keys… (Esc cancels)")
+                } else {
+                    crate::shortcuts_sheet::key_caps(&binding_keys(&b, mac), cx)
+                };
                 div()
                     .flex()
-                    .justify_between()
+                    .flex_col()
                     .py_1()
-                    .child(shortcut_label(id))
                     .child(
                         div()
-                            .font_family(crate::terminal::mono(cx))
-                            .text_color(cx.theme().muted_foreground)
-                            .child(chord(&b, mac)),
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(div().flex_1().text_sm().child(shortcut_label(id)))
+                            .child(keys)
+                            .child(
+                                small(
+                                    format!("sc-change-{}", id.as_str()),
+                                    if recording { "Cancel" } else { "Change" },
+                                    true,
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, window, cx| {
+                                        this.shortcut_error = None;
+                                        this.recording = if recording { None } else { Some(id) };
+                                        window.focus(&this.focus, cx);
+                                        cx.notify();
+                                    },
+                                )),
+                            )
+                            .child(
+                                small(format!("sc-reset-{}", id.as_str()), "Reset", !is_default)
+                                    .when(!is_default, |d| {
+                                        d.on_click(cx.listener(move |this, _, _, cx| {
+                                            this.shortcut_error = None;
+                                            this.store_shortcut(id, None, cx);
+                                        }))
+                                    }),
+                            ),
                     )
-            });
-        let fixed = [
-            (
-                "Move focus between panes",
-                if mac {
-                    "⌘ ⌥ Arrows"
-                } else {
-                    "Ctrl Alt Arrows"
-                },
-            ),
-            (
-                "Switch to project 1–9",
-                if mac {
-                    "⌘ ⇧ 1–9"
-                } else {
-                    "Ctrl Shift 1–9"
-                },
-            ),
-            (
-                "Zoom the app in / out / reset",
-                if mac {
-                    "⌘ = / ⌘ - / ⌘ 0"
-                } else {
-                    "Ctrl = / Ctrl - / Ctrl 0"
-                },
-            ),
-            (
-                "Copy / paste in a terminal",
-                if mac {
-                    "⌘ C / ⌘ V"
-                } else {
-                    "Ctrl Shift C / Ctrl Shift V"
-                },
-            ),
-        ]
-        .into_iter()
-        .map(|(what, keys)| {
-            div().flex().justify_between().py_1().child(what).child(
-                div()
-                    .font_family(crate::terminal::mono(cx))
-                    .text_color(cx.theme().muted_foreground)
-                    .child(keys),
-            )
-        });
+                    .when_some(error, |d, e| {
+                        d.child(div().pt_1().text_xs().text_color(theme.danger).child(e))
+                    })
+                    .into_any_element()
+            })
+            .collect();
         vec![row(
             "Keyboard shortcuts",
-            "App shortcuts always take Shift or Alt, so plain chords stay with the terminal.",
+            if mac {
+                "Pick another chord for an app shortcut. It needs Shift or Alt with ⌘, so the terminal keeps its own keys."
+            } else {
+                "Pick another chord for an app shortcut. It needs Shift or Alt with Ctrl, so the terminal keeps its own keys."
+            },
             cx,
         )
-        .children(rows)
-        .children(fixed)
+        .children(items)
         .into_any_element()]
+    }
+
+    /// While recording, the next chord is the binding; it never reaches the app or a pane.
+    fn record(&mut self, id: ShortcutId, e: &KeyDownEvent, cx: &mut Context<Self>) {
+        if e.keystroke.key == "escape" {
+            self.recording = None;
+            return cx.notify();
+        }
+        let m = e.keystroke.modifiers;
+        let press = Press {
+            key: &e.keystroke.key,
+            ctrl: m.control,
+            shift: m.shift,
+            alt: m.alt,
+            meta: m.platform,
+        };
+        let Some(b) = binding_from_press(press, cfg!(target_os = "macos")) else {
+            return;
+        };
+        self.recording = None;
+        let problem = binding_problem(&b, id, &bindings(&self.settings.shortcuts));
+        self.shortcut_error = problem.clone().map(|p| (id, p));
+        if problem.is_none() {
+            let value = (b != default_binding(id)).then(|| format_binding(&b));
+            self.store_shortcut(id, value, cx);
+        }
+        cx.notify();
+    }
+
+    /// Saves a binding in `settings.shortcuts`, or drops it (None) to use the default.
+    fn store_shortcut(&mut self, id: ShortcutId, value: Option<String>, cx: &mut Context<Self>) {
+        self.update(cx, |s| {
+            s.shortcuts.retain(|(i, _)| *i != id);
+            if let Some(v) = value {
+                s.shortcuts.push((id, v));
+            }
+        });
     }
 }
 
@@ -553,6 +651,11 @@ impl Render for SettingsView {
             Tab::Agents => self.agents(cx),
             Tab::Advanced => self.advanced(cx),
             Tab::Keyboard => self.keyboard(cx),
+            Tab::About => self
+                .about
+                .iter()
+                .map(|a| a.clone().into_any_element())
+                .collect(),
         };
         let tabs = TABS.iter().map(|(tab, label)| {
             let tab = *tab;
@@ -580,6 +683,12 @@ impl Render for SettingsView {
             .size_full()
             .flex()
             .bg(theme.background)
+            .capture_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
+                if let Some(id) = this.recording {
+                    cx.stop_propagation();
+                    this.record(id, e, cx);
+                }
+            }))
             .on_key_down(cx.listener(|_, e: &KeyDownEvent, _, cx| {
                 if e.keystroke.key == "escape" {
                     cx.emit(SettingsEvent::Close);
@@ -621,13 +730,14 @@ impl Render for SettingsView {
                 div()
                     .id("settings-body")
                     .flex_1()
+                    .min_w(px(0.))
                     .h_full()
                     .overflow_y_scroll()
                     .p_6()
                     .flex()
                     .flex_col()
                     .gap_5()
-                    .max_w(px(820.))
+                    .max_w(px(if self.tab == Tab::About { 1080. } else { 820. }))
                     .child(
                         div()
                             .text_xl()
@@ -740,24 +850,6 @@ fn stepper(
             chip(SharedString::from(format!("{key}-up")), "+", false, cx)
                 .on_click(cx.listener(move |this, _, _, cx| this.update(cx, up))),
         )
-}
-
-fn chord(b: &Binding, mac: bool) -> String {
-    let key = match b.code.as_str() {
-        "Slash" => "/".to_string(),
-        code => code
-            .trim_start_matches("Key")
-            .trim_start_matches("Digit")
-            .to_string(),
-    };
-    let mut parts = vec![if mac { "⌘" } else { "Ctrl" }];
-    if b.shift {
-        parts.push(if mac { "⇧" } else { "Shift" });
-    }
-    if b.alt {
-        parts.push(if mac { "⌥" } else { "Alt" });
-    }
-    format!("{} {key}", parts.join(" "))
 }
 
 fn effort_label(e: ChatEffort) -> &'static str {

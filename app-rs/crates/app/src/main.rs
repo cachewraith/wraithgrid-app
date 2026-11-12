@@ -2,6 +2,7 @@
 //! config and account folders and attaching to the same background host, so updating from
 //! the Electron build needs no setup.
 
+mod about_view;
 mod accounts_view;
 mod changes;
 mod chat_view;
@@ -14,6 +15,7 @@ mod runtime;
 mod scheduled_view;
 mod settings;
 mod shell;
+mod shortcuts_sheet;
 mod terminal;
 mod theme;
 mod usage_view;
@@ -48,6 +50,7 @@ fn main() {
     });
     if blocked.is_none() {
         resolve_path_in_background();
+        about_view::record_launch();
     }
     let mut store = ConfigStore::new(config_file_path(&user_data));
     // Beside a running Electron app nothing is read: a corrupt file would be moved aside.

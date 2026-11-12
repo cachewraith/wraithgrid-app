@@ -39,6 +39,7 @@ use crate::mods_view::{ModsView, ModsViewEvent};
 use crate::runtime::{spawn_env, Router};
 use crate::scheduled_view::{ScheduledEvent, ScheduledView};
 use crate::settings::{SettingsEvent, SettingsView};
+use crate::shortcuts_sheet::{ShortcutsSheet, ShortcutsSheetEvent};
 use crate::terminal::{
     PaneResizer, PaneStarter, PaneWriter, TermCore, TerminalEvent, TerminalStyle, TerminalView,
 };
@@ -514,6 +515,7 @@ impl Shell {
                         PaletteAction::Usage => return this.open_usage(window, cx),
                         PaletteAction::Mods => return this.open_mods(window, cx),
                         PaletteAction::Scheduled => return this.open_scheduled(window, cx),
+                        PaletteAction::Shortcuts => return this.toggle_shortcuts(window, cx),
                         PaletteAction::ClosePane => {
                             if let Some(id) = this.focused.clone() {
                                 this.close_pane(id, cx);
@@ -572,6 +574,14 @@ impl Shell {
             Ok("usage") => self.open_usage(window, cx),
             Ok("mods") => self.open_mods(window, cx),
             Ok("scheduled") => self.open_scheduled(window, cx),
+            Ok("shortcuts") => self.toggle_shortcuts(window, cx),
+            Ok(tab @ ("about" | "keyboard")) => {
+                self.open_settings(window, cx);
+                let label = if tab == "about" { "About" } else { "Keyboard" };
+                if let Some(view) = self.settings_view.clone() {
+                    view.update(cx, |s, cx| s.show_tab(label, cx));
+                }
+            }
             Ok("continue") => {
                 if let Some(id) = self.config().active().panes.first().map(|p| p.id.clone()) {
                     self.ask_continue_as(id, window, cx);
@@ -644,8 +654,27 @@ impl Shell {
             },
         )
         .detach();
+        let on_launch = config.settings.check_updates_on_launch;
+        crate::about_view::attach(&view, cx.entity().downgrade(), on_launch, cx);
         window.focus(&view.focus_handle(cx), cx);
         self.settings_view = Some(view);
+        cx.notify();
+    }
+
+    /// The shortcuts sheet; its own shortcut closes it again.
+    fn toggle_shortcuts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.modal, Some(Modal::Shortcuts(_))) {
+            return self.close_modal(window, cx);
+        }
+        let sheet = cx.new(|cx| ShortcutsSheet::new(&self.config().settings.shortcuts, cx));
+        cx.subscribe_in(
+            &sheet,
+            window,
+            |this, _, _: &ShortcutsSheetEvent, window, cx| this.close_modal(window, cx),
+        )
+        .detach();
+        window.focus(&sheet.focus_handle(cx), cx);
+        self.modal = Some(Modal::Shortcuts(sheet));
         cx.notify();
     }
 
@@ -1163,25 +1192,39 @@ impl Shell {
     /// Asks GitHub for a newer release once at startup (Settings → check on launch).
     pub fn check_updates_on_launch(&mut self, cx: &mut Context<Self>) {
         if self.blocked.is_none() && self.config().settings.check_updates_on_launch {
-            self.check_updates(cx);
+            self.check_updates(true, cx);
         }
     }
 
-    fn check_updates(&mut self, cx: &mut Context<Self>) {
+    /// `launch`: a newer release is also announced through the OS, once per version.
+    pub(crate) fn check_updates(&mut self, launch: bool, cx: &mut Context<Self>) {
         self.update = UpdateState::Checking;
         self._update_task = Some(cx.spawn(async move |this, cx| {
-            let result = cx
+            let (result, notice) = cx
                 .background_spawn(async move {
                     let ua = format!("Wraithgrid/{}", crate::runtime::APP_VERSION);
-                    update::check(crate::runtime::APP_VERSION, &|url| update::fetch(url, &ua))
+                    let result =
+                        update::check(crate::runtime::APP_VERSION, &|url| update::fetch(url, &ua));
+                    let notice = crate::about_view::after_check(&result, launch);
+                    (result, notice)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.update = match result {
                     update::CheckResult::Available { latest, .. } => UpdateState::Available(latest),
-                    update::CheckResult::Current { .. } => UpdateState::Idle,
+                    update::CheckResult::Current { .. } => {
+                        UpdateState::Current(wraithgrid_usage::now_ms())
+                    }
                     update::CheckResult::Error { error, .. } => UpdateState::Error(error),
                 };
+                if let Some((title, body)) = notice {
+                    cx.show_system_notification(SystemNotification {
+                        tag: "update".into(),
+                        title: title.into(),
+                        body: body.into(),
+                        actions: vec![],
+                    });
+                }
                 cx.notify();
             });
         }));
@@ -1190,18 +1233,22 @@ impl Shell {
 
     /// The title bar's update button: download and verify, then restart into it. Builds that
     /// can't update themselves (macOS, from source) open the release page instead.
-    fn run_update(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn run_update(&mut self, cx: &mut Context<Self>) {
         let exe = std::env::current_exe().unwrap_or_default();
         let kind = update::package_kind(&exe, |k| std::env::var(k).ok());
         match std::mem::replace(&mut self.update, UpdateState::Idle) {
-            UpdateState::Available(release) if kind == update::PackageKind::Manual => {
+            UpdateState::Available(release) | UpdateState::Failed { release, .. }
+                if kind == update::PackageKind::Manual =>
+            {
                 cx.open_url(&release.url);
                 self.update = UpdateState::Available(release);
             }
-            UpdateState::Available(release) => {
+            UpdateState::Available(release) | UpdateState::Failed { release, .. } => {
+                let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 self.update = UpdateState::Downloading {
                     version: release.version.clone(),
                     percent: 0,
+                    cancel: cancel.clone(),
                 };
                 let (tx, mut rx) = futures::channel::mpsc::unbounded::<u8>();
                 let dir = std::env::temp_dir().join("wraithgrid-update");
@@ -1217,7 +1264,7 @@ impl Shell {
                             &mut |p| {
                                 let _ = tx.unbounded_send(p);
                             },
-                            &|| false,
+                            &|| cancel.load(std::sync::atomic::Ordering::Relaxed),
                         )
                     }
                 });
@@ -1240,7 +1287,8 @@ impl Shell {
                                 file,
                                 kind,
                             },
-                            Err(e) => UpdateState::Error(e),
+                            Err(e) if e == "cancelled" => UpdateState::Available(release),
+                            Err(error) => UpdateState::Failed { release, error },
                         };
                         cx.notify();
                     });
@@ -1294,8 +1342,8 @@ impl Shell {
                         .await;
                     let _ = this.update(cx, |this, cx| match result {
                         Ok(()) => cx.quit(),
-                        Err(e) => {
-                            this.update = UpdateState::Error(e);
+                        Err(error) => {
+                            this.update = UpdateState::Failed { release, error };
                             cx.notify();
                         }
                     });
@@ -1310,15 +1358,29 @@ impl Shell {
     fn update_button(&self) -> Option<(String, bool)> {
         match &self.update {
             UpdateState::Available(r) => Some((format!("Update to v{}", r.version), true)),
-            UpdateState::Downloading { version, percent } => {
-                Some((format!("Downloading v{version}… {percent}%"), false))
-            }
+            UpdateState::Downloading {
+                version, percent, ..
+            } => Some((format!("Downloading v{version}… {percent}%"), false)),
             UpdateState::Ready { release, .. } => {
                 Some((format!("Restart to update to v{}", release.version), true))
             }
             UpdateState::Installing(v) => Some((format!("Installing v{v}…"), false)),
-            UpdateState::Error(e) => Some((format!("Update failed: {e}"), false)),
-            UpdateState::Idle | UpdateState::Checking => None,
+            UpdateState::Error(e) | UpdateState::Failed { error: e, .. } => {
+                Some((format!("Update failed: {e}"), false))
+            }
+            UpdateState::Idle | UpdateState::Checking | UpdateState::Current(_) => None,
+        }
+    }
+
+    /// Where the updater is, for About.
+    pub(crate) fn update_state(&self) -> &UpdateState {
+        &self.update
+    }
+
+    /// Stops a download; the release stays available.
+    pub(crate) fn cancel_update(&self) {
+        if let UpdateState::Downloading { cancel, .. } = &self.update {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
         }
     }
 
@@ -2510,7 +2572,9 @@ impl Shell {
 
     /// App shortcuts, before the focused terminal sees the key.
     fn shortcut(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if self.blocked.is_some() {
+        // Settings → Keyboard is recording a new chord: the key is the binding.
+        let recording = (self.settings_view.as_ref()).is_some_and(|v| v.read(cx).recording());
+        if self.blocked.is_some() || recording {
             return;
         }
         let k = &event.keystroke;
@@ -2547,8 +2611,7 @@ impl Shell {
                 cx.notify();
             }
             Action::Shortcut(ShortcutId::Diff) => self.toggle_changes(window, cx),
-            // The shortcuts sheet comes with its screen.
-            Action::Shortcut(_) => {}
+            Action::Shortcut(ShortcutId::Shortcuts) => self.toggle_shortcuts(window, cx),
             Action::Focus(dir) => self.move_focus(dir, window, cx),
             Action::Workspace(i) => {
                 if let Some(id) = self.config().workspaces.get(i).map(|w| w.id.clone()) {
@@ -2796,6 +2859,7 @@ impl Render for Shell {
             Modal::NewProject(d) => d.clone().into_any_element(),
             Modal::Project(d) => d.clone().into_any_element(),
             Modal::Choice(d) => d.clone().into_any_element(),
+            Modal::Shortcuts(s) => s.clone().into_any_element(),
         });
         div()
             .id("shell")
@@ -3028,16 +3092,21 @@ enum Modal {
     NewProject(Entity<NewProjectDialog>),
     Project(Entity<ProjectDialog>),
     Choice(Entity<ChoiceDialog>),
+    Shortcuts(Entity<ShortcutsSheet>),
 }
 
-/// Where the in-app update is (`update-install.ts` phases).
-enum UpdateState {
+/// Where the in-app update is (`update-install.ts` phases); About shows it.
+#[derive(Clone)]
+pub(crate) enum UpdateState {
     Idle,
     Checking,
+    /// Up to date, checked at this time (ms).
+    Current(i64),
     Available(update::ReleaseInfo),
     Downloading {
         version: String,
         percent: u8,
+        cancel: Arc<std::sync::atomic::AtomicBool>,
     },
     Ready {
         release: update::ReleaseInfo,
@@ -3045,7 +3114,13 @@ enum UpdateState {
         kind: update::PackageKind,
     },
     Installing(String),
+    /// The check failed.
     Error(String),
+    /// Downloading or installing failed; Retry starts over.
+    Failed {
+        release: update::ReleaseInfo,
+        error: String,
+    },
 }
 
 // ---- Scheduled chats (#77) -----------------------------------------------------------------
