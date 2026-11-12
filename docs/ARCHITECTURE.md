@@ -82,4 +82,4 @@ git status/diff/worktreeAdd, chat start/send/approve/interrupt/setModel/stop/loa
 
 ## CI/CD
 - `build.yml`: push/PR → typecheck, lint, unit on Ubuntu 22.04, Windows and macOS; e2e on Linux (xvfb); release → package (Linux, Windows NSIS, macOS dmg/zip arm64+x64).
-- `release.yml`: `v*.*.*` tag → verify tag = package.json → build → SHA256SUMS → `gh release create`.
+- `release.yml`: `v*.*.*` tag → verify tag = package.json → build → SHA256SUMS → `gh release create` on the public `cachewraith/wraithgrid` (with `RELEASES_TOKEN`; this repo is the private `wraithgrid-app`).

@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-11-12
+
+- [release] Source repo is now the private `cachewraith/wraithgrid-app`; release.yml publishes to the public `cachewraith/wraithgrid` (old name: installed copies, install.sh and the website keep working) with the `RELEASES_TOKEN` secret, no PR-list footer (it would link to the private repo) (files: .github/workflows/release.yml, package.json, scripts/release-notes.ts, README.md, docs/{ARCHITECTURE,CONTEXT}.md)
+
 ## 2026-11-05
 
 - [release] v1.26.0: Git button in the top bar and a branch per pane with worktrees (#162), select → Reply quotes (#164), preview pasted images before sending (#163) (files: package.json, CHANGELOG.md, docs/{WHATS-NEW,CONTEXT}.md)

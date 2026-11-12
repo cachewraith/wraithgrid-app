@@ -510,10 +510,13 @@ runner.
 
 <br />
 
-Pushing a version tag publishes a GitHub release (`.github/workflows/release.yml`). The
-workflow checks that the tag matches `package.json`, runs the tests, builds the Linux packages
-(on Ubuntu 22.04), the Windows installer and the macOS apps (arm64 and x64), then attaches all of them and a
-`SHA256SUMS.txt` to the release.
+Pushing a version tag publishes a GitHub release (`.github/workflows/release.yml`) on the public
+[cachewraith/wraithgrid](https://github.com/cachewraith/wraithgrid) (this source repo,
+`cachewraith/wraithgrid-app`, is private). The workflow checks that the tag matches
+`package.json`, runs the tests, builds the Linux packages (on Ubuntu 22.04), the Windows
+installer and the macOS apps (arm64 and x64), then attaches all of them and a `SHA256SUMS.txt`
+to the release. It needs the `RELEASES_TOKEN` secret: a fine-grained token with Contents
+read/write on `cachewraith/wraithgrid` only.
 
 ```sh
 bun pm version patch -m "chore: release %s"   # or minor / major; bumps package.json, commits, tags v1.0.1

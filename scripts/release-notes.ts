@@ -1,6 +1,6 @@
 // Prints a version's section of docs/WHATS-NEW.md as a GitHub release body, so the release
 // page says what the app's About says. Exits 1 when the file has no section for it (the
-// workflow then falls back to GitHub's generated notes). Run with bun:
+// workflow then falls back to a one-line note). Run with bun:
 //   bun scripts/release-notes.ts v1.12.0 > notes.md
 import fs from 'node:fs'
 import path from 'node:path'
