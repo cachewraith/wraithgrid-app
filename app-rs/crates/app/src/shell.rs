@@ -56,6 +56,8 @@ pub struct Shell {
     chats: HashMap<String, Entity<ChatView>>,
     /// Each chat's status, for its header dot.
     chat_states: HashMap<String, wraithgrid_chat::ChatStatus>,
+    /// Scheduled runs started by this launch (`live_key`); others left running are stale.
+    live_runs: std::collections::HashSet<String>,
     /// Chat panes opened as terminals this session (until the chat view is ported).
     as_terminal: Vec<String>,
     focused: Option<String>,
@@ -118,6 +120,7 @@ impl Shell {
             terminals: HashMap::new(),
             chats: HashMap::new(),
             chat_states: HashMap::new(),
+            live_runs: Default::default(),
             as_terminal: Vec::new(),
             focused: None,
             zoomed: None,
@@ -340,10 +343,16 @@ impl Shell {
         pane_env.insert("WRAITHGRID_PANE".into(), pane.id.clone());
         let setup = ChatSetup {
             cli: cli.as_str().into(),
+            // Settings' path for the CLI, as `resolveSpawn` picks it; else found on PATH.
             program: if cli == AgentCli::Claude {
                 crate::mods_glue::claude_binary(&config, &env)
             } else {
-                None
+                config
+                    .settings
+                    .cli_paths
+                    .iter()
+                    .find(|(c, p)| *c == cli && !p.trim().is_empty())
+                    .map(|(_, p)| wraithgrid_core::paths::resolve_user_path(p.trim(), &home))
             },
             cwd: wraithgrid_core::paths::resolve_user_path(&pane.cwd, &home),
             env: pane_env,
@@ -431,7 +440,7 @@ impl Shell {
                 ChatViewEvent::OpenUsage => this.open_usage(window, cx),
                 ChatViewEvent::Usage(e) => this.record_usage(&pane_id, e, cx),
                 ChatViewEvent::TurnEnded { error } => {
-                    this.settle_job_runs(&pane_id, error.is_some(), cx);
+                    this.settle_runs(cx);
                     this.maybe_switch(&pane_id, error.clone(), window, cx)
                 }
             },
@@ -1030,11 +1039,11 @@ impl Shell {
         self.usage_view = None;
         self.mods_view = None;
         let config = self.config().clone();
-        let view = cx.new(|cx| ScheduledView::new(config, window, cx));
+        let view = cx.new(|cx| ScheduledView::new(config, cx));
         cx.subscribe_in(
             &view,
             window,
-            |this, view, event: &ScheduledEvent, window, cx| {
+            |this, _, event: &ScheduledEvent, window, cx| {
                 let tz = chrono::Local;
                 let now = wraithgrid_usage::now_ms();
                 match event {
@@ -1042,11 +1051,16 @@ impl Shell {
                         this.scheduled_view = None;
                         this.close_modal(window, cx);
                     }
-                    ScheduledEvent::Save(job) => {
+                    ScheduledEvent::Save(job, folder) => {
                         let limits = this.job_limits(&job.account_id);
-                        let mut saved = true;
                         this.update(cx, |c| {
-                            saved = wraithgrid_schedule::save_job(
+                            if let Some(folder) = folder {
+                                if let Some(w) = c.workspaces.iter_mut().find(|w| w.id == job.ws_id)
+                                {
+                                    w.folder = folder.clone();
+                                }
+                            }
+                            wraithgrid_schedule::save_job(
                                 &tz,
                                 &mut c.schedules,
                                 (**job).clone(),
@@ -1054,12 +1068,11 @@ impl Shell {
                                 limits.as_ref(),
                             );
                         });
-                        if !saved {
-                            let max = wraithgrid_schedule::SCHEDULES_MAX;
-                            view.update(cx, |v, cx| {
-                                v.fail(format!("At most {max} scheduled chats."), cx)
-                            });
-                        }
+                    }
+                    ScheduledEvent::OpenChat(ws, pane) => {
+                        this.scheduled_view = None;
+                        this.reveal_chat(ws, pane, cx);
+                        this.close_modal(window, cx);
                     }
                     ScheduledEvent::Toggle(id, on) => {
                         if let Some(job) = this
@@ -1929,18 +1942,144 @@ impl Shell {
     }
 
     /// Closes a pane: its process stops and it leaves the project.
+    /// `closePane`: a conversation is kept in the project's History; an unused pane or a
+    /// shell is not.
     fn close_pane(&mut self, pane_id: String, cx: &mut Context<Self>) {
-        self.host.kill(&pane_id);
-        self.router.unregister(&pane_id);
-        self.terminals.remove(&pane_id);
+        let archive = self
+            .config()
+            .workspaces
+            .iter()
+            .flat_map(|w| &w.panes)
+            .find(|p| p.id == pane_id)
+            .is_some_and(|p| !p.shell && p.has_conversation);
+        self.drop_pane(&pane_id, archive, cx);
+    }
+
+    /// `dropPane`: ends the pane's process (terminal or chat CLI) and removes it; `archive`
+    /// keeps it, with its saved chat view, at the top of the project's History.
+    fn drop_pane(&mut self, pane_id: &str, archive: bool, cx: &mut Context<Self>) {
+        self.host.kill(pane_id);
+        self.router.unregister(pane_id);
+        self.terminals.remove(pane_id);
+        if let Some(chat) = self.chats.remove(pane_id) {
+            chat.update(cx, |c, _| {
+                c.save();
+                c.stop_session();
+            });
+        }
+        let views = wraithgrid_core::paths::current_user_data_dir().join("chats");
+        let mut forget: Vec<String> = vec![];
+        if !archive {
+            forget.push(pane_id.to_string());
+        }
+        let now = wraithgrid_usage::now_ms();
+        let id = pane_id.to_string();
         self.update(cx, |c| {
             for w in &mut c.workspaces {
-                if w.panes.iter().any(|p| p.id == pane_id) {
-                    w.panes.retain(|p| p.id != pane_id);
-                    w.layout = remove_pane(w.layout.as_ref(), &pane_id);
+                let Some(at) = w.panes.iter().position(|p| p.id == id) else {
+                    continue;
+                };
+                let pane = w.panes.remove(at);
+                w.layout = remove_pane(w.layout.as_ref(), &id);
+                if archive {
+                    w.history.insert(
+                        0,
+                        wraithgrid_core::config::ArchivedChat {
+                            pane,
+                            closed_at: now,
+                        },
+                    );
+                    // Past the limit, the oldest entries go, with their saved views.
+                    let max = wraithgrid_core::types::HISTORY_MAX;
+                    forget.extend(
+                        w.history
+                            .drain(max.min(w.history.len())..)
+                            .map(|h| h.pane.id),
+                    );
                 }
             }
         });
+        for id in forget {
+            let _ = wraithgrid_chat::views::delete_view(&views, &id);
+        }
+        if self.focused.as_deref() == Some(pane_id) {
+            self.focused = pane_ids(self.config().active().layout.as_ref())
+                .into_iter()
+                .next();
+        }
+        if self.zoomed.as_deref() == Some(pane_id) {
+            self.zoomed = None;
+        }
+    }
+
+    /// `reopenChat`: a History chat back into its project, same id (its saved view loads and
+    /// its first start resumes); `show` switches to it.
+    fn reopen_chat(
+        &mut self,
+        ws_id: &str,
+        pane_id: &str,
+        show: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let c = self.config();
+        let open = c
+            .workspaces
+            .iter()
+            .any(|w| w.panes.iter().any(|p| p.id == pane_id));
+        let Some(ws) = c.workspaces.iter().find(|w| w.id == ws_id) else {
+            return false;
+        };
+        if open || !ws.history.iter().any(|h| h.pane.id == pane_id) {
+            return false;
+        }
+        let (ws, id) = (ws_id.to_string(), pane_id.to_string());
+        self.update(cx, |c| {
+            if let Some(w) = c.workspaces.iter_mut().find(|w| w.id == ws) {
+                let ids: Vec<String> = w.panes.iter().map(|p| p.id.clone()).collect();
+                let shown = shown_layout(w.layout.as_ref(), &ids);
+                if let Some(at) = w.history.iter().position(|h| h.pane.id == id) {
+                    let mut pane = w.history.remove(at).pane;
+                    pane.resume = true;
+                    w.panes.push(pane);
+                    w.layout = Some(place_new_pane(
+                        shown.as_ref(),
+                        &id,
+                        None,
+                        None,
+                        SplitDir::Row,
+                    ));
+                }
+            }
+            if show {
+                c.active_workspace = ws.clone();
+            }
+        });
+        if show {
+            self.focused = Some(pane_id.to_string());
+            self.zoomed = None;
+        }
+        true
+    }
+
+    /// Shows a chat: switches to its project and focuses it, reopening it from History.
+    fn reveal_chat(&mut self, ws_id: &str, pane_id: &str, cx: &mut Context<Self>) {
+        let open = self
+            .config()
+            .workspaces
+            .iter()
+            .find(|w| w.panes.iter().any(|p| p.id == pane_id))
+            .map(|w| w.id.clone());
+        match open {
+            Some(ws) => {
+                self.select_workspace(ws, cx);
+                self.focused = Some(pane_id.to_string());
+                self.zoomed = None;
+            }
+            None => {
+                self.reopen_chat(ws_id, pane_id, true, cx);
+            }
+        }
+        cx.notify();
     }
 
     /// The pane's terminal view, made the first time it is shown: it reattaches to the
@@ -3090,6 +3229,7 @@ impl Shell {
     }
 
     fn tick_schedules(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.settle_runs(cx);
         let now = wraithgrid_usage::now_ms();
         let tz = chrono::Local;
         for job in self.config().schedules.clone() {
@@ -3099,6 +3239,7 @@ impl Shell {
                 wraithgrid_schedule::Tick::Update(j) => self.replace_job(j, cx),
                 wraithgrid_schedule::Tick::Run => {
                     let run = self.start_job(&job, now, window, cx);
+                    self.mark_live(&job.id, &run);
                     let change = wraithgrid_schedule::after_tick_run(
                         &tz,
                         job.clone(),
@@ -3118,6 +3259,7 @@ impl Shell {
         };
         let now = wraithgrid_usage::now_ms();
         let run = self.start_job(&job, now, window, cx);
+        self.mark_live(&job.id, &run);
         let change = wraithgrid_schedule::after_run_now(job, run);
         self.apply_job_change(id, change, cx);
     }
@@ -3192,12 +3334,15 @@ impl Shell {
         };
         match wraithgrid_schedule::start_run(job, &ctx) {
             wraithgrid_schedule::RunStart::Record(run) => run,
-            wraithgrid_schedule::RunStart::Chat { pane_id } => match c
-                .workspaces
-                .iter()
-                .flat_map(|w| &w.panes)
-                .find(|p| p.id == pane_id)
-                .cloned()
+            wraithgrid_schedule::RunStart::Chat { pane_id } => match {
+                self.reopen_chat(&job.ws_id, &pane_id, false, cx);
+                self.config().clone()
+            }
+            .workspaces
+            .iter()
+            .flat_map(|w| &w.panes)
+            .find(|p| p.id == pane_id)
+            .cloned()
             {
                 Some(pane) => {
                     let chat = self.chat(&pane, window, cx);
@@ -3211,18 +3356,31 @@ impl Shell {
                 let Some(ws) = c.workspaces.iter().find(|w| w.id == job.ws_id) else {
                     return wraithgrid_schedule::chat_gone(now);
                 };
-                if ws.folder.is_empty() {
+                let Some(folder) = ws.project_folder() else {
                     return wraithgrid_schedule::no_folder(now);
-                }
+                };
                 let id = self.add_pane(
                     Some(ws.id.clone()),
                     Some(account_id),
-                    ws.folder.clone(),
+                    folder,
                     vec![],
                     false,
                     true,
                     cx,
                 );
+                let (model, effort, mode) = (job.model.clone(), job.effort, job.chat_mode);
+                self.update(cx, |c| {
+                    if let Some(p) = c
+                        .workspaces
+                        .iter_mut()
+                        .flat_map(|w| &mut w.panes)
+                        .find(|p| p.id == id)
+                    {
+                        p.model = model;
+                        p.effort = effort;
+                        p.chat_mode = mode;
+                    }
+                });
                 if let Some(pane) = self
                     .config()
                     .workspaces
@@ -3240,26 +3398,81 @@ impl Shell {
         }
     }
 
-    /// A chat's turn ended: a scheduled run in it is done (or failed).
-    fn settle_job_runs(&mut self, pane_id: &str, failed: bool, cx: &mut Context<Self>) {
-        let running = self.config().schedules.iter().any(|j| {
-            j.runs
-                .first()
-                .is_some_and(|r| r.result == "running" && r.pane_id.as_deref() == Some(pane_id))
-        });
-        if !running {
-            return;
+    fn mark_live(&mut self, job_id: &str, run: &wraithgrid_core::config::ScheduleRun) {
+        if run.result == "running" {
+            self.live_runs
+                .insert(wraithgrid_schedule::live_key(job_id, run.at));
         }
-        let pane = pane_id.to_string();
-        self.update(cx, |c| {
-            for j in c.schedules.iter_mut() {
-                if let Some(r) = j.runs.first_mut().filter(|r| {
-                    r.result == "running" && r.pane_id.as_deref() == Some(pane.as_str())
-                }) {
-                    r.result = if failed { "failed" } else { "done" }.into();
+    }
+
+    /// `settleRun` for every job: a running run whose chat went quiet is done; one whose chat
+    /// is gone, exited, or left over from an earlier launch ends as the crate says.
+    fn settle_runs(&mut self, cx: &mut Context<Self>) {
+        let now = wraithgrid_usage::now_ms();
+        let mut ends = vec![];
+        for job in &self.config().schedules {
+            let Some(run) = job.runs.first().filter(|r| r.result == "running") else {
+                continue;
+            };
+            let Some(pane_id) = run.pane_id.as_deref() else {
+                continue;
+            };
+            let c = self.config();
+            let open = c
+                .workspaces
+                .iter()
+                .find_map(|w| w.panes.iter().find(|p| p.id == pane_id).map(|p| (w, p)));
+            let pane = match open {
+                Some(_) => wraithgrid_schedule::PaneWhere::Open,
+                None if c
+                    .workspaces
+                    .iter()
+                    .any(|w| w.history.iter().any(|h| h.pane.id == pane_id)) =>
+                {
+                    wraithgrid_schedule::PaneWhere::History
                 }
+                None => wraithgrid_schedule::PaneWhere::Gone,
+            };
+            let chat = self.chats.get(pane_id).map(|v| v.read(cx));
+            let quiet = open.is_some_and(|(_, p)| p.has_conversation)
+                && chat.is_some_and(|v| !v.is_busy())
+                && self
+                    .chat_states
+                    .get(pane_id)
+                    .is_none_or(|s| *s == wraithgrid_chat::ChatStatus::Idle);
+            let view = wraithgrid_schedule::RunView {
+                live: self
+                    .live_runs
+                    .contains(&wraithgrid_schedule::live_key(&job.id, run.at)),
+                pane,
+                exited: false,
+                quiet,
+                now,
+            };
+            if let Some(end) = wraithgrid_schedule::settle_of(run, &view) {
+                let place = open.map(|(w, _)| w.name.clone());
+                ends.push((job.id.clone(), run.at, end, place, job.prompt.clone()));
             }
-        });
+        }
+        for (id, at, end, place, prompt) in ends {
+            self.live_runs
+                .remove(&wraithgrid_schedule::live_key(&id, at));
+            if let Some(job) = self.config().schedules.iter().find(|j| j.id == id).cloned() {
+                self.replace_job(wraithgrid_schedule::settled(job, &end), cx);
+            }
+            if let (true, Some(place)) = (end.notify, place) {
+                cx.show_system_notification(SystemNotification {
+                    tag: format!("run-{id}").into(),
+                    title: format!("Scheduled run done · {place}")
+                        .chars()
+                        .take(120)
+                        .collect::<String>()
+                        .into(),
+                    body: prompt.chars().take(200).collect::<String>().into(),
+                    actions: vec![],
+                });
+            }
+        }
     }
 }
 

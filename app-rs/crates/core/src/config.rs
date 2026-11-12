@@ -1385,6 +1385,32 @@ pub fn parse_config(raw: &Value, migrate: bool) -> Result<Config, String> {
     parse_current(&v).map(sanitize_config)
 }
 
+/// A pane folder under `~/.wraithgrid/worktrees/` (`isWorktreeCwd`): a branch of its own.
+pub fn is_worktree_cwd(cwd: &str) -> bool {
+    cwd.replace('\\', "/")
+        .starts_with("~/.wraithgrid/worktrees/")
+}
+
+impl Workspace {
+    /// Where the project's new chats start (`projectFolder`): its folder, else the folder of
+    /// its newest open chat, else of its most recently closed one (worktrees never count).
+    pub fn project_folder(&self) -> Option<String> {
+        if !self.folder.is_empty() {
+            return Some(self.folder.clone());
+        }
+        let usable = |p: &Pane| !p.shell && !p.cwd.is_empty() && !is_worktree_cwd(&p.cwd);
+        if let Some(p) = self.panes.iter().rev().find(|p| usable(p)) {
+            return Some(p.cwd.clone());
+        }
+        let mut closed: Vec<&ArchivedChat> = self.history.iter().collect();
+        closed.sort_by_key(|h| std::cmp::Reverse(h.closed_at));
+        closed
+            .into_iter()
+            .find(|h| usable(&h.pane))
+            .map(|h| h.pane.cwd.clone())
+    }
+}
+
 impl Config {
     /// The file's text: `JSON.stringify(config, null, 2) + '\n'`.
     pub fn to_json(&self) -> String {
