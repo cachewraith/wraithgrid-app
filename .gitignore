@@ -5,6 +5,7 @@ node_modules/
 out/
 dist/
 host-rs/target/
+gpui-spike/target/
 squashfs-root/
 *.tsbuildinfo
 
@@ -50,3 +51,4 @@ desktop.ini
 
 # Crash dumps from local test runs
 core.[0-9]*
+app-rs/target/

@@ -1,0 +1,17 @@
+[package]
+name = "wraithgrid-usage"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# Local calendar days (usage buckets) and the poll answer's ISO times. Same version as gpui-spike.
+chrono = { version = "=0.4.45", default-features = false, features = ["clock", "std"] }
+# The live-limits poll; blocking, so the caller runs it off the UI thread. rustls (ring) +
+# webpki roots, no gzip: the answer is a few hundred bytes.
+ureq = { version = "=3.5.1", default-features = false, features = ["rustls"] }

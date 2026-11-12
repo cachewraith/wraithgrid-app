@@ -1,0 +1,19 @@
+[package]
+name = "wraithgrid-themes"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# Community themes: blocking https with rustls (no gzip; theme files are small).
+ureq = { version = "=3.5.1", default-features = false, features = ["rustls"] }
+# themeSlug's NFKD step (`Café` → `cafe`), as String.prototype.normalize does.
+unicode-normalization = "=0.1.26"
+
+[dev-dependencies]
+tempfile = "=3.27.0"
