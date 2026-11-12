@@ -10,6 +10,7 @@ mod dialogs;
 mod keys;
 mod mods_glue;
 mod mods_view;
+mod project_view;
 mod runtime;
 mod scheduled_view;
 mod settings;

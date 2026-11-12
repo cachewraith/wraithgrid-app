@@ -36,6 +36,7 @@ use crate::dialogs::{
     Palette, PaletteAction, PaletteEvent, ProjectDialog, ProjectEvent, QuitDialog, QuitEvent,
 };
 use crate::mods_view::{ModsView, ModsViewEvent};
+use crate::project_view::{ProjectPageEvent, ProjectView};
 use crate::runtime::{spawn_env, Router};
 use crate::scheduled_view::{ScheduledEvent, ScheduledView};
 use crate::settings::{SettingsEvent, SettingsView};
@@ -83,6 +84,7 @@ pub struct Shell {
     usage_view: Option<Entity<UsageView>>,
     mods_view: Option<Entity<ModsView>>,
     scheduled_view: Option<Entity<ScheduledView>>,
+    project_view: Option<Entity<ProjectView>>,
     update: UpdateState,
     /// The Changes panel beside the panes, for one folder.
     changes: Option<Entity<ChangesPanel>>,
@@ -139,6 +141,7 @@ impl Shell {
             usage_view: None,
             mods_view: None,
             scheduled_view: None,
+            project_view: None,
             update: UpdateState::Idle,
             changes: None,
             git_heads: HashMap::new(),
@@ -191,6 +194,7 @@ impl Shell {
                     if this.states != states {
                         this.state_changes(&states, cx);
                         this.states = states;
+                        this.refresh_project_view(cx);
                         cx.notify();
                     }
                 })
@@ -293,6 +297,7 @@ impl Shell {
             let config = self.store.get().clone();
             view.update(cx, |v, cx| v.set_config(config, cx));
         }
+        self.refresh_project_view(cx);
         cx.notify();
         if self.store.is_dirty() {
             self.save_task = Some(cx.spawn(async move |this, cx| {
@@ -581,6 +586,10 @@ impl Shell {
             Ok("usage") => self.open_usage(window, cx),
             Ok("mods") => self.open_mods(window, cx),
             Ok("scheduled") => self.open_scheduled(window, cx),
+            Ok("projectpage") => {
+                let ws = self.config().active_workspace.clone();
+                self.open_project_page(ws, window, cx)
+            }
             Ok("continue") => {
                 if let Some(id) = self.config().active().panes.first().map(|p| p.id.clone()) {
                     self.ask_continue_as(id, window, cx);
@@ -602,6 +611,7 @@ impl Shell {
         self.usage_view = None;
         self.mods_view = None;
         self.scheduled_view = None;
+        self.project_view = None;
         let config = self.config().clone();
         let view = cx.new(|cx| SettingsView::new(&config, window, cx));
         cx.subscribe_in(
@@ -740,6 +750,7 @@ impl Shell {
         self.usage_view = None;
         self.mods_view = None;
         self.scheduled_view = None;
+        self.project_view = None;
         let config = self.config().clone();
         let view = cx.new(|cx| AccountsView::new(&config, window, cx));
         cx.subscribe_in(
@@ -985,6 +996,7 @@ impl Shell {
         self.accounts_view = None;
         self.mods_view = None;
         self.scheduled_view = None;
+        self.project_view = None;
         let data = self.usage.lock().unwrap().get();
         let config = self.config().clone();
         let view = cx.new(|cx| UsageView::new(data, config, cx));
@@ -1012,6 +1024,7 @@ impl Shell {
         self.accounts_view = None;
         self.usage_view = None;
         self.scheduled_view = None;
+        self.project_view = None;
         let config = self.config().clone();
         let view = cx.new(|cx| ModsView::new(config, cx));
         cx.subscribe_in(
@@ -1038,6 +1051,7 @@ impl Shell {
         self.accounts_view = None;
         self.usage_view = None;
         self.mods_view = None;
+        self.project_view = None;
         let config = self.config().clone();
         let view = cx.new(|cx| ScheduledView::new(config, cx));
         cx.subscribe_in(
@@ -1105,6 +1119,105 @@ impl Shell {
         window.focus(&view.focus_handle(cx), cx);
         self.scheduled_view = Some(view);
         cx.notify();
+    }
+
+    /// A pane's status as Electron's `PaneStatus` names it.
+    fn pane_status(&self, pane_id: &str) -> Option<&'static str> {
+        use wraithgrid_chat::ChatStatus;
+        match self.chat_states.get(pane_id) {
+            Some(ChatStatus::Running) => Some("running"),
+            Some(ChatStatus::Background) => Some("background"),
+            Some(ChatStatus::Approval) => Some("approval"),
+            Some(ChatStatus::Idle) => Some("idle"),
+            None => self.states.get(pane_id).map(|s| match s.as_str() {
+                "running" => "running",
+                "blocked" => "approval",
+                "exited" => "exited",
+                _ => "idle",
+            }),
+        }
+    }
+
+    fn pane_statuses(&self) -> HashMap<String, &'static str> {
+        self.config()
+            .workspaces
+            .iter()
+            .flat_map(|w| &w.panes)
+            .filter_map(|p| self.pane_status(&p.id).map(|s| (p.id.clone(), s)))
+            .collect()
+    }
+
+    fn refresh_project_view(&mut self, cx: &mut Context<Self>) {
+        if let Some(view) = self.project_view.clone() {
+            let (config, statuses) = (self.store.get().clone(), self.pane_statuses());
+            view.update(cx, |v, cx| v.set_data(config, statuses, cx));
+        }
+    }
+
+    /// `openProject`: switches to the project and shows its page (open chats and History).
+    fn open_project_page(&mut self, ws_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.blocked.is_some() {
+            return;
+        }
+        self.settings_view = None;
+        self.accounts_view = None;
+        self.usage_view = None;
+        self.mods_view = None;
+        self.scheduled_view = None;
+        self.select_workspace(ws_id.clone(), cx);
+        let (config, statuses) = (self.config().clone(), self.pane_statuses());
+        let view = cx.new(|cx| ProjectView::new(config, ws_id, statuses, window, cx));
+        cx.subscribe_in(
+            &view,
+            window,
+            |this, _, event: &ProjectPageEvent, window, cx| match event {
+                ProjectPageEvent::Close => {
+                    this.project_view = None;
+                    this.close_modal(window, cx);
+                }
+                ProjectPageEvent::Reveal(pane) => {
+                    this.project_view = None;
+                    let ws = this.config().active_workspace.clone();
+                    this.reveal_chat(&ws, pane, cx);
+                    this.close_modal(window, cx);
+                }
+                ProjectPageEvent::Reopen(ws, pane) => {
+                    this.project_view = None;
+                    this.reopen_chat(ws, pane, true, cx);
+                    this.close_modal(window, cx);
+                }
+                ProjectPageEvent::Delete(ws, pane) => this.delete_chat(ws, pane, cx),
+                ProjectPageEvent::NewChat => {
+                    this.project_view = None;
+                    this.open_new_pane(window, cx);
+                }
+            },
+        )
+        .detach();
+        window.focus(&view.focus_handle(cx), cx);
+        self.project_view = Some(view);
+        cx.notify();
+    }
+
+    /// `deleteChat`: an open chat is stopped and not archived; a History one is removed. Its
+    /// saved view goes either way; the CLI's own session files stay.
+    fn delete_chat(&mut self, ws_id: &str, pane_id: &str, cx: &mut Context<Self>) {
+        let open = self
+            .config()
+            .workspaces
+            .iter()
+            .any(|w| w.panes.iter().any(|p| p.id == pane_id));
+        if open {
+            return self.drop_pane(pane_id, false, cx);
+        }
+        let (ws, id) = (ws_id.to_string(), pane_id.to_string());
+        self.update(cx, |c| {
+            if let Some(w) = c.workspaces.iter_mut().find(|w| w.id == ws) {
+                w.history.retain(|h| h.pane.id != id);
+            }
+        });
+        let views = wraithgrid_core::paths::current_user_data_dir().join("chats");
+        let _ = wraithgrid_chat::views::delete_view(&views, pane_id);
     }
 
     /// Shows or hides the Changes panel for the focused pane's folder (else the project's).
@@ -2323,7 +2436,9 @@ impl Shell {
                         move |this, _, window, cx| this.open_project(id.clone(), window, cx)
                     }),
                 )
-                .on_click(cx.listener(move |this, _, _, cx| this.select_workspace(id.clone(), cx)))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.open_project_page(id.clone(), window, cx)
+                }))
         });
         let accounts = c.accounts.iter().map(|a| {
             let color = parse_hex(&a.color).unwrap_or(theme.primary);
@@ -2478,6 +2593,9 @@ impl Shell {
             return view.clone().into_any_element();
         }
         if let Some(view) = &self.scheduled_view {
+            return view.clone().into_any_element();
+        }
+        if let Some(view) = &self.project_view {
             return view.clone().into_any_element();
         }
         if let Some(message) = &self.blocked {
