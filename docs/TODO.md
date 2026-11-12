@@ -1,6 +1,8 @@
 # TODO
 
 ## Now
+- #166 rewrite (app-rs/, on main, unreleased), left: click-test the Scheduled screen (save, toggle, run now), Reply quotes, send later, cross-CLI handoff, chat history screen, teams, wire `crates/remote` into the window (ssh machines, H5), web preview pane (Wry), worktree panes/branch picker (#162), tray, theme editor + community themes gallery, About/release notes, keyboard rebinding UI, accessibility pass; Windows (NSIS) and macOS (dmg/zip) packaging; run the packaging CI and a real Electron→GPUI update on a test machine before any release
+- #166 GPUI spike (feat/gpui-spike-20261112, ADR 0005): run the CI binaries on Windows and macOS arm64/x64 (`--cmd yes --bench 15`, IME, paste, preview); by hand on Linux: IME (fcitx5/ibus), Wayland screenshot paste, selection + copy, a real X11 session; pick the Wayland preview workaround (XWayland vs own window); then go/no-go and phase 1 workspace
 - #162 Git button + worktree panes shipped on feat/git-topbar-worktrees-20261105: try with real repos (big checkouts, hooks); later (own issue): per-project setup after a worktree is made (copy `.env`, `bun install`), dev-server port clashes across worktrees
 - #164 Reply quotes shipped on feat/reply-quote-20261105: try with real claude/codex/agy answers (long tables, nested lists); terminal (xterm) selection → Reply is a later issue
 - Live usage (feat/live-usage-20261102): macOS keeps claude's token in the Keychain, so nothing is polled there yet; codex accounts still update per turn (could poll `account/rateLimits/read` on open chats)

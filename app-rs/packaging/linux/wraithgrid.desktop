@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Wraithgrid
+Exec=/opt/Wraithgrid/wraithgrid %U
+Terminal=false
+Type=Application
+Icon=wraithgrid
+StartupWMClass=wraithgrid
+Comment=Run several claude CLI sessions in one window, each with its own account (CLAUDE_CONFIG_DIR) and project folder.
+Categories=Development;

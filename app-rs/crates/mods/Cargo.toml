@@ -1,0 +1,24 @@
+[package]
+name = "wraithgrid-mods"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# claudemod.com and raw.githubusercontent.com, blocking; rustls, as the sibling crates use it.
+ureq = { version = "=3.5.1", default-features = false, features = ["rustls"] }
+# WHATWG URL parsing, as `new URL()` in the TS: what counts as a plain https page.
+url = "=2.5.8"
+
+[target.'cfg(windows)'.dependencies]
+# Directory links without privileges, as Node's `fs.symlink(..., 'junction')`.
+junction = "=2.1.0"
+# A Windows hard link (the file fallback) is recognised by file identity.
+same-file = "=1.0.6"
+
+[dev-dependencies]
+tempfile = "=3.27.0"
