@@ -302,6 +302,8 @@ impl ChatView {
             _ => {}
         }
         let before = (self.thread.session_id.clone(), self.thread.status());
+        // Follow the answer only from the bottom: reading earlier output must stay possible.
+        let follow = self.at_bottom();
         self.thread.update(e, now_ms());
         if self.thread.session_id != before.0 {
             if let Some(id) = self.thread.session_id.clone() {
@@ -311,7 +313,9 @@ impl ChatView {
         if self.thread.status() != before.1 {
             cx.emit(ChatViewEvent::Status(self.thread.status()));
         }
-        self.scroll.scroll_to_bottom();
+        if follow {
+            self.scroll.scroll_to_bottom();
+        }
         self.schedule_save(cx);
         cx.notify();
     }
@@ -1096,6 +1100,7 @@ impl Render for ChatView {
         }
         let busy = self.thread.busy;
         let elapsed = self.thread.turn_started_at.map(|t| (now_ms() - t) / 1000);
+        let jump = self.jump_button(cx);
         div()
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::viewer_key))
@@ -1105,25 +1110,36 @@ impl Render for ChatView {
             .bg(theme.background)
             .child(
                 div()
-                    .id(SharedString::from(format!("thread-{}", self.pane_id)))
-                    .on_mouse_up(MouseButton::Left, cx.listener(Self::thread_mouse_up))
+                    .relative()
                     .flex_1()
                     .min_h(px(0.))
-                    .overflow_y_scroll()
-                    .track_scroll(&self.scroll)
-                    .p_3()
                     .flex()
                     .flex_col()
-                    .gap_3()
-                    .when(rows.is_empty(), |d| {
-                        d.child(
-                            div()
-                                .text_sm()
-                                .text_color(theme.muted_foreground)
-                                .child("Start the conversation below."),
-                        )
-                    })
-                    .children(rows),
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("thread-{}", self.pane_id)))
+                            .on_mouse_up(MouseButton::Left, cx.listener(Self::thread_mouse_up))
+                            // The jump button shows once the reader leaves the bottom.
+                            .on_scroll(cx.listener(|_, _, _, cx| cx.notify()))
+                            .flex_1()
+                            .min_h(px(0.))
+                            .overflow_y_scroll()
+                            .track_scroll(&self.scroll)
+                            .p_3()
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .when(rows.is_empty(), |d| {
+                                d.child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(theme.muted_foreground)
+                                        .child("Start the conversation below."),
+                                )
+                            })
+                            .children(rows),
+                    )
+                    .children(jump),
             )
             .when_some(self.error.clone(), |d, e| {
                 d.child(div().px_3().text_sm().text_color(theme.danger).child(e))

@@ -1113,3 +1113,47 @@ impl ChatView {
         )
     }
 }
+
+impl ChatView {
+    /// The thread is scrolled to (near) its end.
+    pub(super) fn at_bottom(&self) -> bool {
+        let max = self.scroll.max_offset().y;
+        max <= px(0.) || -self.scroll.offset().y >= max - px(24.)
+    }
+
+    /// "Scroll to the latest message", over the thread's bottom edge when it isn't there.
+    pub(super) fn jump_button(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.at_bottom() {
+            return None;
+        }
+        let theme = cx.theme();
+        Some(
+            div()
+                .absolute()
+                .right(px(16.))
+                .bottom(px(8.))
+                .child(
+                    div()
+                        .id(SharedString::from(format!("jump-{}", self.pane_id)))
+                        .a11y_button("Scroll to the latest message")
+                        .size(px(28.))
+                        .rounded_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.popover)
+                        .shadow_md()
+                        .cursor_pointer()
+                        .hover(|d| d.bg(theme.secondary))
+                        .child("↓")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.scroll.scroll_to_bottom();
+                            cx.notify();
+                        })),
+                )
+                .into_any_element(),
+        )
+    }
+}

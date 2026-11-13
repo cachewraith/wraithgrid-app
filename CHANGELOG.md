@@ -2,6 +2,7 @@
 
 ## 2026-11-13
 
+- [gpui] Chat follows a streaming answer only from the bottom (it scrolled to the end on every event, so earlier output could not be read during a turn), and a ↓ "Scroll to the latest message" button shows when scrolled up (files: app-rs/crates/app/src/chat_view.rs, chat_view/extras.rs)
 - [gpui] Account chip under a chat (#160, `AccountPicker`): Continue as another account from a picker with a provider rail (count, same chat / new chat / terminal), the chosen provider's accounts current first with their 5-hour use, search across providers grouped, ↑↓ Enter Tab/Shift+Tab Esc; an account not signed in opens sign-in (files: app-rs/crates/app/src/chat_view/accounts.rs, chat_view.rs, shell.rs, shell/later.rs)
 - [gpui] Accounts: Import ~/.claude (an existing config dir as an account where it is, `importAccount`) and "Also delete its config dir" on remove, with Electron's guards (an account's own dir, strictly inside home also after links resolve; shared links taken out first; deleted off the main thread); imported accounts say so (files: app-rs/crates/core/src/accounts.rs, app-rs/crates/app/src/accounts_view.rs, shell.rs)
 - [gpui] Attach files to a chat (`Composer.tsx`): 📎 opens the file chooser, files dropped on the message box attach too; images (small enough) go as images, other files as paths under "Attached files:" with × chips; `WRAITHGRID_ATTACH` (debug) now takes paths like a drop (files: app-rs/crates/app/src/chat_view.rs, chat_view/extras.rs, shell.rs)
