@@ -26,7 +26,9 @@ use wraithgrid_chat::{
 };
 use wraithgrid_chat::{cycle_modes, ChatImage, ChatImageType, ChatMode, ChatModel};
 
+mod accounts;
 mod extras;
+pub use accounts::AccountChoice;
 
 pub use extras::Queued;
 
@@ -76,6 +78,10 @@ pub enum ChatViewEvent {
     /// A queued message: cancelled, or sent now (job id).
     CancelQueued(String),
     SendQueuedNow(String),
+    /// The account chip: carry the chat on as this account.
+    ContinueAs(String),
+    /// The account chip picked an account that is not signed in.
+    SignIn(String),
 }
 
 /// The `/` or `@` menu over the composer: its items and where the word it completes starts.
@@ -128,6 +134,10 @@ pub struct ChatView {
     error: Option<String>,
     menu: Option<Menu>,
     picker: Option<Picker>,
+    /// The account chip's picker (#160), and what it offers.
+    account_picker: Option<accounts::AccountPicker>,
+    account_choices: Vec<AccountChoice>,
+    current_account: Option<String>,
     /// Pasted images waiting to be sent, and their thumbnails.
     images: Vec<(ChatImage, Arc<Image>)>,
     /// Quotes, history, questions, image viewer and send-later state (`extras`).
@@ -168,6 +178,9 @@ impl ChatView {
             error: None,
             menu: None,
             picker: None,
+            account_picker: None,
+            account_choices: Vec::new(),
+            current_account: None,
             images: Vec::new(),
             x: extras::Extras::default(),
             _events: None,
@@ -1119,6 +1132,7 @@ impl Render for ChatView {
             .children(question)
             .children(self.menu_list(cx))
             .children(self.picker_list(cx))
+            .children(self.account_list(cx))
             .children(self.later_panel(cx))
             .children(self.quote_cards(cx))
             .when(!self.images.is_empty(), |d| d.child(self.image_row(cx)))
@@ -1435,6 +1449,7 @@ impl ChatView {
 
     /// Model, effort and mode chips under the thread; each opens its picker.
     fn choices_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let account = self.account_chip(cx);
         let theme = cx.theme().clone();
         let chip = |id: &'static str, label: String, which: Picker| {
             div()
@@ -1454,6 +1469,7 @@ impl ChatView {
                 .when(self.picker == Some(which), |d| d.bg(theme.secondary))
                 .child(label)
                 .on_click(cx.listener(move |this, _, _, cx| {
+                    this.account_picker = None;
                     this.picker = if this.picker == Some(which) {
                         None
                     } else {
@@ -1482,6 +1498,7 @@ impl ChatView {
             .pt_1()
             .flex()
             .gap_1()
+            .children(account)
             .child(chip("pick-model", model, Picker::Model))
             .child(chip("pick-effort", effort, Picker::Effort))
             .child(chip("pick-mode", mode, Picker::Mode))

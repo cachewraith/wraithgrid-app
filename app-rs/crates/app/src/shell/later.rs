@@ -9,7 +9,7 @@ use wraithgrid_usage::format::fmt_until;
 use wraithgrid_usage::model::live_window;
 
 use super::Shell;
-use crate::chat_view::Queued;
+use crate::chat_view::{AccountChoice, Queued};
 
 impl Shell {
     /// `queueMessage`: the text goes to this chat at the time, or when its limit resets.
@@ -105,7 +105,27 @@ impl Shell {
                     fmt_until(at, now),
                 ))
             });
-            view.update(cx, |v, cx| v.set_later(queued, reset, cx));
+            // The account chip (#160): every account, with its 5-hour use.
+            let choices: Vec<AccountChoice> = c
+                .accounts
+                .iter()
+                .map(|a| AccountChoice {
+                    id: a.id.clone(),
+                    cli: a.cli.as_str().to_string(),
+                    name: a.name.clone(),
+                    session_pct: self
+                        .limits
+                        .get(&a.id)
+                        .and_then(|l| live_window(l.five_hour, now))
+                        .map(|w| (w.utilization * 100.0).round() as i64),
+                    signed_in: a.signed_in,
+                })
+                .collect();
+            let current = account.map(|a| a.id.clone());
+            view.update(cx, |v, cx| {
+                v.set_later(queued, reset, cx);
+                v.set_accounts(current, choices, cx);
+            });
         }
     }
 }

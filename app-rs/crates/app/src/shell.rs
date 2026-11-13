@@ -546,6 +546,11 @@ impl Shell {
                     this.update(cx, |c| c.schedules.retain(|j| j.id != id));
                 }
                 ChatViewEvent::SendQueuedNow(id) => this.run_job_now(&id.clone(), window, cx),
+                ChatViewEvent::ContinueAs(to) => {
+                    let to = to.clone();
+                    this.continue_as(&pane_id, &to, None, window, cx)
+                }
+                ChatViewEvent::SignIn(id) => this.login(id.clone(), window, cx),
             },
         )
         .detach();
@@ -3502,6 +3507,11 @@ fn auto_title(shell: bool, cwd: &str) -> String {
 pub(crate) fn parse_hex(s: &str) -> Option<Hsla> {
     let hex = s.strip_prefix('#').filter(|h| h.len() == 6)?;
     u32::from_str_radix(hex, 16).ok().map(|v| rgb(v).into())
+}
+
+/// A CLI's mark (`ProviderLogo`), else the name's letter; for views outside the shell.
+pub(crate) fn provider_mark(cli: &str, name: &str, size: f32, cx: &App) -> AnyElement {
+    sidebar::provider_logo(cli, name, size, &sidebar::pal(cx))
 }
 
 fn button(id: impl Into<ElementId>, label: &'static str, cx: &mut Context<Shell>) -> Stateful<Div> {
