@@ -7,7 +7,9 @@ use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wraithgrid_core::ids::new_id;
-use wraithgrid_core::layout::{auto_grid, build_preset, detect_preset, pane_ids, Preset};
+use wraithgrid_core::layout::{
+    auto_grid, build_preset, detect_preset, pane_ids, shown_layout, Preset,
+};
 
 use super::Shell;
 
@@ -78,6 +80,9 @@ impl Shell {
     ) -> (Vec<AnyElement>, Vec<AnyElement>) {
         let theme = cx.theme().clone();
         let ws = self.config().active().clone();
+        // What the grid shows: the saved layout, or an even grid when there is none.
+        let ids: Vec<String> = ws.panes.iter().map(|p| p.id.clone()).collect();
+        let shown_tree = shown_layout(ws.layout.as_ref(), &ids);
         let btn = |id: &'static str| {
             div()
                 .id(id)
@@ -157,7 +162,7 @@ impl Shell {
                     .map(IntoElement::into_any_element),
             );
             // Where the zoomed pane sits in the grid.
-            let shown = pane_ids(ws.layout.as_ref());
+            let shown = pane_ids(shown_tree.as_ref());
             let cells: Vec<String> = if shown.is_empty() {
                 vec![z.id.clone()]
             } else {
@@ -210,7 +215,7 @@ impl Shell {
                     }))
                     .into_any_element(),
             );
-            let empty = ws.layout.is_none();
+            let empty = shown_tree.is_none();
             let n = ws.panes.len();
             left.push(
                 muted(if empty {
@@ -220,7 +225,7 @@ impl Shell {
                 })
                 .into_any_element(),
             );
-            let hidden = n.saturating_sub(pane_ids(ws.layout.as_ref()).len());
+            let hidden = n.saturating_sub(pane_ids(shown_tree.as_ref()).len());
             if hidden > 0 {
                 left.push(
                     btn("top-hidden")
@@ -236,7 +241,7 @@ impl Shell {
                     .map(IntoElement::into_any_element),
             );
             if !empty {
-                let current = detect_preset(ws.layout.as_ref());
+                let current = detect_preset(shown_tree.as_ref());
                 let presets = Preset::ALL.map(|p| {
                     div()
                         .id(SharedString::from(format!("preset-{}", p.slots())))

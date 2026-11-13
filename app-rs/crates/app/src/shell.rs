@@ -50,6 +50,7 @@ mod git_button;
 mod handoff;
 mod later;
 mod machines;
+mod pane_bars;
 mod pane_menu;
 mod preview;
 mod sidebar;
@@ -87,6 +88,9 @@ pub struct Shell {
     live_runs: std::collections::HashSet<String>,
     /// Chat panes opened as terminals this session (until the chat view is ported).
     as_terminal: Vec<String>,
+    /// Panes whose sign-in banner was closed, and those where /login was run.
+    banner_hidden: Vec<String>,
+    login_started: Vec<String>,
     /// The top row's ⋯ menu, open at a point.
     utility_menu: Option<Point<Pixels>>,
     /// The empty layout slot a new pane goes into ("New pane here").
@@ -171,6 +175,8 @@ impl Shell {
             remotes: HashMap::new(),
             live_runs: Default::default(),
             as_terminal: Vec::new(),
+            banner_hidden: vec![],
+            login_started: vec![],
             utility_menu: None,
             pending_slot: None,
             updated_to: None,
@@ -3052,6 +3058,7 @@ impl Shell {
         let chat = pane.view == PaneView::Chat && !self.as_terminal.contains(&pane.id);
         let label = pane_label(&config, pane);
         let id = pane.id.clone();
+        let mut ended_text: Option<String> = None;
         let (body, status, stopped): (AnyElement, String, bool) = if pane.view == PaneView::Preview
         {
             let view = self.preview(pane, window, cx);
@@ -3092,6 +3099,7 @@ impl Shell {
                 self.focused = Some(pane.id.clone());
             }
             let stopped = ended.is_some();
+            ended_text = ended.clone();
             let status = ended.unwrap_or(title);
             (
                 div().size_full().child(view).into_any_element(),
@@ -3102,6 +3110,8 @@ impl Shell {
         let focused = self.focused.as_deref() == Some(pane.id.as_str());
         let close = id.clone();
         let confirm = self.close_confirm(&pane.id, &label, &pane.cwd, cx);
+        let banner = self.login_banner(pane, chat, cx);
+        let exited = self.exited_bar(pane, ended_text.as_deref(), cx);
         let (bounds, key) = (self.pane_bounds.clone(), pane.id.clone());
         div()
             .relative()
@@ -3254,7 +3264,9 @@ impl Shell {
                             })),
                     ),
             )
+            .children(banner)
             .child(div().flex_1().min_h(px(0.)).overflow_hidden().child(body))
+            .children(exited)
             .children(confirm)
             .into_any_element()
     }
