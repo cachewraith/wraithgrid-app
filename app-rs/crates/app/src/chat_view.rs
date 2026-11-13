@@ -131,6 +131,8 @@ pub struct ChatView {
     markdown: HashMap<String, Entity<TextViewState>>,
     views_dir: PathBuf,
     scroll: ScrollHandle,
+    /// Redraws every second while a turn or background work runs (the elapsed times).
+    _tick: Option<Task<()>>,
     error: Option<String>,
     menu: Option<Menu>,
     picker: Option<Picker>,
@@ -175,6 +177,7 @@ impl ChatView {
             markdown: HashMap::new(),
             views_dir,
             scroll,
+            _tick: None,
             error: None,
             menu: None,
             picker: None,
@@ -316,8 +319,32 @@ impl ChatView {
         if follow {
             self.scroll.scroll_to_bottom();
         }
+        self.ensure_tick(cx);
         self.schedule_save(cx);
         cx.notify();
+    }
+
+    fn ensure_tick(&mut self, cx: &mut Context<Self>) {
+        let live = |this: &Self| this.thread.busy || !this.thread.background.is_empty();
+        if !live(self) || self._tick.is_some() {
+            return;
+        }
+        self._tick = Some(cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(1))
+                .await;
+            let go = this.update(cx, |this, cx| {
+                cx.notify();
+                let on = live(this);
+                if !on {
+                    this._tick = None;
+                }
+                on
+            });
+            if !matches!(go, Ok(true)) {
+                break;
+            }
+        }));
     }
 
     /// Debug builds only: types `text` into the composer and sends it, for tests.
@@ -1127,6 +1154,7 @@ impl Render for ChatView {
             .when_some(self.error.clone(), |d, e| {
                 d.child(div().px_3().text_sm().text_color(theme.danger).child(e))
             })
+            .children(self.background_tasks(cx))
             .children(self.queued_rows(cx))
             .children(question)
             .children(self.menu_list(cx))

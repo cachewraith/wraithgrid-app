@@ -1290,3 +1290,91 @@ impl ChatView {
             .into_any_element()
     }
 }
+
+/// `1m 05s`-style elapsed time (`formatDuration`).
+fn format_duration(ms: i64) -> String {
+    let s = (ms.max(0) as f64 / 1000.0).round() as i64;
+    if s < 60 {
+        format!("{s}s")
+    } else {
+        format!("{}m {}s", s / 60, s % 60)
+    }
+}
+
+impl ChatView {
+    /// Work the agent left running after its turn (`BackgroundTasks`): it reports back when done.
+    pub(super) fn background_tasks(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let tasks = &self.thread.background;
+        if tasks.is_empty() {
+            return None;
+        }
+        let theme = cx.theme();
+        let now = wraithgrid_usage::now_ms();
+        Some(
+            div()
+                .id(SharedString::from(format!("bg-{}", self.pane_id)))
+                .role(Role::Status)
+                .aria_label(if tasks.len() == 1 {
+                    "Running in background".to_string()
+                } else {
+                    format!("{} running in background", tasks.len())
+                })
+                .mx_3()
+                .p_2()
+                .rounded_md()
+                .border_1()
+                .border_color(theme.border)
+                .flex()
+                .flex_col()
+                .gap_1()
+                .text_xs()
+                .child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(div().text_color(theme.info).child("◌"))
+                        .child(if tasks.len() == 1 {
+                            "Running in background".to_string()
+                        } else {
+                            format!("{} running in background", tasks.len())
+                        })
+                        .child(
+                            div()
+                                .text_color(theme.muted_foreground)
+                                .child("it reports back when done"),
+                        ),
+                )
+                .children(tasks.iter().map(|t| {
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(div().w(px(12.)).text_color(theme.muted_foreground).child(
+                            match t.kind {
+                                wraithgrid_chat::BackgroundKind::Shell => "$",
+                                wraithgrid_chat::BackgroundKind::Agent => "◇",
+                                wraithgrid_chat::BackgroundKind::Other => "•",
+                            },
+                        ))
+                        .child(div().flex_1().truncate().child(t.label.clone()))
+                        .child(
+                            div()
+                                .text_color(theme.muted_foreground)
+                                .child(format_duration(now - t.since)),
+                        )
+                }))
+                .into_any_element(),
+        )
+    }
+}
+
+#[cfg(test)]
+mod duration_tests {
+    use super::format_duration;
+    use core::prelude::v1::test;
+
+    #[test]
+    fn formats_like_electron() {
+        assert_eq!(format_duration(1_400), "1s");
+        assert_eq!(format_duration(65_000), "1m 5s");
+    }
+}
