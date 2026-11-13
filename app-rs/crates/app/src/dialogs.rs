@@ -13,6 +13,8 @@ use wraithgrid_core::config::Pane;
 use wraithgrid_core::paths::{contract_home, home_dir, resolve_user_path, worktrees_root};
 use wraithgrid_git::{add_worktree, GitCli, WorktreeFrom};
 
+use crate::folder_picker::Picking;
+
 // ---- New pane ------------------------------------------------------------------------------
 
 pub enum NewPaneEvent {
@@ -23,6 +25,8 @@ pub enum NewPaneEvent {
         /// The project's "Work on a new branch" to remember (#162); None from the Git menu.
         worktree_panes: Option<bool>,
     },
+    /// The folder picker's pins changed: save them (`settings.pinnedFolders`).
+    PinFolders(Vec<String>),
     Cancel,
 }
 
@@ -51,6 +55,7 @@ pub struct NewPaneDialog {
     /// Opened from the Git menu for a pane (`branchFrom`): not remembered for the project.
     branch_from: bool,
     busy: bool,
+    picking: Picking,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -168,6 +173,7 @@ impl NewPaneDialog {
             branch: branch_state,
             branch_from: false,
             busy: false,
+            picking: Picking::new(config),
             _subscriptions: subs,
         }
     }
@@ -325,6 +331,9 @@ impl Focusable for NewPaneDialog {
 
 impl Render for NewPaneDialog {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(picker) = self.picking.picker.clone() {
+            return picker.into_any_element();
+        }
         let theme = cx.theme().clone();
         let option = |id: SharedString, selected: bool, cx: &mut Context<Self>| {
             div()
@@ -444,7 +453,21 @@ impl Render for NewPaneDialog {
             .child(label("Account"))
             .child(accounts)
             .child(label("Folder"))
-            .child(Input::new(&self.folder))
+            .child(folder_row(
+                &self.folder,
+                cx.listener(|this, _, window, cx| {
+                    let folder = this.folder.clone();
+                    Picking::open(
+                        &folder,
+                        |d: &mut Self| &mut d.picking,
+                        |pins, cx| cx.emit(NewPaneEvent::PinFolders(pins)),
+                        this,
+                        window,
+                        cx,
+                    )
+                }),
+                cx,
+            ))
             .when(!self.recent.is_empty(), |d| {
                 d.child(div().flex().flex_wrap().gap_1().children(recent))
             })
@@ -516,6 +539,7 @@ impl Render for NewPaneDialog {
                             .on_click(cx.listener(|this, _, _, cx| this.start(cx))),
                     ),
             )
+            .into_any_element()
     }
 }
 
@@ -866,6 +890,34 @@ impl Render for Palette {
     }
 }
 
+/// The folder field and its "Choose…" button (the in-app picker).
+fn folder_row(
+    folder: &Entity<InputState>,
+    on_choose: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    cx: &App,
+) -> Div {
+    let theme = cx.theme();
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .child(div().flex_1().child(Input::new(folder)))
+        .child(
+            div()
+                .id("choose-folder")
+                .px_3()
+                .py_1()
+                .rounded_md()
+                .border_1()
+                .border_color(theme.border)
+                .text_sm()
+                .cursor_pointer()
+                .hover(|d| d.bg(theme.secondary))
+                .child("Choose…")
+                .on_click(on_choose),
+        )
+}
+
 // ---- Quit with agents running --------------------------------------------------------------
 
 pub enum QuitEvent {
@@ -972,6 +1024,8 @@ pub enum NewProjectEvent {
         account: Option<String>,
         start_chat: bool,
     },
+    /// The folder picker's pins changed: save them (`settings.pinnedFolders`).
+    PinFolders(Vec<String>),
     Cancel,
 }
 
@@ -984,6 +1038,7 @@ pub struct NewProjectDialog {
     account: Option<String>,
     start_chat: bool,
     pub error: Option<String>,
+    picking: Picking,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -1031,6 +1086,7 @@ impl NewProjectDialog {
                 .collect(),
             account,
             start_chat: true,
+            picking: Picking::new(config),
             error: None,
             _subscriptions: subs,
         }
@@ -1079,6 +1135,9 @@ impl EventEmitter<NewProjectEvent> for NewProjectDialog {}
 
 impl Render for NewProjectDialog {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(picker) = self.picking.picker.clone() {
+            return picker.into_any_element();
+        }
         let theme = cx.theme().clone();
         let chip = |id: SharedString, on: bool| {
             div()
@@ -1133,7 +1192,21 @@ impl Render for NewProjectDialog {
                     .child("New project"),
             )
             .child(label("Folder"))
-            .child(Input::new(&self.folder))
+            .child(folder_row(
+                &self.folder,
+                cx.listener(|this, _, window, cx| {
+                    let folder = this.folder.clone();
+                    Picking::open(
+                        &folder,
+                        |d: &mut Self| &mut d.picking,
+                        |pins, cx| cx.emit(NewProjectEvent::PinFolders(pins)),
+                        this,
+                        window,
+                        cx,
+                    )
+                }),
+                cx,
+            ))
             .child(label("Name"))
             .child(Input::new(&self.name))
             .when(!suggested.is_empty(), |d| {
@@ -1209,6 +1282,7 @@ impl Render for NewProjectDialog {
                             .on_click(cx.listener(|this, _, _, cx| this.create(cx))),
                     ),
             )
+            .into_any_element()
     }
 }
 

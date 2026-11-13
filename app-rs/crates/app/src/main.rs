@@ -12,6 +12,7 @@ mod changes;
 mod chat_view;
 mod cli_tty;
 mod dialogs;
+mod folder_picker;
 mod keys;
 mod login_dialog;
 mod machines_row;

@@ -560,6 +560,11 @@ impl Shell {
             &dialog,
             window,
             |this, _, event: &NewPaneEvent, window, cx| {
+                if let NewPaneEvent::PinFolders(pins) = event {
+                    let pins = pins.clone();
+                    this.update(cx, |c| c.settings.pinned_folders = pins);
+                    return;
+                }
                 if let NewPaneEvent::Start {
                     account,
                     cwd,
@@ -860,6 +865,10 @@ impl Shell {
                         cx.notify();
                     }),
                 },
+                NewProjectEvent::PinFolders(pins) => {
+                    let pins = pins.clone();
+                    this.update(cx, |c| c.settings.pinned_folders = pins);
+                }
                 NewProjectEvent::Cancel => this.close_modal(window, cx),
             },
         )

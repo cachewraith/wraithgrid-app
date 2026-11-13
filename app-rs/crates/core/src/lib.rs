@@ -7,6 +7,7 @@ pub mod agent_cli;
 pub mod args;
 pub mod cli;
 pub mod config;
+pub mod folders;
 pub mod host;
 pub mod ids;
 pub mod layout;
