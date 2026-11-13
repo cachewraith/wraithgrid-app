@@ -24,6 +24,7 @@ use wraithgrid_core::types::{
 };
 
 use super::{pane_label, Shell, TITLE_BAR};
+use crate::a11y::A11y as _;
 use crate::team_section::team_pane_ids;
 
 /// Below this window width (CSS px, so zoom counts) the sidebar folds to its rail.
@@ -1030,6 +1031,7 @@ impl Shell {
             let group = SharedString::from(id);
             div()
                 .id(id)
+                .a11y_toggle(label, on)
                 .group(group.clone())
                 .h(z(34.))
                 .px(z(8.))
@@ -1308,6 +1310,7 @@ impl Shell {
                     .child(
                         div()
                             .id("side-new-project")
+                            .a11y_button("New project")
                             .px(z(4.))
                             .py(z(2.))
                             .rounded(z(4.))
@@ -1430,6 +1433,7 @@ impl Shell {
                     .child(
                         div()
                             .id(SharedString::from(format!("ws-tg-{}", w.id)))
+                            .a11y_button(tg_tip.clone())
                             .w(z(16.))
                             .h_full()
                             .flex()
@@ -1457,6 +1461,7 @@ impl Shell {
                     .child(
                         div()
                             .id(SharedString::from(format!("ws-row-{}", w.id)))
+                            .a11y_button(name.clone())
                             .flex_1()
                             .min_w(px(0.))
                             .h_full()
@@ -1530,6 +1535,7 @@ impl Shell {
                     .child(
                         div()
                             .id(SharedString::from(format!("ws-add-{}", w.id)))
+                            .a11y_button(add_tip.clone())
                             .absolute()
                             .right(z(4.))
                             .top(z(4.))
@@ -1637,6 +1643,7 @@ impl Shell {
                 let (ws, id) = (w.id.clone(), pane.id.clone());
                 div()
                     .id(SharedString::from(format!("side-chat-{}", pane.id)))
+                    .a11y_toggle(title.clone(), on)
                     .h(z(28.))
                     .px(z(8.))
                     .flex()
@@ -1686,6 +1693,7 @@ impl Shell {
                 d.child(
                     div()
                         .id(SharedString::from(format!("side-new-{}", w.id)))
+                        .a11y_button(format!("New chat in {}", w.name))
                         .h(z(28.))
                         .px(z(8.))
                         .flex()
@@ -1728,6 +1736,7 @@ impl Shell {
                 let id = w.id.clone();
                 div()
                     .id(SharedString::from(format!("rail-ws-{}", w.id)))
+                    .a11y_button(w.name.clone())
                     .relative()
                     .size(z(34.))
                     .flex_none()
@@ -1841,6 +1850,7 @@ impl Shell {
         let tip = format!("New chats use {label}");
         div()
             .id(if compact { "acct-sw-rail" } else { "acct-sw" })
+            .a11y_button(tip.clone())
             .relative()
             .flex()
             .items_center()
@@ -2177,6 +2187,8 @@ impl Shell {
                 .child(
                     div()
                         .id(SharedString::from(format!("side-menu-{i}")))
+                        .role(Role::MenuItem)
+                        .aria_label(it.label.clone())
                         .min_h(z(34.))
                         .flex()
                         .items_center()
@@ -2465,6 +2477,7 @@ impl Shell {
             let (tip, pick) = (icon_label(&id), id.clone());
             div()
                 .id(SharedString::from(format!("pip-{id}")))
+                .a11y_toggle(tip.clone(), on)
                 .size(z(40.))
                 .flex()
                 .items_center()
@@ -2495,6 +2508,9 @@ impl Shell {
         let tab = |id: &'static str, label: &'static str, on: bool, cx: &mut Context<Self>| {
             div()
                 .id(id)
+                .role(Role::Tab)
+                .aria_label(label)
+                .aria_selected(on)
                 .px(z(10.))
                 .py(z(4.))
                 .rounded(z(6.))
@@ -2613,6 +2629,7 @@ impl Shell {
                                         .child(
                                             div()
                                                 .id("pip-remove")
+                                                .a11y_button("Remove icon")
                                                 .px(z(10.))
                                                 .py(z(4.))
                                                 .rounded(z(6.))
@@ -2644,6 +2661,7 @@ fn icon_btn(id: &'static str, g: Glyph, tip: String, on: bool, p: &Pal) -> State
     let p = *p;
     div()
         .id(id)
+        .a11y_button(tip.clone())
         .size(z(30.))
         .flex_none()
         .flex()

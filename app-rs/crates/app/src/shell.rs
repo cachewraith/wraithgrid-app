@@ -14,6 +14,8 @@ use futures::StreamExt as _;
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+
+use crate::a11y::A11y as _;
 use wraithgrid_core::agent_cli::AgentCli;
 use wraithgrid_core::config::{Config, LayoutNode, Pane};
 use wraithgrid_core::host::client::PaneHost;
@@ -2618,6 +2620,11 @@ impl Shell {
                        cx: &mut Context<Self>| {
             div()
                 .id(id)
+                .a11y_button(match area {
+                    WindowControlArea::Close => "Close window",
+                    WindowControlArea::Max => "Maximize",
+                    _ => "Minimize",
+                })
                 .w(px(40.))
                 .h_full()
                 .flex()
@@ -2745,6 +2752,7 @@ impl Shell {
                     .child(
                         div()
                             .id(SharedString::from(format!("slot-{slot_id}")))
+                            .a11y_button("New pane here")
                             .px_3()
                             .py_1()
                             .rounded_md()
@@ -3108,7 +3116,7 @@ impl Shell {
                         },
                         &theme,
                     ))
-                    .child(div().font_weight(FontWeight::MEDIUM).child(label))
+                    .child(div().font_weight(FontWeight::MEDIUM).child(label.clone()))
                     .children(self.branch_chip(pane, cx))
                     .child(
                         div()
@@ -3128,6 +3136,7 @@ impl Shell {
                             d.child(
                                 div()
                                     .id(SharedString::from(format!("continue-{id}")))
+                                    .a11y_button("Continue as…")
                                     .px_2()
                                     .rounded_sm()
                                     .cursor_pointer()
@@ -3145,6 +3154,7 @@ impl Shell {
                         d.child(
                             div()
                                 .id(SharedString::from(format!("restart-{id}")))
+                                .a11y_button("Restart")
                                 .px_2()
                                 .rounded_sm()
                                 .border_1()
@@ -3162,6 +3172,7 @@ impl Shell {
                         let zoomed = self.zoomed.as_deref() == Some(id.as_str());
                         div()
                             .id(SharedString::from(format!("zoom-{id}")))
+                            .a11y_button(if zoomed { "Back to grid" } else { "Zoom pane" })
                             .px_1()
                             .rounded_sm()
                             .cursor_pointer()
@@ -3188,6 +3199,7 @@ impl Shell {
                         let more = id.clone();
                         div()
                             .id(SharedString::from(format!("more-{id}")))
+                            .a11y_button(format!("Pane actions: {label}"))
                             .px_1()
                             .rounded_sm()
                             .cursor_pointer()
@@ -3200,6 +3212,7 @@ impl Shell {
                     .child(
                         div()
                             .id(SharedString::from(format!("close-{id}")))
+                            .a11y_button(format!("Close pane: {label}"))
                             .px_1()
                             .rounded_sm()
                             .cursor_pointer()
@@ -3424,6 +3437,7 @@ fn button(id: impl Into<ElementId>, label: &'static str, cx: &mut Context<Shell>
     let theme = cx.theme();
     div()
         .id(id)
+        .a11y_button(label)
         .px_2()
         .py(px(3.))
         .rounded_md()

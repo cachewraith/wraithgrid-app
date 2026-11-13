@@ -3,6 +3,7 @@
 //! or type/paste a path to jump), git repos marked, pinned and recent folders on top. Keyboard
 //! first: ↑/↓, Enter opens, Backspace goes up, Ctrl+Enter picks, Esc goes back.
 
+use crate::a11y::A11y as _;
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::ActiveTheme as _;
@@ -240,6 +241,7 @@ impl Render for FolderPicker {
             crumb_row = crumb_row.child(
                 div()
                     .id(SharedString::from(format!("fp-crumb-{i}")))
+                    .a11y_button(path.clone())
                     .px_1()
                     .rounded_sm()
                     .cursor_pointer()
@@ -296,6 +298,7 @@ impl Render for FolderPicker {
             let (name, parent) = split_folder(&p);
             div()
                 .id(SharedString::from(format!("fp-q-{i}")))
+                .a11y_button(format!("{kind}: {p}"))
                 .px_2()
                 .py_0p5()
                 .rounded_md()
@@ -375,6 +378,14 @@ impl Render for FolderPicker {
                 let path = join_path(&here, &e.name);
                 div()
                     .id(SharedString::from(format!("fp-it-{i}")))
+                    .role(Role::ListItem)
+                    .aria_label(if e.git {
+                        format!("{} (git)", e.name)
+                    } else {
+                        e.name.clone()
+                    })
+                    .aria_selected(i == at)
+                    .when(i == at, |d| d.aria_active_descendant())
                     .px_2()
                     .py_0p5()
                     .rounded_md()
@@ -423,6 +434,8 @@ impl Render for FolderPicker {
 
         let reveal = resolve_user_path(&here, &home_dir());
         div()
+            .id("folder-picker")
+            .a11y_dialog("Choose a folder")
             .w(px(560.))
             .h(px(480.))
             .p_4()
@@ -449,6 +462,7 @@ impl Render for FolderPicker {
                     .child(
                         div()
                             .id("fp-back")
+                            .a11y_button("Back")
                             .px_1()
                             .rounded_sm()
                             .cursor_pointer()
@@ -546,6 +560,7 @@ fn button(id: &'static str, text: &'static str, primary: bool, cx: &App) -> Stat
     let theme = cx.theme();
     div()
         .id(id)
+        .a11y_button(text)
         .px_2()
         .py_0p5()
         .rounded_md()

@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::a11y::A11y as _;
 use futures::StreamExt as _;
 use gpui_kit::component::input::{self, InputEvent, Textarea, TextareaState};
 use gpui_kit::component::text::{TextView, TextViewState};
@@ -834,6 +835,7 @@ impl ChatView {
                 let button = |id: String, label: &'static str, primary: bool| {
                     div()
                         .id(SharedString::from(id))
+                        .a11y_button(label)
                         .px_3()
                         .py_1()
                         .rounded_md()
@@ -1171,6 +1173,7 @@ impl Render for ChatView {
                         .child(
                             div()
                                 .id(SharedString::from(format!("stop-{}", self.pane_id)))
+                                .a11y_button("Stop")
                                 .px_3()
                                 .py_1()
                                 .rounded_md()
@@ -1185,6 +1188,7 @@ impl Render for ChatView {
                         d.child(
                             div()
                                 .id(SharedString::from(format!("send-{}", self.pane_id)))
+                                .a11y_button("Send")
                                 .px_3()
                                 .py_1()
                                 .rounded_md()
@@ -1208,6 +1212,10 @@ impl ChatView {
         let rows = menu.items.iter().enumerate().map(|(i, item)| {
             div()
                 .id(SharedString::from(format!("menu-{i}")))
+                .role(Role::ListItem)
+                .aria_label(format!("{}{}", item.sigil, item.name))
+                .aria_selected(i == menu.selected)
+                .when(i == menu.selected, |d| d.aria_active_descendant())
                 .px_2()
                 .py_1()
                 .flex()
@@ -1256,6 +1264,9 @@ impl ChatView {
         let row = |id: String, label: String, detail: String, on: bool| {
             div()
                 .id(SharedString::from(id))
+                .role(Role::ListItem)
+                .aria_label(label.clone())
+                .aria_selected(on)
                 .px_2()
                 .py_1()
                 .flex()
@@ -1363,6 +1374,7 @@ impl ChatView {
         let thumbs = self.images.iter().enumerate().map(|(i, (_, image))| {
             div()
                 .id(SharedString::from(format!("thumb-{i}")))
+                .a11y_button(format!("Preview image {} of {}", i + 1, self.images.len()))
                 .relative()
                 .size(px(56.))
                 .rounded_md()
@@ -1376,6 +1388,7 @@ impl ChatView {
                 .child(
                     div()
                         .id(SharedString::from(format!("unattach-{i}")))
+                        .a11y_button(format!("Remove image {}", i + 1))
                         .absolute()
                         .top_0()
                         .right_0()
@@ -1408,6 +1421,11 @@ impl ChatView {
         let chip = |id: &'static str, label: String, which: Picker| {
             div()
                 .id(id)
+                .a11y_button(match which {
+                    Picker::Model => format!("Model: {label}"),
+                    Picker::Mode => format!("Mode: {label}"),
+                    _ => label.clone(),
+                })
                 .px_2()
                 .py(px(1.))
                 .rounded_md()

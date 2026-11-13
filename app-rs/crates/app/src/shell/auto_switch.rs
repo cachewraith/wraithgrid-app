@@ -15,6 +15,7 @@ use wraithgrid_usage::format::reset_label;
 
 use super::sidebar::{pal, provider_logo};
 use super::{Modal, Shell};
+use crate::a11y::A11y as _;
 
 #[derive(Clone)]
 pub(super) struct SwitchAsk {
@@ -436,6 +437,7 @@ impl Render for AutoSwitchDialog {
         let button = |id: &'static str, text: &'static str, primary: bool| {
             div()
                 .id(id)
+                .a11y_button(text)
                 .px_3()
                 .py_1()
                 .rounded_md()
@@ -451,6 +453,8 @@ impl Render for AutoSwitchDialog {
         };
         let dont_ask = self.dont_ask;
         div()
+            .id("auto-switch")
+            .a11y_dialog(self.title.clone())
             .track_focus(&self.focus)
             .w(px(520.))
             .p_4()

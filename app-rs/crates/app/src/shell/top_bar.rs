@@ -12,6 +12,7 @@ use wraithgrid_core::layout::{
 };
 
 use super::Shell;
+use crate::a11y::A11y as _;
 
 /// A preset as a small drawing of its cells.
 fn preset_glyph(p: Preset) -> &'static str {
@@ -123,6 +124,7 @@ impl Shell {
         if let Some(title) = screen {
             left.push(
                 btn("top-back")
+                    .a11y_button(format!("Back to {}", ws.name))
                     .child(format!("← {}", ws.name))
                     .on_click(cx.listener(|this, _, window, cx| this.back_to_grid(window, cx)))
                     .into_any_element(),
@@ -151,6 +153,7 @@ impl Shell {
             if !ws.panes.is_empty() {
                 right.push(
                     btn("top-open-chats")
+                        .a11y_button(format!("Open chats {}", ws.panes.len()))
                         .border_1()
                         .border_color(theme.border)
                         .child(format!("Open chats {}", ws.panes.len()))
@@ -209,6 +212,7 @@ impl Shell {
             );
             right.push(
                 btn("top-unzoom")
+                    .a11y_button("Back to grid")
                     .border_1()
                     .border_color(theme.border)
                     .child("⤡ Back to grid")
@@ -222,6 +226,7 @@ impl Shell {
             let ws_id = ws.id.clone();
             left.push(
                 btn("top-project")
+                    .a11y_button(format!("{} project page", ws.name))
                     .child(format!("← {}", ws.name))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.open_project_page(ws_id.clone(), window, cx)
@@ -242,6 +247,7 @@ impl Shell {
             if hidden > 0 {
                 left.push(
                     btn("top-hidden")
+                        .a11y_button(format!("Show {hidden} hidden panes"))
                         .border_1()
                         .border_color(theme.border)
                         .child(format!("+{hidden} hidden"))
@@ -258,6 +264,7 @@ impl Shell {
                 let presets = Preset::ALL.map(|p| {
                     div()
                         .id(SharedString::from(format!("preset-{}", p.slots())))
+                        .a11y_toggle(p.label(), current == Some(p))
                         .px_2()
                         .cursor_pointer()
                         .when(current == Some(p), |d| {
@@ -283,6 +290,7 @@ impl Shell {
                         .child(
                             div()
                                 .id("top-zoom")
+                                .a11y_button("Zoom focused pane")
                                 .px_2()
                                 .cursor_pointer()
                                 .hover(|d| d.bg(theme.secondary))
@@ -301,6 +309,7 @@ impl Shell {
         right.push(self.usage_pill(cx).into_any_element());
         right.push(
             btn("top-more")
+                .a11y_button("More")
                 .child("⋯")
                 .on_click(cx.listener(|this, e: &ClickEvent, _, cx| {
                     this.utility_menu = Some(e.position());
@@ -339,6 +348,7 @@ impl Shell {
         let on = self.usage_view.is_some();
         div()
             .id("top-usage")
+            .a11y_toggle(format!("Usage: {text}"), on)
             .px_2()
             .py(px(2.))
             .rounded_md()
@@ -368,6 +378,8 @@ impl Shell {
         let item = |id: &'static str, label: &'static str| {
             div()
                 .id(id)
+                .role(Role::MenuItem)
+                .aria_label(label)
                 .px_3()
                 .py_1()
                 .rounded_md()

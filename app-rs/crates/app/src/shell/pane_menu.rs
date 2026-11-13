@@ -7,6 +7,7 @@ use gpui_kit::*;
 use wraithgrid_core::types::PaneView;
 
 use super::Shell;
+use crate::a11y::A11y as _;
 use crate::dialogs::PaletteAction;
 
 #[derive(Clone, Copy)]
@@ -134,6 +135,8 @@ impl Shell {
                 let id = pane_id.clone();
                 div()
                     .id(SharedString::from(format!("pane-menu-{i}")))
+                    .role(Role::MenuItem)
+                    .aria_label(label.clone())
                     .px_3()
                     .py_1()
                     .rounded_md()
@@ -254,6 +257,7 @@ impl Shell {
                                 .child(
                                     div()
                                         .id(SharedString::from(format!("close-cancel-{pane_id}")))
+                                        .a11y_button("Cancel")
                                         .px_3()
                                         .py_1()
                                         .rounded_md()
@@ -270,6 +274,7 @@ impl Shell {
                                 .child(
                                     div()
                                         .id(SharedString::from(format!("close-ok-{pane_id}")))
+                                        .a11y_button("Close pane")
                                         .px_3()
                                         .py_1()
                                         .rounded_md()

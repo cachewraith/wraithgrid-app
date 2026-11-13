@@ -19,6 +19,7 @@ use wraithgrid_git::{
 };
 
 use super::{Modal, Shell, TITLE_BAR};
+use crate::a11y::A11y as _;
 use crate::branch_picker::{BranchEvent, BranchPicker, PickerMode};
 use crate::changes::{ChangesPanel, GitAsk};
 use crate::dialogs::{Palette, PaletteAction};
@@ -109,6 +110,7 @@ impl Shell {
         Some(
             div()
                 .id("git-button")
+                .a11y_toggle(format!("Git: branch {branch}"), open)
                 .px_2()
                 .py(px(3.))
                 .rounded_md()
@@ -262,6 +264,8 @@ impl Shell {
                 .child(
                     div()
                         .id(SharedString::from(format!("git-menu-{i}")))
+                        .role(Role::MenuItem)
+                        .aria_label(it.label.clone())
                         .px_2()
                         .py_1()
                         .rounded_md()
@@ -527,6 +531,10 @@ impl Shell {
         Some(
             div()
                 .id(SharedString::from(format!("branch-chip-{}", pane.id)))
+                .a11y_button(format!(
+                    "Branch {branch}, {} changed files. Show changes",
+                    g.changed
+                ))
                 .px_1()
                 .rounded_sm()
                 .cursor_pointer()
@@ -770,6 +778,7 @@ impl Render for RemoveWorktreeDialog {
                     .child(
                         div()
                             .id("rmwt-keep")
+                            .a11y_button("Keep it")
                             .px_3()
                             .py_1()
                             .rounded_md()
@@ -784,6 +793,7 @@ impl Render for RemoveWorktreeDialog {
                     .child(
                         div()
                             .id("rmwt-remove")
+                            .a11y_button("Remove")
                             .px_3()
                             .py_1()
                             .rounded_md()

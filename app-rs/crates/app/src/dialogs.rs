@@ -13,6 +13,7 @@ use wraithgrid_core::config::Pane;
 use wraithgrid_core::paths::{contract_home, home_dir, resolve_user_path, worktrees_root};
 use wraithgrid_git::{add_worktree, GitCli, WorktreeFrom};
 
+use crate::a11y::A11y as _;
 use crate::folder_picker::Picking;
 
 // ---- New pane ------------------------------------------------------------------------------
@@ -359,6 +360,10 @@ impl Render for NewPaneDialog {
                     self.account.as_ref() == Some(&a.id),
                     cx,
                 )
+                .a11y_toggle(
+                    format!("{} {}", a.name, a.cli.spec().provider_label),
+                    self.account.as_ref() == Some(&a.id),
+                )
                 .child(div().size(px(8.)).rounded_full().bg(a.color))
                 .child(a.name.clone())
                 .child(
@@ -375,6 +380,7 @@ impl Render for NewPaneDialog {
         }
         accounts = accounts.child(
             option("acct-shell".into(), self.account.is_none(), cx)
+                .a11y_toggle(format!("Shell {}", self.shell_name), self.account.is_none())
                 .child("Shell")
                 .child(
                     div()
@@ -391,6 +397,7 @@ impl Render for NewPaneDialog {
             let folder = f.clone();
             div()
                 .id(SharedString::from(format!("recent-{i}")))
+                .a11y_button(f.clone())
                 .px_2()
                 .py(px(2.))
                 .rounded_md()
@@ -428,6 +435,8 @@ impl Render for NewPaneDialog {
         .collect::<Vec<_>>()
         .join(" · ");
         div()
+            .id("new-pane-dialog")
+            .a11y_dialog(title)
             .track_focus(&self.focus)
             .w(px(560.))
             .p_4()
@@ -474,6 +483,9 @@ impl Render for NewPaneDialog {
             .child(
                 div()
                     .id("more")
+                    .role(Role::Button)
+                    .aria_label("More options")
+                    .aria_expanded(self.more)
                     .text_xs()
                     .text_color(theme.muted_foreground)
                     .cursor_pointer()
@@ -512,6 +524,7 @@ impl Render for NewPaneDialog {
                     .child(
                         div()
                             .id("cancel")
+                            .a11y_button("Cancel")
                             .px_3()
                             .py_1()
                             .rounded_md()
@@ -524,6 +537,7 @@ impl Render for NewPaneDialog {
                     .child(
                         div()
                             .id("start")
+                            .a11y_button("Start")
                             .px_3()
                             .py_1()
                             .rounded_md()
@@ -545,7 +559,7 @@ impl Render for NewPaneDialog {
 
 impl NewPaneDialog {
     /// "Work on a new branch (git worktree)" and the branch's name (#162).
-    fn worktree_option(&self, d: Div, cx: &mut Context<Self>) -> Div {
+    fn worktree_option(&self, d: Stateful<Div>, cx: &mut Context<Self>) -> Stateful<Div> {
         let theme = cx.theme().clone();
         let hint = |text: String| {
             div()
@@ -555,6 +569,7 @@ impl NewPaneDialog {
         };
         let toggle = div()
             .id("np-worktree")
+            .a11y_toggle("Work on a new branch (git worktree)", self.worktree)
             .flex()
             .items_center()
             .gap_3()
@@ -830,6 +845,10 @@ impl Render for Palette {
             let action = item.action.clone();
             div()
                 .id(SharedString::from(format!("palette-{i}")))
+                .role(Role::ListItem)
+                .aria_label(format!("{} {}", item.label, item.detail))
+                .aria_selected(n == self.selected)
+                .when(n == self.selected, |d| d.aria_active_descendant())
                 .px_3()
                 .py_1()
                 .rounded_md()
@@ -851,6 +870,8 @@ impl Render for Palette {
         });
         let count = matches.len();
         div()
+            .id("palette")
+            .a11y_dialog("Command palette")
             .w(px(600.))
             .max_h(px(440.))
             .p_2()
@@ -905,6 +926,7 @@ fn folder_row(
         .child(
             div()
                 .id("choose-folder")
+                .a11y_button("Choose a folder")
                 .px_3()
                 .py_1()
                 .rounded_md()
@@ -952,6 +974,7 @@ impl Render for QuitDialog {
         let button = |id: &'static str, label: &'static str, primary: bool| {
             div()
                 .id(id)
+                .a11y_button(label)
                 .px_3()
                 .py_1()
                 .rounded_md()
@@ -968,6 +991,8 @@ impl Render for QuitDialog {
             if self.live == 1 { " is" } else { "s are" }
         );
         div()
+            .id("quit-dialog")
+            .a11y_dialog(message.clone())
             .w(px(460.))
             .p_4()
             .flex()
@@ -985,6 +1010,10 @@ impl Render for QuitDialog {
             .child(
                 div()
                     .id("remember")
+                    .a11y_toggle(
+                        "Remember my choice (Settings → When the window closes)",
+                        self.remember,
+                    )
                     .flex()
                     .items_center()
                     .gap_2()
@@ -1159,6 +1188,7 @@ impl Render for NewProjectDialog {
                 SharedString::from(format!("np-acct-{id}")),
                 self.account.as_ref() == Some(id),
             )
+            .a11y_toggle(name.clone(), self.account.as_ref() == Some(id))
             .child(div().size(px(8.)).rounded_full().bg(*color))
             .child(name.clone())
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -1170,6 +1200,8 @@ impl Render for NewProjectDialog {
         let suggested = self.suggested(cx);
         let can_start = self.account.is_some() && !self.folder.read(cx).value().trim().is_empty();
         div()
+            .id("new-project-dialog")
+            .a11y_dialog("New project")
             .w(px(520.))
             .p_4()
             .flex()
@@ -1234,6 +1266,7 @@ impl Render for NewProjectDialog {
                     .gap_2()
                     .child(
                         chip("np-start".into(), self.start_chat && can_start)
+                            .a11y_toggle("Start a chat", self.start_chat && can_start)
                             .child("Start a chat")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.start_chat = true;
@@ -1242,6 +1275,7 @@ impl Render for NewProjectDialog {
                     )
                     .child(
                         chip("np-empty".into(), !self.start_chat || !can_start)
+                            .a11y_toggle("Empty project", !self.start_chat || !can_start)
                             .child("Empty project")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.start_chat = false;
@@ -1260,6 +1294,7 @@ impl Render for NewProjectDialog {
                     .child(
                         div()
                             .id("np-cancel")
+                            .a11y_button("Cancel")
                             .px_3()
                             .py_1()
                             .rounded_md()
@@ -1272,6 +1307,7 @@ impl Render for NewProjectDialog {
                     .child(
                         div()
                             .id("np-create")
+                            .a11y_button("Create")
                             .px_3()
                             .py_1()
                             .rounded_md()
@@ -1374,6 +1410,7 @@ impl Render for ProjectDialog {
         let chip = |id: SharedString, label: String, on: bool| {
             div()
                 .id(id)
+                .a11y_toggle(label.clone(), on)
                 .px_2()
                 .py_1()
                 .rounded_md()
@@ -1413,6 +1450,7 @@ impl Render for ProjectDialog {
         let button = |id: &'static str, text: &'static str| {
             div()
                 .id(id)
+                .a11y_button(text)
                 .px_3()
                 .py_1()
                 .rounded_md()
@@ -1427,6 +1465,8 @@ impl Render for ProjectDialog {
             if self.panes == 1 { "" } else { "s" }
         );
         div()
+            .id("project-dialog")
+            .a11y_dialog("Project")
             .w(px(480.))
             .p_4()
             .flex()
@@ -1488,6 +1528,7 @@ impl Render for ProjectDialog {
                     .child(
                         div()
                             .id("pj-save")
+                            .a11y_button("Save")
                             .px_3()
                             .py_1()
                             .rounded_md()
@@ -1542,6 +1583,7 @@ impl Render for ChoiceDialog {
             let pick = id.clone();
             div()
                 .id(SharedString::from(format!("choice-{id}")))
+                .a11y_button(format!("{label} {detail}"))
                 .px_3()
                 .py_2()
                 .rounded_md()
@@ -1562,6 +1604,8 @@ impl Render for ChoiceDialog {
                 .on_click(cx.listener(move |_, _, _, cx| cx.emit(ChoiceEvent::Pick(pick.clone()))))
         });
         div()
+            .id("choice-dialog")
+            .a11y_dialog(self.title.clone())
             .w(px(460.))
             .p_4()
             .flex()
@@ -1596,6 +1640,7 @@ impl Render for ChoiceDialog {
                 div().flex().justify_end().child(
                     div()
                         .id("choice-cancel")
+                        .a11y_button(self.cancel.clone())
                         .px_3()
                         .py_1()
                         .rounded_md()

@@ -7,6 +7,7 @@ use gpui_kit::*;
 use wraithgrid_core::layout::{empty_slot_ids, Preset};
 
 use super::Shell;
+use crate::a11y::A11y as _;
 
 /// A preset's cells as a small grid: columns, rows.
 fn mini(p: Preset) -> (usize, usize) {
@@ -79,6 +80,7 @@ impl Shell {
                 }));
             div()
                 .id(SharedString::from(format!("start-{}", p.slots())))
+                .a11y_button(format!("Start from {}", p.label()))
                 .w(px(108.))
                 .p_2()
                 .rounded_md()
@@ -116,6 +118,7 @@ impl Shell {
             .child(
                 div()
                     .id("empty-new-pane")
+                    .a11y_button("New pane")
                     .px_4()
                     .py_2()
                     .rounded_md()

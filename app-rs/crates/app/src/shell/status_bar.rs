@@ -8,6 +8,7 @@ use wraithgrid_core::shortcuts::bindings;
 use wraithgrid_core::types::ShortcutId;
 
 use super::{Shell, UpdateState};
+use crate::a11y::A11y as _;
 
 impl Shell {
     /// Shows Settings → About (what's new and the updater).
@@ -34,6 +35,7 @@ impl Shell {
         let link = |id: &'static str, label: String| {
             div()
                 .id(id)
+                .a11y_button(label.clone())
                 .px_2()
                 .rounded_sm()
                 .cursor_pointer()
@@ -66,6 +68,7 @@ impl Shell {
                 .child(
                     div()
                         .id("sbar-updated-x")
+                        .a11y_button("Dismiss")
                         .px_1()
                         .cursor_pointer()
                         .hover(|d| d.text_color(theme.foreground))
@@ -86,6 +89,7 @@ impl Shell {
             .child(
                 div()
                     .id("sbar-shortcuts")
+                    .a11y_button("All shortcuts")
                     .px_1()
                     .rounded_sm()
                     .cursor_pointer()

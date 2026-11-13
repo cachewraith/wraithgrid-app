@@ -17,6 +17,7 @@ use wraithgrid_chat::{ApprovalDecision, ChatAnswers, ChatItem, ChatQuestion};
 use wraithgrid_schedule::SendLater;
 
 use super::{ChatView, ChatViewEvent};
+use crate::a11y::A11y as _;
 
 /// A queued "send later" message of this chat, as the window describes it.
 #[derive(Clone, Debug, PartialEq)]
@@ -168,6 +169,7 @@ impl ChatView {
                     .child(
                         div()
                             .id(SharedString::from(format!("reply-{}", self.pane_id)))
+                            .a11y_button("Reply")
                             .px_2()
                             .py_1()
                             .rounded_md()
@@ -205,6 +207,8 @@ impl ChatView {
             };
             div()
                 .id(SharedString::from(format!("quote-{}-{i}", self.pane_id)))
+                .role(Role::Group)
+                .aria_label(format!("Quote {}", i + 1))
                 .flex()
                 .gap_2()
                 .px_2()
@@ -234,6 +238,7 @@ impl ChatView {
                 .child(
                     div()
                         .id(SharedString::from(format!("unquote-{}-{i}", self.pane_id)))
+                        .a11y_button(format!("Remove quote {}", i + 1))
                         .text_xs()
                         .cursor_pointer()
                         .child("×")
@@ -303,6 +308,7 @@ impl ChatView {
                 anchored().position(point(px(0.), px(0.))).child(
                     div()
                         .id(SharedString::from(format!("viewer-{}", self.pane_id)))
+                        .a11y_dialog("Image viewer")
                         .occlude()
                         .w(size.width)
                         .h(size.height)
@@ -486,6 +492,7 @@ impl ChatView {
         let button = |id: String, label: &str, primary: bool, enabled: bool| {
             div()
                 .id(SharedString::from(id))
+                .a11y_button(label.to_string())
                 .px_3()
                 .py_1()
                 .rounded_md()
@@ -506,6 +513,9 @@ impl ChatView {
             };
             div()
                 .id(SharedString::from(format!("cq-tab-{i}")))
+                .role(Role::Tab)
+                .aria_label(label.clone())
+                .aria_selected(i == at)
                 .px_2()
                 .py(px(1.))
                 .rounded_md()
@@ -530,6 +540,7 @@ impl ChatView {
             let label = o.label.clone();
             div()
                 .id(SharedString::from(format!("cq-opt-{at}-{k}")))
+                .a11y_toggle(label.clone(), on)
                 .flex()
                 .items_start()
                 .gap_2()
@@ -764,6 +775,7 @@ impl ChatView {
         let on = self.x.later_menu || self.x.later_at.is_some();
         div()
             .id(SharedString::from(format!("later-{}", self.pane_id)))
+            .a11y_button("Send later")
             .px_2()
             .py_1()
             .rounded_md()
@@ -801,6 +813,7 @@ impl ChatView {
                     .child(
                         div()
                             .id("later-cancel")
+                            .a11y_button("Cancel")
                             .px_2()
                             .py_1()
                             .rounded_md()
@@ -815,6 +828,7 @@ impl ChatView {
                     .child(
                         div()
                             .id("later-queue")
+                            .a11y_button("Queue")
                             .px_2()
                             .py_1()
                             .rounded_md()
@@ -847,6 +861,8 @@ impl ChatView {
         let row = |id: &'static str, label: String, hint: String| {
             div()
                 .id(id)
+                .role(Role::MenuItem)
+                .aria_label(format!("{label} {hint}"))
                 .flex()
                 .gap_2()
                 .px_2()
@@ -924,6 +940,7 @@ impl ChatView {
                 let small = |id: String, label: &'static str| {
                     div()
                         .id(SharedString::from(id))
+                        .a11y_button(label)
                         .px_2()
                         .rounded_md()
                         .border_1()

@@ -5,6 +5,7 @@
 // debug builds keep the console for logs.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod a11y;
 mod about_view;
 mod accounts_view;
 mod branch_picker;

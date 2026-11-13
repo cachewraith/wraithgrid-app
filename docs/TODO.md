@@ -1,7 +1,7 @@
 # TODO
 
 ## Now
-- #166 rewrite (app-rs/, unreleased), left: accessibility pass, tray on Windows/macOS; decide the Wayland preview (whole app under XWayland, or the preview in its own window: today it offers the browser); run the packaging CI (Windows/macOS jobs never ran) and a real Electron→GPUI update on a test machine before any release
+- #166 rewrite (app-rs/, unreleased), left: accessibility pass for the screens (Settings, Accounts, Scheduled, project page, teams, preview, About, themes, Changes, mods, usage, branch picker, login), tray on Windows/macOS; decide the Wayland preview (whole app under XWayland, or the preview in its own window: today it offers the browser); run the packaging CI (Windows/macOS jobs never ran) and a real Electron→GPUI update on a test machine before any release
 - #166 GPUI spike (feat/gpui-spike-20261112, ADR 0005): run the CI binaries on Windows and macOS arm64/x64 (`--cmd yes --bench 15`, IME, paste, preview); by hand on Linux: IME (fcitx5/ibus), Wayland screenshot paste, selection + copy, a real X11 session; pick the Wayland preview workaround (XWayland vs own window); then go/no-go and phase 1 workspace
 - #162 Git button + worktree panes shipped on feat/git-topbar-worktrees-20261105: try with real repos (big checkouts, hooks); later (own issue): per-project setup after a worktree is made (copy `.env`, `bun install`), dev-server port clashes across worktrees
 - #164 Reply quotes shipped on feat/reply-quote-20261105: try with real claude/codex/agy answers (long tables, nested lists); terminal (xterm) selection → Reply is a later issue

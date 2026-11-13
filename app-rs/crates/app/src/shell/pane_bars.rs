@@ -9,6 +9,7 @@ use wraithgrid_core::agent_cli::AgentCli;
 use wraithgrid_core::config::Pane;
 
 use super::Shell;
+use crate::a11y::A11y as _;
 
 impl Shell {
     /// "<account> is not signed in yet": Run /login, Mark as signed in, ×.
@@ -35,6 +36,7 @@ impl Shell {
         let btn = |id: String, label: &'static str| {
             div()
                 .id(SharedString::from(id))
+                .a11y_button(label)
                 .px_2()
                 .rounded_md()
                 .border_1()
@@ -97,6 +99,7 @@ impl Shell {
                 .child(
                     div()
                         .id(SharedString::from(format!("hide-login-{}", pane.id)))
+                        .a11y_button("Dismiss")
                         .px_1()
                         .cursor_pointer()
                         .child("×")
@@ -135,6 +138,7 @@ impl Shell {
                 .child(
                     div()
                         .id(SharedString::from(format!("restart-bar-{}", pane.id)))
+                        .a11y_button("Restart")
                         .px_2()
                         .rounded_md()
                         .border_1()
