@@ -131,6 +131,7 @@ impl Shell {
             .map(|(id, v)| (id.clone(), v.clone()))
             .collect();
         for (id, view) in busy {
+            view.update(cx, |v, cx| v.attach_window(window, cx));
             self.subscribe_chat(&view, id, window, cx);
         }
         cx.notify();

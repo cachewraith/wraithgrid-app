@@ -47,6 +47,7 @@ use crate::terminal::{
 use crate::usage_view::{UsageView, UsageViewEvent};
 
 mod git_button;
+mod later;
 mod machines;
 mod sidebar;
 mod team;
@@ -329,6 +330,7 @@ impl Shell {
             view.update(cx, |v, cx| v.set_config(config, cx));
         }
         self.refresh_project_view(cx);
+        self.refresh_chat_later(cx);
         cx.notify();
         if self.store.is_dirty() {
             self.save_task = Some(cx.spawn(async move |this, cx| {
@@ -493,6 +495,14 @@ impl Shell {
                     this.settle_runs(cx);
                     this.maybe_switch(&pane_id, error.clone(), window, cx)
                 }
+                ChatViewEvent::Queue { text, when } => {
+                    this.queue_message(&pane_id, text, *when, cx)
+                }
+                ChatViewEvent::CancelQueued(id) => {
+                    let id = id.clone();
+                    this.update(cx, |c| c.schedules.retain(|j| j.id != id));
+                }
+                ChatViewEvent::SendQueuedNow(id) => this.run_job_now(&id.clone(), window, cx),
             },
         )
         .detach();
@@ -611,6 +621,19 @@ impl Shell {
             cx.on_next_frame(window, move |this, window, cx| {
                 if let Some(chat) = this.chats.values().next().cloned() {
                     chat.update(cx, |c, cx| c.send_text(&text, window, cx));
+                }
+            });
+        }
+        // `WRAITHGRID_ATTACH=<png>` (debug builds) attaches an image to the first chat's box.
+        if let Some(path) = std::env::var("WRAITHGRID_ATTACH")
+            .ok()
+            .filter(|_| cfg!(debug_assertions))
+        {
+            cx.on_next_frame(window, move |this, _, cx| {
+                if let (Some(chat), Ok(bytes)) =
+                    (this.chats.values().next().cloned(), std::fs::read(&path))
+                {
+                    chat.update(cx, |c, cx| c.attach_png(bytes, cx));
                 }
             });
         }
@@ -1026,6 +1049,7 @@ impl Shell {
                     .await;
                 let _ = this.update(cx, |this, cx| {
                     this.limits = limits;
+                    this.refresh_chat_later(cx);
                     if let Some(view) = this.usage_view.clone() {
                         let data = this.usage.lock().unwrap().get();
                         view.update(cx, |v, cx| v.set_data(data, cx));
@@ -1068,6 +1092,7 @@ impl Shell {
                 poller = back;
                 let _ = this.update(cx, |this, cx| {
                     this.limits = limits;
+                    this.refresh_chat_later(cx);
                     if let Some(view) = this.usage_view.clone() {
                         let data = this.usage.lock().unwrap().get();
                         view.update(cx, |v, cx| v.set_data(data, cx));
@@ -1610,6 +1635,7 @@ impl Shell {
         store.on_chat_event(pane_id, e);
         self.limits = store.get().limits;
         drop(store);
+        self.refresh_chat_later(cx);
         let usage = self.usage.clone();
         self._usage_save = Some(cx.spawn(async move |_, cx| {
             cx.background_executor()
