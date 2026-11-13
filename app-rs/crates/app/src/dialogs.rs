@@ -644,14 +644,13 @@ pub struct Palette {
     _subscription: Subscription,
 }
 
-/// True when every character of `query` appears in `text` in order (case-insensitive).
+/// `matches` (lib/search.ts): every word of `query` appears in `text` (case-insensitive).
 pub fn fuzzy_match(text: &str, query: &str) -> bool {
-    let mut chars = text.chars().flat_map(char::to_lowercase);
+    let hay = text.to_lowercase();
     query
-        .chars()
-        .flat_map(char::to_lowercase)
-        .filter(|c| !c.is_whitespace())
-        .all(|q| chars.any(|c| c == q))
+        .to_lowercase()
+        .split_whitespace()
+        .all(|w| hay.contains(w))
 }
 
 impl Palette {
@@ -1540,8 +1539,18 @@ impl Render for ChoiceDialog {
 mod tests {
     #[test]
     fn fuzzy() {
-        assert!(super::fuzzy_match("WraithGrid · org-info", "wgo"));
+        assert!(super::fuzzy_match("WraithGrid · org-info", "grid org"));
+        assert!(!super::fuzzy_match("WraithGrid · org-info", "wgo"));
         assert!(super::fuzzy_match("Close pane", "close p"));
+        // Words, not scattered letters: "site" isn't in "Wraithgrid Website" as a word part.
+        assert!(super::fuzzy_match(
+            "Preview: open for Site test",
+            "open for site"
+        ));
+        assert!(!super::fuzzy_match(
+            "Preview: open for Wraithgrid Website",
+            "for site test"
+        ));
         assert!(!super::fuzzy_match("shell", "zsh"));
         assert!(super::fuzzy_match("anything", ""));
     }
