@@ -135,4 +135,34 @@ impl Shell {
         }
         cx.notify();
     }
+
+    /// Wraithgrid launched again (`second-instance`): show this window, from the tray too.
+    pub fn listen_for_second_launch(
+        &mut self,
+        rx: std::sync::mpsc::Receiver<()>,
+        cx: &mut Context<Self>,
+    ) {
+        let rx = std::sync::Arc::new(std::sync::Mutex::new(rx));
+        self._second_launch = Some(cx.spawn(async move |this, cx| loop {
+            let rx = rx.clone();
+            let got = cx
+                .background_spawn(async move { rx.lock().unwrap().recv().is_ok() })
+                .await;
+            if !got {
+                break;
+            }
+            let shown = this.update(cx, |this, cx| {
+                if this.in_tray() {
+                    return this.reopen_window(cx);
+                }
+                cx.activate(true);
+                if let Some(w) = cx.windows().first().copied() {
+                    let _ = w.update(cx, |_, window, _| window.activate_window());
+                }
+            });
+            if shown.is_err() {
+                break;
+            }
+        }));
+    }
 }

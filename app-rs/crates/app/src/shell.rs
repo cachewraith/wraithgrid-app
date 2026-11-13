@@ -68,6 +68,7 @@ pub struct Shell {
     /// Shown while the window is closed but the app keeps running (`keepInTray`).
     tray: Option<crate::tray::Tray>,
     _tray_tasks: Vec<Task<()>>,
+    _second_launch: Option<Task<()>>,
     /// A window was attached once: later ones are reopens from the tray.
     opened: bool,
     /// Each machine's host (H5), by machine id, with the ssh host it was made for.
@@ -141,6 +142,7 @@ impl Shell {
             chat_states: HashMap::new(),
             tray: None,
             _tray_tasks: vec![],
+            _second_launch: None,
             opened: false,
             remotes: HashMap::new(),
             live_runs: Default::default(),

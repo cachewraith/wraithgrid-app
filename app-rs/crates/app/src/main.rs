@@ -55,7 +55,12 @@ fn main() {
             user_data.display()
         )
     });
+    let mut second_launches = None;
     if blocked.is_none() {
+        match runtime::single_instance(&user_data) {
+            runtime::Instance::Second => return,
+            runtime::Instance::First(rx) => second_launches = rx,
+        }
         resolve_path_in_background();
         about_view::record_launch();
     }
@@ -87,6 +92,9 @@ fn main() {
             shell.listen_for_commands(cx);
             shell.check_updates_on_launch(cx);
             shell.start_usage(cx);
+            if let Some(rx) = second_launches {
+                shell.listen_for_second_launch(rx, cx);
+            }
             shell
         });
         // The window may close while the app keeps running in the tray (`keepInTray`).

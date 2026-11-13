@@ -177,3 +177,47 @@ pub fn electron_running(user_data: &Path) -> Option<u32> {
     #[cfg(not(unix))]
     Some(pid)
 }
+
+/// Who this launch is (`requestSingleInstanceLock`): the app for this user-data dir, or a
+/// second launch that asked the running one to show its window and should exit.
+pub enum Instance {
+    First(Option<std::sync::mpsc::Receiver<()>>),
+    Second,
+}
+
+/// One app per user-data dir: a second launch connects to the first one's socket and asks it
+/// to show its window (`second-instance`); the first gets a message per such launch.
+#[cfg(unix)]
+pub fn single_instance(user_data: &Path) -> Instance {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::{UnixListener, UnixStream};
+    let path = user_data.join("wraithgrid-window.sock");
+    if let Ok(mut s) = UnixStream::connect(&path) {
+        if s.write_all(b"open\n").is_ok() {
+            return Instance::Second;
+        }
+    }
+    // Left by an app that ended without cleaning up.
+    let _ = std::fs::remove_file(&path);
+    let Ok(listener) = UnixListener::bind(&path) else {
+        return Instance::First(None);
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut line = String::new();
+            if BufReader::new(stream).read_line(&mut line).is_ok()
+                && line.trim() == "open"
+                && tx.send(()).is_err()
+            {
+                break;
+            }
+        }
+    });
+    Instance::First(Some(rx))
+}
+
+#[cfg(not(unix))]
+pub fn single_instance(_user_data: &Path) -> Instance {
+    Instance::First(None)
+}
