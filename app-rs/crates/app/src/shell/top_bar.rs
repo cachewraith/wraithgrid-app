@@ -36,7 +36,7 @@ impl Shell {
     }
 
     /// `applyPreset`: the shown panes, then the hidden ones, into the preset's cells.
-    fn apply_preset(&mut self, p: Preset, cx: &mut Context<Self>) {
+    pub(super) fn apply_preset(&mut self, p: Preset, cx: &mut Context<Self>) {
         self.update(cx, |c| {
             let id = c.active_workspace.clone();
             if let Some(w) = c.workspaces.iter_mut().find(|w| w.id == id) {

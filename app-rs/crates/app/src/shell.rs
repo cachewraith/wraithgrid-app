@@ -47,6 +47,7 @@ use crate::terminal::{
 use crate::usage_view::{UsageView, UsageViewEvent};
 
 mod auto_switch;
+mod empty;
 mod git_button;
 mod handoff;
 mod later;
@@ -2712,11 +2713,7 @@ impl Shell {
             return self.pane(&p.clone(), window, cx);
         }
         match shown_layout(ws.layout.as_ref(), &ids) {
-            None => empty_state(
-                "No panes in this project yet. Start one with + Terminal or + Agent.".into(),
-                cx,
-            )
-            .into_any_element(),
+            None => self.empty_project(cx),
             Some(layout) => self.node(&layout, &ws.panes, vec![], window, cx),
         }
     }

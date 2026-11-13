@@ -1005,7 +1005,7 @@ impl Shell {
             )
     }
 
-    fn hints(&self) -> (String, String) {
+    pub(super) fn hints(&self) -> (String, String) {
         let b = bindings(&self.config().settings.shortcuts);
         let hint = |id: ShortcutId| {
             b.iter()
