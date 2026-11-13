@@ -48,6 +48,7 @@ use crate::usage_view::{UsageView, UsageViewEvent};
 
 mod git_button;
 mod machines;
+mod sidebar;
 mod team;
 mod tray;
 
@@ -69,6 +70,9 @@ pub struct Shell {
     tray: Option<crate::tray::Tray>,
     _tray_tasks: Vec<Task<()>>,
     _second_launch: Option<Task<()>>,
+    /// The window's own focus: holds the keys when no pane or screen has them, so shortcuts
+    /// and Esc still reach the shell.
+    focus: Option<FocusHandle>,
     /// A window was attached once: later ones are reopens from the tray.
     opened: bool,
     /// Each machine's host (H5), by machine id, with the ssh host it was made for.
@@ -108,6 +112,7 @@ pub struct Shell {
     git_heads: HashMap<String, wraithgrid_git::GitStatus>,
     /// The top bar's Git menu, while open (#162).
     git_menu: Option<git_button::GitMenu>,
+    sidebar: sidebar::SidebarState,
     /// usage.json, shared with the poll; and the latest limits per account.
     usage: Arc<std::sync::Mutex<wraithgrid_usage::store::UsageStore>>,
     limits: std::collections::BTreeMap<String, wraithgrid_usage::model::AccountLimits>,
@@ -143,6 +148,7 @@ impl Shell {
             tray: None,
             _tray_tasks: vec![],
             _second_launch: None,
+            focus: None,
             opened: false,
             remotes: HashMap::new(),
             live_runs: Default::default(),
@@ -169,6 +175,7 @@ impl Shell {
             changes: None,
             git_heads: HashMap::new(),
             git_menu: None,
+            sidebar: Default::default(),
             usage: Arc::new(std::sync::Mutex::new(
                 wraithgrid_usage::store::UsageStore::new(
                     wraithgrid_usage::store::UsageStoreDeps::new(
@@ -2568,192 +2575,8 @@ impl Shell {
             })
     }
 
-    fn sidebar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme().clone();
-        let c = self.config().clone();
-        let width = c.settings.sidebar_width as f32;
-        let section = |label: &'static str| {
-            div()
-                .px_3()
-                .pt_3()
-                .pb_1()
-                .text_xs()
-                .text_color(theme.muted_foreground)
-                .child(label)
-        };
-        let projects = c.workspaces.iter().map(|w| {
-            let active = w.id == c.active_workspace;
-            let id = w.id.clone();
-            let tint = parse_hex(&w.color).unwrap_or(theme.muted_foreground);
-            div()
-                .id(SharedString::from(format!("ws-{}", w.id)))
-                .mx_2()
-                .px_2()
-                .py_1()
-                .rounded_md()
-                .flex()
-                .items_center()
-                .gap_2()
-                .cursor_pointer()
-                .when(active, |d| d.bg(theme.secondary))
-                .hover(|d| d.bg(theme.secondary))
-                .child(badge(&w.name, tint))
-                .child(div().flex_1().truncate().child(w.name.clone()))
-                .child(div().text_xs().text_color(theme.muted_foreground).child(
-                    if w.panes.is_empty() {
-                        String::new()
-                    } else {
-                        w.panes.len().to_string()
-                    },
-                ))
-                .on_mouse_down(
-                    MouseButton::Right,
-                    cx.listener({
-                        let id = id.clone();
-                        move |this, _, window, cx| this.open_project(id.clone(), window, cx)
-                    }),
-                )
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.open_project_page(id.clone(), window, cx)
-                }))
-        });
-        let accounts = c.accounts.iter().map(|a| {
-            let color = parse_hex(&a.color).unwrap_or(theme.primary);
-            div()
-                .mx_2()
-                .px_2()
-                .py_1()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(badge(&a.name, color))
-                .child(div().flex_1().truncate().child(a.name.clone()))
-                .child(match self.limits_label(&a.id) {
-                    Some((text, worst)) => {
-                        let at = self.config().settings.auto_switch_at as f64 / 100.0;
-                        let color = if worst >= at {
-                            theme.danger
-                        } else if worst >= 0.8 {
-                            theme.warning
-                        } else {
-                            theme.muted_foreground
-                        };
-                        div().text_xs().text_color(color).child(text)
-                    }
-                    None => div()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(a.cli.spec().provider_label),
-                })
-        });
-        div()
-            .id("sidebar")
-            .w(px(width))
-            .h_full()
-            .flex_shrink_0()
-            .flex()
-            .flex_col()
-            .bg(theme.sidebar)
-            .border_r_1()
-            .border_color(theme.border)
-            .text_sm()
-            .child(
-                div()
-                    .id("sidebar-list")
-                    .flex_1()
-                    .min_h(px(0.))
-                    .flex()
-                    .flex_col()
-                    .overflow_y_scroll()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .child(div().flex_1().child(section("Projects")))
-                            .child(
-                                div()
-                                    .id("new-project")
-                                    .mr_3()
-                                    .mt_2()
-                                    .px_1()
-                                    .rounded_sm()
-                                    .cursor_pointer()
-                                    .text_color(theme.muted_foreground)
-                                    .hover(|d| d.bg(theme.secondary))
-                                    .child("+")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.open_new_project(window, cx)
-                                    })),
-                            ),
-                    )
-                    .children(projects)
-                    .child(
-                        div()
-                            .id("open-accounts")
-                            .cursor_pointer()
-                            .hover(|d| d.text_color(theme.foreground))
-                            .child(section("Accounts"))
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.open_accounts(window, cx)),
-                            ),
-                    )
-                    .children(accounts),
-            )
-            .child(
-                div()
-                    .id("open-settings")
-                    .m_2()
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .text_color(theme.muted_foreground)
-                    .hover(|d| d.bg(theme.secondary))
-                    .child("⚙ Settings")
-                    .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx))),
-            )
-            .child(
-                div()
-                    .id("open-usage")
-                    .mx_2()
-                    .mb_2()
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .text_color(theme.muted_foreground)
-                    .hover(|d| d.bg(theme.secondary))
-                    .child("◔ Usage")
-                    .on_click(cx.listener(|this, _, window, cx| this.open_usage(window, cx))),
-            )
-            .child(
-                div()
-                    .id("open-mods")
-                    .mx_2()
-                    .mb_2()
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .text_color(theme.muted_foreground)
-                    .hover(|d| d.bg(theme.secondary))
-                    .child("✦ Mods")
-                    .on_click(cx.listener(|this, _, window, cx| this.open_mods(window, cx))),
-            )
-            .child(
-                div()
-                    .id("open-scheduled")
-                    .mx_2()
-                    .mb_2()
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .text_color(theme.muted_foreground)
-                    .hover(|d| d.bg(theme.secondary))
-                    .child("◷ Scheduled")
-                    .on_click(cx.listener(|this, _, window, cx| this.open_scheduled(window, cx))),
-            )
+    fn sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.render_sidebar(window, cx)
     }
 
     fn grid(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -2950,6 +2773,11 @@ impl Shell {
             return;
         }
         let k = &event.keystroke;
+        // A sidebar menu or picker closes on Esc wherever the focus is.
+        if k.key == "escape" && self.close_side_popups(cx) {
+            window.refresh();
+            return cx.stop_propagation();
+        }
         let m = k.modifiers;
         let press = Press {
             key: &k.key,
@@ -3227,8 +3055,13 @@ impl Render for Shell {
             Modal::RemoveWorktree(d) => d.clone().into_any_element(),
             Modal::Shortcuts(s) => s.clone().into_any_element(),
         });
+        let focus = self.focus.get_or_insert_with(|| cx.focus_handle()).clone();
+        if window.focused(cx).is_none() {
+            window.focus(&focus, cx);
+        }
         div()
             .id("shell")
+            .track_focus(&focus)
             .relative()
             .capture_key_down(cx.listener(Self::shortcut))
             .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| {
@@ -3252,7 +3085,7 @@ impl Render for Shell {
                     .flex_1()
                     .min_h(px(0.))
                     .flex()
-                    .child(self.sidebar(cx))
+                    .child(self.sidebar(window, cx))
                     .child(div().flex_1().min_w(px(0.)).h_full().child(grid))
                     .when_some(
                         self.changes.clone().filter(|_| {
@@ -3367,29 +3200,6 @@ fn auto_title(shell: bool, cwd: &str) -> String {
 pub(crate) fn parse_hex(s: &str) -> Option<Hsla> {
     let hex = s.strip_prefix('#').filter(|h| h.len() == 6)?;
     u32::from_str_radix(hex, 16).ok().map(|v| rgb(v).into())
-}
-
-/// A rounded square with the name's first letter (projects and accounts without an icon).
-fn badge(name: &str, color: Hsla) -> impl IntoElement {
-    let letter = name
-        .chars()
-        .next()
-        .map(|c| c.to_uppercase().to_string())
-        .unwrap_or_default();
-    let mut bg = color;
-    bg.a = 0.22;
-    div()
-        .size(px(20.))
-        .flex_shrink_0()
-        .rounded_md()
-        .flex()
-        .items_center()
-        .justify_center()
-        .text_xs()
-        .font_weight(FontWeight::SEMIBOLD)
-        .bg(bg)
-        .text_color(color)
-        .child(letter)
 }
 
 fn button(id: impl Into<ElementId>, label: &'static str, cx: &mut Context<Shell>) -> Stateful<Div> {

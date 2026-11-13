@@ -90,7 +90,7 @@ impl Shell {
 
     /// `startTeam`: opens the team's agents as chats (`only`: one of them), showing the open
     /// ones; asks first if an agent's account is missing or at its limit (`force` skips that).
-    fn start_team(
+    pub(super) fn start_team(
         &mut self,
         ws_id: String,
         only: Option<String>,
@@ -316,7 +316,7 @@ impl Shell {
 
     /// `stopTeam`: closes the team's panes (their chats go to History); asks first if one is
     /// working. Unlike closing each, it doesn't offer to remove every agent's branch folder.
-    fn stop_team(
+    pub(super) fn stop_team(
         &mut self,
         ws_id: String,
         force: bool,
