@@ -190,6 +190,7 @@ impl Shell {
             || self.sidebar_popup_open()
             || self.git_menu.is_some()
             || self.pane_menu.is_some()
+            || self.utility_menu.is_some()
             || self.closing.is_some();
         let views: Vec<(String, Entity<PreviewView>)> = self
             .previews

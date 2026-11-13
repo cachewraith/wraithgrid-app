@@ -323,9 +323,136 @@ pub fn shown_layout(saved: Option<&LayoutNode>, pane_ids: &[String]) -> Option<L
     normalize_layout(saved, pane_ids).or_else(|| auto_grid(pane_ids))
 }
 
+/// The top bar's layout presets (`PRESETS`): 1 pane, 2 side by side, 2×2, 3 columns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Preset {
+    One,
+    Two,
+    Four,
+    Three,
+}
+
+impl Preset {
+    pub const ALL: [Preset; 4] = [Preset::One, Preset::Two, Preset::Four, Preset::Three];
+
+    pub fn slots(self) -> usize {
+        match self {
+            Preset::One => 1,
+            Preset::Two => 2,
+            Preset::Four => 4,
+            Preset::Three => 3,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Preset::One => "1 pane",
+            Preset::Two => "2 side by side",
+            Preset::Four => "2×2 grid",
+            Preset::Three => "3 columns",
+        }
+    }
+}
+
+/// `buildPreset`: panes fill the slots in order; leftover panes stay in the project, hidden;
+/// missing ones become empty "New pane here" slots.
+pub fn build_preset(
+    preset: Preset,
+    ordered: &[String],
+    mut new_slot_id: impl FnMut() -> String,
+) -> LayoutNode {
+    let mut cells: Vec<LayoutNode> = (0..preset.slots())
+        .map(|i| match ordered.get(i) {
+            Some(id) => pane(id),
+            None => LayoutNode::Empty {
+                slot_id: new_slot_id(),
+            },
+        })
+        .collect();
+    match preset {
+        Preset::One => cells.remove(0),
+        Preset::Two | Preset::Three => split(SplitDir::Row, cells, &[]),
+        Preset::Four => {
+            let bottom = cells.split_off(2);
+            split(
+                SplitDir::Col,
+                vec![
+                    split(SplitDir::Row, cells, &[]),
+                    split(SplitDir::Row, bottom, &[]),
+                ],
+                &[],
+            )
+        }
+    }
+}
+
+/// `detectPreset`: which preset the tree is exactly (shape and even sizes), if any.
+pub fn detect_preset(node: Option<&LayoutNode>) -> Option<Preset> {
+    let leaf = |n: &LayoutNode| !matches!(n, LayoutNode::Split { .. });
+    let evenly = |sizes: &[f64]| {
+        sizes
+            .iter()
+            .all(|s| (s - 100.0 / sizes.len() as f64).abs() < 0.5)
+    };
+    match node? {
+        n if leaf(n) => Some(Preset::One),
+        LayoutNode::Split {
+            dir: SplitDir::Row,
+            sizes,
+            children,
+        } if children.iter().all(leaf) && evenly(sizes) => match children.len() {
+            2 => Some(Preset::Two),
+            3 => Some(Preset::Three),
+            _ => None,
+        },
+        LayoutNode::Split {
+            dir: SplitDir::Col,
+            sizes,
+            children,
+        } if children.len() == 2
+            && evenly(sizes)
+            && children.iter().all(|r| {
+                matches!(r, LayoutNode::Split { dir: SplitDir::Row, sizes, children }
+                    if children.len() == 2 && children.iter().all(leaf) && evenly(sizes))
+            }) =>
+        {
+            Some(Preset::Four)
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn presets_build_and_detect() {
+        let ids: Vec<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
+        let mut n = 0;
+        let mut slot = || {
+            n += 1;
+            format!("s{n}")
+        };
+        let four = build_preset(Preset::Four, &ids, &mut slot);
+        assert_eq!(pane_ids(Some(&four)), ["a", "b", "c"]);
+        assert_eq!(empty_slot_ids(Some(&four)), ["s1"]);
+        assert_eq!(detect_preset(Some(&four)), Some(Preset::Four));
+        let two = build_preset(Preset::Two, &ids, &mut slot);
+        assert_eq!(pane_ids(Some(&two)), ["a", "b"]);
+        assert_eq!(detect_preset(Some(&two)), Some(Preset::Two));
+        assert_eq!(
+            detect_preset(Some(&build_preset(Preset::One, &ids, &mut slot))),
+            Some(Preset::One)
+        );
+        assert_eq!(
+            detect_preset(Some(&build_preset(Preset::Three, &ids, &mut slot))),
+            Some(Preset::Three)
+        );
+        let uneven = split(SplitDir::Row, vec![pane("a"), pane("b")], &[70.0, 30.0]);
+        assert_eq!(detect_preset(Some(&uneven)), None);
+        assert_eq!(detect_preset(None), None);
+    }
 
     fn ids(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()

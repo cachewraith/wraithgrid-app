@@ -55,6 +55,7 @@ mod preview;
 mod sidebar;
 mod status_bar;
 mod team;
+mod top_bar;
 mod tray;
 
 pub use machines::{probe_text, remote_host};
@@ -86,6 +87,10 @@ pub struct Shell {
     live_runs: std::collections::HashSet<String>,
     /// Chat panes opened as terminals this session (until the chat view is ported).
     as_terminal: Vec<String>,
+    /// The top row's ⋯ menu, open at a point.
+    utility_menu: Option<Point<Pixels>>,
+    /// The empty layout slot a new pane goes into ("New pane here").
+    pending_slot: Option<String>,
     /// This version, once after an update restarted the app ("Updated to X").
     pub updated_to: Option<String>,
     /// A pane's menu, open at a point (`Pane.tsx`'s ContextMenu).
@@ -166,6 +171,8 @@ impl Shell {
             remotes: HashMap::new(),
             live_runs: Default::default(),
             as_terminal: Vec::new(),
+            utility_menu: None,
+            pending_slot: None,
             updated_to: None,
             pane_menu: None,
             closing: None,
@@ -2058,6 +2065,7 @@ impl Shell {
     /// Closes the overlay and gives the keyboard back to the focused pane.
     fn close_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.modal = None;
+        self.pending_slot = None;
         if let Some(pane_id) = self.focused.clone() {
             // A new pane has no view until it is drawn: focus it on the next frame.
             cx.on_next_frame(window, move |this, window, cx| {
@@ -2123,6 +2131,8 @@ impl Shell {
         let into = ws.unwrap_or_else(|| self.config().active_workspace.clone());
         let here = into == self.config().active_workspace;
         let target = if here { self.focused.clone() } else { None };
+        // From an empty slot's "New pane here": that slot.
+        let slot = self.pending_slot.take();
         let dir = target
             .as_ref()
             .and_then(|t| self.pane_bounds.borrow().get(t).copied())
@@ -2141,7 +2151,7 @@ impl Shell {
                 w.layout = Some(place_new_pane(
                     shown.as_ref(),
                     &pane_id,
-                    None,
+                    slot.as_deref(),
                     target.as_deref(),
                     dir,
                 ));
@@ -2647,6 +2657,7 @@ impl Shell {
     }
 
     fn title_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let (left, right) = self.top_bar(window, cx);
         let theme = cx.theme();
         let tiled_edge = match window.window_decorations() {
             Decorations::Client { tiling } => {
@@ -2683,7 +2694,6 @@ impl Shell {
                     _ => window.minimize_window(),
                 }))
         };
-        let project = self.config().active().name.clone();
         div()
             .id("title-bar")
             .h(px(TITLE_BAR))
@@ -2705,20 +2715,9 @@ impl Shell {
                 }
             })
             .child(div().font_weight(FontWeight::SEMIBOLD).child("Wraithgrid"))
-            .child(div().text_color(theme.muted_foreground).child(project))
-            .children(self.git_button(window, cx))
+            .when(self.blocked.is_none(), |d| d.children(left))
             .child(div().flex_1())
-            .when(self.blocked.is_none(), |d| {
-                d.child(
-                    button("new-shell", "+ Terminal", cx)
-                        .on_click(cx.listener(|this, _, _, cx| this.new_pane(None, cx))),
-                )
-                .child(
-                    button("new-agent", "+ New chat", cx).on_click(
-                        cx.listener(|this, _, window, cx| this.open_new_pane(window, cx)),
-                    ),
-                )
-            })
+            .when(self.blocked.is_none(), |d| d.children(right))
             .when_some(self.update_button(), |d, (label, enabled)| {
                 d.child(
                     button("update", "", cx)
@@ -2797,7 +2796,34 @@ impl Shell {
                 Some(p) => self.pane(&p.clone(), window, cx),
                 None => div().into_any_element(),
             },
-            LayoutNode::Empty { .. } => div().size_full().into_any_element(),
+            LayoutNode::Empty { slot_id } => {
+                let slot = slot_id.clone();
+                let theme = cx.theme().clone();
+                div()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .border_1()
+                    .border_dashed()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("slot-{slot_id}")))
+                            .px_3()
+                            .py_1()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .text_color(theme.muted_foreground)
+                            .hover(|d| d.bg(theme.secondary))
+                            .child("+ New pane here")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.pending_slot = Some(slot.clone());
+                                this.open_new_pane(window, cx);
+                            })),
+                    )
+                    .into_any_element()
+            }
             LayoutNode::Split {
                 dir,
                 sizes,
@@ -3271,6 +3297,7 @@ impl Render for Shell {
         self.sync_preview_visibility(&on_screen, cx);
         let grid = self.grid(window, cx);
         let pane_menu = self.pane_menu_layer(window, cx);
+        let utility_menu = self.utility_menu_layer(window, cx);
         let status_bar = self.status_bar(cx).into_any_element();
         let modal: Option<AnyElement> = self.modal.as_ref().map(|m| match m {
             Modal::NewPane(d) => d.clone().into_any_element(),
@@ -3335,6 +3362,7 @@ impl Render for Shell {
             )
             .child(status_bar)
             .children(pane_menu)
+            .children(utility_menu)
             .when_some(modal, |d, modal| {
                 d.child(
                     div()
