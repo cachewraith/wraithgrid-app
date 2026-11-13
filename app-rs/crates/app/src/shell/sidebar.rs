@@ -150,7 +150,7 @@ fn z(v: f32) -> Rems {
 
 /// The theme's colors under the CSS names the Electron styles use.
 #[derive(Clone, Copy)]
-struct Pal {
+pub(super) struct Pal {
     tx: Hsla,
     mu: Hsla,
     fa: Hsla,
@@ -168,7 +168,7 @@ struct Pal {
     bg: Hsla,
 }
 
-fn pal(cx: &App) -> Pal {
+pub(super) fn pal(cx: &App) -> Pal {
     let t = cx.theme();
     Pal {
         tx: t.foreground,
@@ -414,7 +414,7 @@ fn initial(name: &str, size: f32, p: &Pal) -> Div {
 }
 
 /// A CLI's mark (`ProviderLogo`), else the name's letter.
-fn provider_logo(cli: &str, name: &str, size: f32, p: &Pal) -> AnyElement {
+pub(super) fn provider_logo(cli: &str, name: &str, size: f32, p: &Pal) -> AnyElement {
     match provider_logos().get(cli) {
         Some(logo) => img(svg_image(svg_of(logo, p.tx)))
             .size(z(size))

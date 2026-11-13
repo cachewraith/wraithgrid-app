@@ -4,7 +4,7 @@
 //! after, in the same file and shape the Electron app uses.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -46,6 +46,7 @@ use crate::terminal::{
 };
 use crate::usage_view::{UsageView, UsageViewEvent};
 
+mod auto_switch;
 mod git_button;
 mod handoff;
 mod later;
@@ -91,6 +92,12 @@ pub struct Shell {
     /// Panes whose sign-in banner was closed, and those where /login was run.
     banner_hidden: Vec<String>,
     login_started: Vec<String>,
+    /// Account-switch questions waiting, oldest first (#161).
+    switch_asks: Vec<auto_switch::SwitchAsk>,
+    /// Panes answered Stay, by the account they stayed on.
+    switch_declined: HashMap<String, String>,
+    told_none_left: HashSet<String>,
+    switching: HashSet<String>,
     /// The top row's ⋯ menu, open at a point.
     utility_menu: Option<Point<Pixels>>,
     /// The empty layout slot a new pane goes into ("New pane here").
@@ -177,6 +184,10 @@ impl Shell {
             as_terminal: Vec::new(),
             banner_hidden: vec![],
             login_started: vec![],
+            switch_asks: vec![],
+            switch_declined: HashMap::new(),
+            told_none_left: HashSet::new(),
+            switching: HashSet::new(),
             utility_menu: None,
             pending_slot: None,
             updated_to: None,
@@ -1698,98 +1709,6 @@ impl Shell {
             .collect()
     }
 
-    /// After a turn: at the account's limit the chat carries on as the next account with room,
-    /// asking first, on its own, or not at all (#61, #161).
-    fn maybe_switch(
-        &mut self,
-        pane_id: &str,
-        error: Option<String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let s = &self.config().settings;
-        if s.auto_switch_mode == wraithgrid_core::types::AutoSwitchMode::Off {
-            return;
-        }
-        let (mode, at) = (s.auto_switch_mode, s.auto_switch_at);
-        let Some(from_id) = self
-            .config()
-            .workspaces
-            .iter()
-            .flat_map(|w| &w.panes)
-            .find(|p| p.id == pane_id)
-            .and_then(|p| p.account_id.clone())
-        else {
-            return;
-        };
-        let accounts = self.usage_accounts();
-        let Some(from) = accounts.iter().find(|a| a.id == from_id) else {
-            return;
-        };
-        let decision = wraithgrid_usage::auto_switch::decide_switch(
-            &accounts,
-            from,
-            &self.limits,
-            wraithgrid_usage::now_ms(),
-            at,
-            error.as_deref(),
-        );
-        let chat = self.chats.get(pane_id).cloned();
-        match decision {
-            wraithgrid_usage::auto_switch::SwitchDecision::Stay => {}
-            wraithgrid_usage::auto_switch::SwitchDecision::NoneLeft { reason } => {
-                if let Some(chat) = chat {
-                    chat.update(cx, |c, cx| {
-                        c.add_notice(wraithgrid_chat::ItemLevel::Error, &reason, cx)
-                    });
-                }
-            }
-            wraithgrid_usage::auto_switch::SwitchDecision::Switch { to, reason, resend } => {
-                let (to_id, to_name) = (to.id.clone(), to.name.clone());
-                let resend_text = if resend {
-                    chat.as_ref().and_then(|c| c.read(cx).last_user_text())
-                } else {
-                    None
-                };
-                if mode == wraithgrid_core::types::AutoSwitchMode::Auto {
-                    if let Some(chat) = &chat {
-                        chat.update(cx, |c, cx| {
-                            c.add_notice(
-                                wraithgrid_chat::ItemLevel::Info,
-                                &format!("{reason}: switching to {to_name}"),
-                                cx,
-                            )
-                        });
-                    }
-                    self.continue_as(pane_id, &to_id, resend_text, window, cx);
-                    return;
-                }
-                let dialog = cx.new(|_| {
-                    ChoiceDialog::new(
-                        reason,
-                        "The chat can carry on as your next account with room, with the whole conversation.",
-                        vec![(to_id.clone(), format!("Switch to {to_name}"), if resend { "and send the message again".into() } else { String::new() })],
-                        "Stay",
-                    )
-                });
-                let pane = pane_id.to_string();
-                cx.subscribe_in(
-                    &dialog,
-                    window,
-                    move |this, _, e: &ChoiceEvent, window, cx| {
-                        if let ChoiceEvent::Pick(to) = e {
-                            this.continue_as(&pane, to, resend_text.clone(), window, cx);
-                        }
-                        this.close_modal(window, cx);
-                    },
-                )
-                .detach();
-                self.modal = Some(Modal::Choice(dialog));
-                cx.notify();
-            }
-        }
-    }
-
     /// "Continue as…" for a chat pane: the other signed-in accounts of its CLI.
     fn ask_continue_as(&mut self, pane_id: String, window: &mut Window, cx: &mut Context<Self>) {
         let c = self.config();
@@ -2081,6 +2000,10 @@ impl Shell {
     fn close_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.modal = None;
         self.pending_slot = None;
+        self.show_switch_ask(window, cx);
+        if self.modal.is_some() {
+            return;
+        }
         if let Some(pane_id) = self.focused.clone() {
             // A new pane has no view until it is drawn: focus it on the next frame.
             cx.on_next_frame(window, move |this, window, cx| {
@@ -3348,6 +3271,7 @@ impl Render for Shell {
             Modal::RemoveWorktree(d) => d.clone().into_any_element(),
             Modal::Shortcuts(s) => s.clone().into_any_element(),
             Modal::Login(d) => d.clone().into_any_element(),
+            Modal::Switch(d) => d.clone().into_any_element(),
         });
         let focus = self.focus.get_or_insert_with(|| cx.focus_handle()).clone();
         if window.focused(cx).is_none() {
@@ -3593,6 +3517,7 @@ enum Modal {
     RemoveWorktree(Entity<git_button::RemoveWorktreeDialog>),
     Shortcuts(Entity<ShortcutsSheet>),
     Login(Entity<crate::login_dialog::LoginDialog>),
+    Switch(Entity<auto_switch::AutoSwitchDialog>),
 }
 
 /// Where the in-app update is (`update-install.ts` phases); About shows it.
