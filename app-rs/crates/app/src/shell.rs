@@ -981,6 +981,24 @@ impl Shell {
                             .for_each(|a| a.signed_in = true);
                         Ok(())
                     }
+                    AccountsEvent::Folder(op) => {
+                        use crate::accounts_view::FolderOp;
+                        use wraithgrid_core::accounts as acc;
+                        match op {
+                            FolderOp::Create(name) => {
+                                acc::create_folder(&mut next, name);
+                            }
+                            FolderOp::Rename(id, name) => acc::rename_folder(&mut next, id, name),
+                            FolderOp::Toggle(id) => acc::toggle_folder(&mut next, id),
+                            FolderOp::Delete(id) => acc::delete_folder(&mut next, id),
+                            FolderOp::Move(id, to) => {
+                                acc::move_account_to_folder(&mut next, id, to.as_deref())
+                            }
+                        }
+                        this.update(cx, |c| *c = next.clone());
+                        // In place: a folder toggle must not reset the page.
+                        return view.update(cx, |v, cx| v.set_folders(&next, cx));
+                    }
                     AccountsEvent::Login { id } => {
                         this.accounts_view = None;
                         return this.login(id.clone(), window, cx);

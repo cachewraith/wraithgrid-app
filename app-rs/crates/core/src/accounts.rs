@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use crate::agent_cli::AgentCli;
-use crate::config::{Account, Config, Extra};
+use crate::config::{Account, AccountFolder, Config, Extra};
 use crate::ids::new_id;
 use crate::paths::{accounts_root, base_name, contract_home, slugify};
 use crate::types::ACCOUNT_COLORS;
@@ -137,6 +137,64 @@ pub fn remove_account(config: &mut Config, id: &str) -> Vec<String> {
     panes
 }
 
+/// Folders an account list may have (`createFolder`).
+pub const FOLDERS_MAX: usize = 32;
+
+/// A folder at the end of the list; None when the name is empty or there are 32 already.
+pub fn create_folder(config: &mut Config, name: &str) -> Option<String> {
+    let name: String = name.trim().chars().take(64).collect();
+    if name.is_empty() || config.account_folders.len() >= FOLDERS_MAX {
+        return None;
+    }
+    let id = new_id("f");
+    config.account_folders.push(AccountFolder {
+        id: id.clone(),
+        name,
+        collapsed: false,
+        icon: String::new(),
+        color: String::new(),
+        extra: Extra::default(),
+    });
+    Some(id)
+}
+
+/// Renames a folder; an empty name keeps the old one.
+pub fn rename_folder(config: &mut Config, id: &str, name: &str) {
+    let name: String = name.trim().chars().take(64).collect();
+    if name.is_empty() {
+        return;
+    }
+    for f in config.account_folders.iter_mut().filter(|f| f.id == id) {
+        f.name = name.clone();
+    }
+}
+
+pub fn toggle_folder(config: &mut Config, id: &str) {
+    for f in config.account_folders.iter_mut().filter(|f| f.id == id) {
+        f.collapsed = !f.collapsed;
+    }
+}
+
+/// The folder's accounts move to the top level; none are removed.
+pub fn delete_folder(config: &mut Config, id: &str) {
+    config.account_folders.retain(|f| f.id != id);
+    for a in config.accounts.iter_mut() {
+        if a.folder_id.as_deref() == Some(id) {
+            a.folder_id = None;
+        }
+    }
+}
+
+/// Into a folder, or out of any (None); a folder that doesn't exist changes nothing.
+pub fn move_account_to_folder(config: &mut Config, id: &str, folder: Option<&str>) {
+    if folder.is_some_and(|f| !config.account_folders.iter().any(|x| x.id == f)) {
+        return;
+    }
+    for a in config.accounts.iter_mut().filter(|a| a.id == id) {
+        a.folder_id = folder.map(str::to_string);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,5 +257,37 @@ mod tests {
         assert_eq!(unique_slug("x", &taken), "x-3");
         assert_eq!(unique_slug("", &HashSet::new()), "account");
         let _ = std::fs::remove_dir_all(h);
+    }
+
+    #[test]
+    fn folders_group_accounts() {
+        let dir = home("folders");
+        let mut c = default_config();
+        let a = add_account(&mut c, "work", "", AgentCli::Claude, &dir).unwrap();
+        assert_eq!(create_folder(&mut c, "  "), None);
+        let f = create_folder(&mut c, "Clients").unwrap();
+        move_account_to_folder(&mut c, &a, Some(&f));
+        assert_eq!(
+            c.account(&a).unwrap().folder_id.as_deref(),
+            Some(f.as_str())
+        );
+        move_account_to_folder(&mut c, &a, Some("f-missing"));
+        assert_eq!(
+            c.account(&a).unwrap().folder_id.as_deref(),
+            Some(f.as_str())
+        );
+        rename_folder(&mut c, &f, "");
+        rename_folder(&mut c, &f, "Team");
+        toggle_folder(&mut c, &f);
+        assert_eq!(c.account_folders[0].name, "Team");
+        assert!(c.account_folders[0].collapsed);
+        delete_folder(&mut c, &f);
+        assert!(c.account_folders.is_empty());
+        assert_eq!(c.account(&a).unwrap().folder_id, None);
+        for i in 0..FOLDERS_MAX {
+            assert!(create_folder(&mut c, &format!("F{i}")).is_some());
+        }
+        assert_eq!(create_folder(&mut c, "one too many"), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

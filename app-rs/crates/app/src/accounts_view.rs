@@ -12,6 +12,9 @@ use wraithgrid_core::agent_cli::AgentCli;
 use wraithgrid_core::config::Config;
 use wraithgrid_core::types::ACCOUNT_COLORS;
 
+mod folders;
+pub use folders::FolderOp;
+
 pub enum AccountsEvent {
     Add {
         name: String,
@@ -31,6 +34,8 @@ pub enum AccountsEvent {
     MarkSignedIn {
         id: String,
     },
+    /// Account folders (`accountFolders`) and which folder an account is in.
+    Folder(FolderOp),
     Close,
 }
 
@@ -52,6 +57,7 @@ pub struct AccountsView {
     color: String,
     confirm_remove: Option<String>,
     pub error: Option<String>,
+    folders: folders::Folders,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -99,6 +105,7 @@ impl AccountsView {
             color: wraithgrid_core::accounts::next_free_color(&config.accounts),
             confirm_remove: None,
             error: None,
+            folders: folders::Folders::new(config),
             _subscriptions: subs,
         }
     }
@@ -122,7 +129,7 @@ impl Focusable for AccountsView {
 }
 
 impl Render for AccountsView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let small = |id: SharedString, label: &'static str| {
             div()
@@ -138,6 +145,7 @@ impl Render for AccountsView {
                 .hover(|d| d.bg(theme.secondary))
                 .child(label)
         };
+        let folders = (!self.rows.is_empty()).then(|| self.folders_section(window, cx));
         let rows = self.rows.iter().map(|r| {
             let (login, mark, remove, really) =
                 (r.id.clone(), r.id.clone(), r.id.clone(), r.id.clone());
@@ -323,6 +331,7 @@ impl Render for AccountsView {
                             .on_click(cx.listener(|_, _, _, cx| cx.emit(AccountsEvent::Close))),
                     ),
             )
+            .children(folders)
             .child(
                 div()
                     .max_w(px(760.))
