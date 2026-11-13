@@ -16,6 +16,7 @@ mod keys;
 mod machines_row;
 mod mods_glue;
 mod mods_view;
+mod preview_view;
 mod project_view;
 mod runtime;
 mod scheduled_view;
@@ -47,6 +48,7 @@ use runtime::{electron_running, pane_host, resolve_path_in_background, Router};
 use shell::Shell;
 
 fn main() {
+    runtime::force_gdk_x11();
     let argv: Vec<String> = std::env::args().skip(1).collect();
     if is_cli_command(argv.first().map(String::as_str)) {
         std::process::exit(run_command_line(&argv));

@@ -17,6 +17,7 @@ chrono = { version = "=0.4.45", default-features = false, features = ["clock", "
 anyhow.workspace = true
 futures = "=0.3.34"
 gpui-kit = "=0.9.1"
+gpui-webview = "=0.9.1"
 serde_json.workspace = true
 wraithgrid-core = { path = "../core" }
 wraithgrid-chat = { path = "../chat" }
@@ -26,6 +27,7 @@ wraithgrid-remote = { path = "../remote" }
 wraithgrid-schedule = { path = "../schedule" }
 wraithgrid-themes = { path = "../themes" }
 wraithgrid-usage = { path = "../usage" }
+wry = { package = "lb-wry", version = "=0.53.3" }
 
 # Windows icon resource (build.rs); already in the lock file through GPUI's manifest.
 [build-dependencies]

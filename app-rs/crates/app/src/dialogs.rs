@@ -607,6 +607,8 @@ pub enum PaletteAction {
         pane: String,
     },
     Project(String),
+    /// "Preview: open for <project>".
+    Preview(String),
     NewPane,
     NewTerminal,
     ToggleZoom,
@@ -685,6 +687,13 @@ impl Palette {
                 label: w.name.clone(),
                 detail: "Project".into(),
                 action: PaletteAction::Project(w.id.clone()),
+            });
+        }
+        for w in config.workspaces.iter().filter(|w| w.machine_id.is_none()) {
+            items.push(Item {
+                label: format!("Preview: open for {}", w.name),
+                detail: "Preview".into(),
+                action: PaletteAction::Preview(w.id.clone()),
             });
         }
         for (label, action) in [

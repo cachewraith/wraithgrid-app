@@ -35,7 +35,34 @@ pub fn spawn_env() -> BTreeMap<String, String> {
     let path = PROCESS_PATH.wait().clone();
     let mut env: BTreeMap<String, String> = std::env::vars().collect();
     env.insert(if cfg!(windows) { "Path" } else { "PATH" }.into(), path);
+    restore_gdk_backend(&mut env);
     env
+}
+
+/// The session's `GDK_BACKEND` before the app forced X11 for the preview's webview (Linux);
+/// what the app starts gets it back.
+pub static USER_GDK_BACKEND: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+/// WebKitGTK embeds only through X11, and a `GDK_BACKEND=wayland` in the session would break
+/// it (ADR 0005): the app runs GTK on X11 and keeps the session's value for its children.
+pub fn force_gdk_x11() {
+    if cfg!(target_os = "linux") {
+        USER_GDK_BACKEND.get_or_init(|| std::env::var("GDK_BACKEND").ok());
+        // SAFETY: called first thing in main, before any thread starts.
+        unsafe { std::env::set_var("GDK_BACKEND", "x11") };
+    }
+}
+
+fn restore_gdk_backend(env: &mut BTreeMap<String, String>) {
+    match USER_GDK_BACKEND.get() {
+        Some(Some(v)) => {
+            env.insert("GDK_BACKEND".into(), v.clone());
+        }
+        Some(None) => {
+            env.remove("GDK_BACKEND");
+        }
+        None => {}
+    }
 }
 
 /// The same, without waiting for the login shell's answer: the inherited PATH until it came.
@@ -47,6 +74,7 @@ pub fn spawn_env_now() -> BTreeMap<String, String> {
             path.clone(),
         );
     }
+    restore_gdk_backend(&mut env);
     env
 }
 

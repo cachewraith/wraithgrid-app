@@ -49,6 +49,7 @@ use crate::usage_view::{UsageView, UsageViewEvent};
 mod git_button;
 mod later;
 mod machines;
+mod preview;
 mod sidebar;
 mod team;
 mod tray;
@@ -82,6 +83,8 @@ pub struct Shell {
     live_runs: std::collections::HashSet<String>,
     /// Chat panes opened as terminals this session (until the chat view is ported).
     as_terminal: Vec<String>,
+    /// Web preview panes' views (#74), made when first shown.
+    previews: HashMap<String, Entity<crate::preview_view::PreviewView>>,
     focused: Option<String>,
     /// The pane shown alone (Zoom pane), until toggled back to the grid.
     zoomed: Option<String>,
@@ -154,6 +157,7 @@ impl Shell {
             remotes: HashMap::new(),
             live_runs: Default::default(),
             as_terminal: Vec::new(),
+            previews: HashMap::new(),
             focused: None,
             zoomed: None,
             split_bounds: Rc::default(),
@@ -576,6 +580,7 @@ impl Shell {
                             this.focused = Some(pane);
                         }
                         PaletteAction::Project(id) => this.select_workspace(id, cx),
+                        PaletteAction::Preview(id) => this.open_preview(&id, window, cx),
                         PaletteAction::NewPane => return this.open_new_pane(window, cx),
                         PaletteAction::NewTerminal => this.new_pane(None, cx),
                         PaletteAction::ToggleZoom => {
@@ -1982,6 +1987,10 @@ impl Shell {
     fn quit(&mut self, keep: bool, cx: &mut Context<Self>) {
         self.tray = None;
         self._tray_tasks.clear();
+        // Dev servers belong to their preview panes: they stop with the app (`devServers`).
+        for v in self.previews.drain().map(|(_, v)| v) {
+            v.update(cx, |v, _| v.stop_server());
+        }
         self.flush();
         self.flush_chats(cx);
         let host = self.host.clone();
@@ -2275,6 +2284,8 @@ impl Shell {
         self.host_for(pane_id).kill(pane_id);
         self.router.unregister(pane_id);
         self.terminals.remove(pane_id);
+        // Dropping the view stops its dev server.
+        self.previews.remove(pane_id);
         if let Some(chat) = self.chats.remove(pane_id) {
             chat.update(cx, |c, _| {
                 c.save();
@@ -2888,7 +2899,15 @@ impl Shell {
         let chat = pane.view == PaneView::Chat && !self.as_terminal.contains(&pane.id);
         let label = pane_label(&config, pane);
         let id = pane.id.clone();
-        let (body, status, stopped): (AnyElement, String, bool) = if chat {
+        let (body, status, stopped): (AnyElement, String, bool) = if pane.view == PaneView::Preview
+        {
+            let view = self.preview(pane, window, cx);
+            (
+                div().size_full().child(view).into_any_element(),
+                "preview".to_string(),
+                false,
+            )
+        } else if chat {
             let view = self.chat(pane, window, cx);
             let status = match view.read(cx).status() {
                 wraithgrid_chat::ChatStatus::Running => "working",
@@ -3069,6 +3088,11 @@ impl Render for Shell {
         self.pane_bounds
             .borrow_mut()
             .retain(|id, _| shown.contains(id));
+        let on_screen = match &self.zoomed {
+            Some(z) => vec![z.clone()],
+            None => shown.clone(),
+        };
+        self.sync_preview_visibility(&on_screen, cx);
         let grid = self.grid(window, cx);
         let modal: Option<AnyElement> = self.modal.as_ref().map(|m| match m {
             Modal::NewPane(d) => d.clone().into_any_element(),

@@ -13,6 +13,7 @@ pub mod layout;
 pub mod pane_env;
 pub mod paths;
 pub mod platform;
+pub mod preview;
 pub mod release_notes;
 pub mod shortcuts;
 pub mod spawn;

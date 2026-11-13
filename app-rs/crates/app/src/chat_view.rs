@@ -540,6 +540,21 @@ impl ChatView {
         true
     }
 
+    /// Puts `text` into the box after what is there, unsent ("Attach to chat" from a preview).
+    pub fn add_to_draft(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let cur = self.composer.read(cx).value().trim_end().to_string();
+        let next = if cur.is_empty() {
+            text.to_string()
+        } else {
+            format!("{cur}\n\n{text}")
+        };
+        self.composer.update(cx, |c, cx| {
+            c.set_value(next, window, cx);
+            c.focus(window, cx);
+        });
+        cx.notify();
+    }
+
     /// Debug builds only: types `text` without sending, so the menus can be looked at.
     pub fn type_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         if cfg!(debug_assertions) {

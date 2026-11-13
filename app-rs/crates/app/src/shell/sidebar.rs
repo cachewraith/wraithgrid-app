@@ -82,6 +82,7 @@ struct Picker {
 #[derive(Clone)]
 enum Act {
     NewChat(String),
+    Preview(String),
     StartTeam(String),
     StopTeam(String),
     Rename(String),
@@ -1986,6 +1987,14 @@ impl Shell {
                 )
             });
         }
+        // A web preview runs on this computer only (H5).
+        if w.machine_id.is_none() {
+            items.push(Item::new(
+                "Preview",
+                ItemIcon::Glyph(Glyph::Monitor),
+                Act::Preview(ws.into()),
+            ));
+        }
         items.push(Item::new(
             "Rename",
             ItemIcon::Glyph(Glyph::Rename),
@@ -2290,6 +2299,11 @@ impl Shell {
         out
     }
 
+    /// A sidebar menu or the icon picker is open (drawn over the grid).
+    pub(super) fn sidebar_popup_open(&self) -> bool {
+        self.sidebar.menu.is_some() || self.sidebar.picker.is_some()
+    }
+
     /// Closes an open sidebar menu or icon picker; true when one was open.
     pub(super) fn close_side_popups(&mut self, cx: &mut Context<Self>) -> bool {
         let open = self.sidebar.menu.take().is_some() | self.sidebar.picker.take().is_some();
@@ -2310,6 +2324,7 @@ impl Shell {
         self.sidebar.menu = None;
         match act {
             Act::NewChat(ws) => self.side_new_chat(ws, window, cx),
+            Act::Preview(ws) => self.open_preview(&ws, window, cx),
             Act::StartTeam(ws) => self.start_team(ws, None, false, window, cx),
             Act::StopTeam(ws) => self.stop_team(ws, false, window, cx),
             Act::Rename(ws) => self.start_rename(ws, window, cx),
