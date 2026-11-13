@@ -54,6 +54,19 @@ impl Shell {
         self.zoomed = None;
     }
 
+    /// `swap`: two panes change places in the layout.
+    pub(super) fn swap_panes(&mut self, a: &str, b: &str, cx: &mut Context<Self>) {
+        let (a, b) = (a.to_string(), b.to_string());
+        self.update(cx, |c| {
+            let id = c.active_workspace.clone();
+            if let Some(w) = c.workspaces.iter_mut().find(|w| w.id == id) {
+                let ids: Vec<String> = w.panes.iter().map(|p| p.id.clone()).collect();
+                w.layout = wraithgrid_core::layout::shown_layout(w.layout.as_ref(), &ids)
+                    .map(|l| wraithgrid_core::layout::swap_panes(&l, &a, &b));
+            }
+        });
+    }
+
     /// `showAllPanes`: hidden panes come back into an even grid.
     fn show_all_panes(&mut self, cx: &mut Context<Self>) {
         self.update(cx, |c| {

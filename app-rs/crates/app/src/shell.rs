@@ -3113,8 +3113,16 @@ impl Shell {
         let banner = self.login_banner(pane, chat, cx);
         let exited = self.exited_bar(pane, ended_text.as_deref(), cx);
         let (bounds, key) = (self.pane_bounds.clone(), pane.id.clone());
+        let target = pane.id.clone();
         div()
+            .id(SharedString::from(format!("pane-{}", pane.id)))
             .relative()
+            .drag_over::<PaneDrag>(|d, _, _, cx| d.border_color(cx.theme().primary))
+            .on_drop(cx.listener(move |this, drag: &PaneDrag, _, cx| {
+                if drag.pane_id != target {
+                    this.swap_panes(&drag.pane_id, &target, cx);
+                }
+            }))
             .child(
                 canvas(
                     move |b, _, _| bounds.borrow_mut().insert(key, b),
@@ -3149,6 +3157,15 @@ impl Shell {
                         cx.listener(move |this, e: &MouseDownEvent, _, cx| {
                             this.open_pane_menu(id.clone(), e.position, cx)
                         })
+                    })
+                    .when(self.zoomed.is_none(), |d| {
+                        d.cursor_grab().on_drag(
+                            PaneDrag {
+                                pane_id: id.clone(),
+                                title: label.clone(),
+                            },
+                            |drag, _, _, cx| cx.new(|_| drag.clone()),
+                        )
                     })
                     .child(status_dot(
                         match self.chat_states.get(&pane.id) {
@@ -3530,6 +3547,30 @@ fn status_dot(state: Option<&str>, theme: &gpui_kit::component::Theme) -> impl I
         _ => theme.muted_foreground,
     };
     div().size(px(7.)).rounded_full().flex_shrink_0().bg(color)
+}
+
+/// A pane dragged by its header onto another to swap them (dnd-kit's drag in PaneGrid.tsx).
+#[derive(Clone)]
+struct PaneDrag {
+    pane_id: String,
+    title: String,
+}
+
+impl Render for PaneDrag {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        div()
+            .px_3()
+            .py_1()
+            .rounded_md()
+            .border_1()
+            .border_color(theme.ring)
+            .bg(theme.popover)
+            .shadow_lg()
+            .text_xs()
+            .text_color(theme.foreground)
+            .child(self.title.clone())
+    }
 }
 
 enum Modal {
