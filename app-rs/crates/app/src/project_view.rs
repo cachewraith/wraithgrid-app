@@ -74,6 +74,8 @@ pub struct ProjectView {
     statuses: HashMap<String, &'static str>,
     query: Entity<InputState>,
     confirm: Option<Confirm>,
+    /// A chat row's right-click menu: the chat, whether it is open, where.
+    menu: Option<(Pane, bool, Point<Pixels>)>,
     /// The project's team (#79), between the header and the search.
     team: Entity<TeamSection>,
 }
@@ -105,6 +107,7 @@ impl ProjectView {
             statuses,
             query,
             confirm: None,
+            menu: None,
             team,
         }
     }
@@ -139,6 +142,93 @@ impl ProjectView {
         });
         cx.notify();
     }
+
+    /// Open (or Reopen) and Delete chat…, like the row's click and its trash button.
+    fn row_menu(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (pane, open, at) = self.menu.clone()?;
+        let theme = cx.theme().clone();
+        let size = window.viewport_size();
+        let item = |id: &'static str, label: &'static str, danger: bool| {
+            div()
+                .id(id)
+                .role(Role::MenuItem)
+                .aria_label(label)
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .cursor_pointer()
+                .hover(|d| d.bg(theme.secondary))
+                .when(danger, |d| d.text_color(theme.danger))
+                .child(label)
+        };
+        let close = |this: &mut Self, cx: &mut Context<Self>| {
+            this.menu = None;
+            cx.notify();
+        };
+        let (ws_id, first, del) = (self.ws_id.clone(), pane.id.clone(), pane.clone());
+        let menu = div()
+            .id("pj-menu")
+            .role(Role::Menu)
+            .aria_label(format!("Chat {}", pane.title))
+            .absolute()
+            .left(at.x.min(size.width - px(210.)))
+            .top(at.y.min(size.height - px(90.)))
+            .w(px(200.))
+            .p_1()
+            .flex()
+            .flex_col()
+            .rounded_lg()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.popover)
+            .shadow_lg()
+            .text_sm()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                item("pj-menu-open", if open { "Open" } else { "Reopen" }, false).on_click(
+                    cx.listener(move |this, _, _, cx| {
+                        close(this, cx);
+                        cx.emit(if open {
+                            ProjectPageEvent::Reveal(first.clone())
+                        } else {
+                            ProjectPageEvent::Reopen(ws_id.clone(), first.clone())
+                        });
+                    }),
+                ),
+            )
+            .child(div().h(px(1.)).my_1().bg(theme.border))
+            .child(
+                item("pj-menu-del", "Delete chat…", true).on_click(cx.listener(
+                    move |this, _, _, cx| {
+                        close(this, cx);
+                        this.ask_delete(&del, open, cx);
+                    },
+                )),
+            );
+        // A scrim over the window closes the menu on any click outside it.
+        Some(
+            deferred(
+                anchored().position(point(px(0.), px(0.))).child(
+                    div()
+                        .id("pj-scrim")
+                        .occlude()
+                        .w(size.width)
+                        .h(size.height)
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, _, cx| close(this, cx)),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(move |this, _, _, cx| close(this, cx)),
+                        )
+                        .child(menu),
+                ),
+            )
+            .with_priority(1)
+            .into_any_element(),
+        )
+    }
 }
 
 impl EventEmitter<ProjectPageEvent> for ProjectView {}
@@ -150,9 +240,10 @@ impl Focusable for ProjectView {
 }
 
 impl Render for ProjectView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let now = wraithgrid_usage::now_ms();
+        let row_menu = self.row_menu(window, cx);
         let Some(ws) = self
             .config
             .workspaces
@@ -266,7 +357,14 @@ impl Render for ProjectView {
                         )
                         .on_click(cx.listener(move |_, _, _, cx| {
                             cx.emit(ProjectPageEvent::Reveal(reveal.clone()))
-                        })),
+                        }))
+                        .on_mouse_down(MouseButton::Right, {
+                            let pane = (*p).clone();
+                            cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                                this.menu = Some((pane.clone(), true, e.position));
+                                cx.notify();
+                            })
+                        }),
                     )
                     .child(trash(format!("pj-del-{}", p.id)).on_click(
                         cx.listener(move |this, _, _, cx| this.ask_delete(&del, true, cx)),
@@ -293,7 +391,14 @@ impl Render for ProjectView {
                         })
                         .on_click(cx.listener(move |_, _, _, cx| {
                             cx.emit(ProjectPageEvent::Reopen(ws_id.clone(), reopen.clone()))
-                        })),
+                        }))
+                        .on_mouse_down(MouseButton::Right, {
+                            let pane = h.pane.clone();
+                            cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                                this.menu = Some((pane.clone(), false, e.position));
+                                cx.notify();
+                            })
+                        }),
                     )
                     .child(trash(format!("pj-hdel-{}", h.pane.id)).on_click(
                         cx.listener(move |this, _, _, cx| this.ask_delete(&del, false, cx)),
@@ -326,7 +431,7 @@ impl Render for ProjectView {
             .bg(theme.background)
             .on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
                 if e.keystroke.key == "escape" {
-                    if this.confirm.take().is_some() {
+                    if this.menu.take().is_some() || this.confirm.take().is_some() {
                         cx.notify();
                     } else {
                         cx.emit(ProjectPageEvent::Close);
@@ -509,5 +614,6 @@ impl Render for ProjectView {
                         ),
                 )
             })
+            .children(row_menu)
     }
 }

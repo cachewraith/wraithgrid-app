@@ -355,6 +355,13 @@ impl Render for ScheduledView {
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.open_job(Some(open.clone()), window, cx)
                 }))
+                .on_mouse_down(MouseButton::Right, {
+                    let id = id.clone();
+                    cx.listener(move |this, _, _, cx| {
+                        this.menu = Some(id.clone());
+                        cx.notify();
+                    })
+                })
                 .child(
                     div()
                         .flex()

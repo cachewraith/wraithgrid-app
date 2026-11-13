@@ -2,6 +2,7 @@
 
 ## 2026-11-13
 
+- [gpui] Right-click menus like Electron: a project page chat (Open / Reopen, Delete chat…) and a Scheduled job card (its actions) (files: app-rs/crates/app/src/project_view.rs, scheduled_view.rs)
 - [gpui] Accessibility, part 2: every screen (Settings with each field a named group, Accounts, sign-in, Scheduled and its job dialog, project page, teams, preview, About, themes gallery and editor, Changes, Mods, branch picker, Usage, shortcuts sheet) labels its buttons, toggles, tabs, switches and rows; glyph-only buttons (⋯ ← → ↻) and empty-label ones (update, ssh hosts) named (files: app-rs/crates/app/src/*.rs)
 - [gpui] Accessibility, part 1: buttons, toggles, menu items, list rows and dialogs in the window chrome (title/top/status bars, sidebar, pane headers and bars, Git menu), New chat / New project / palette / quit / choice / switch dialogs, folder picker and chat composer carry AccessKit roles and Electron's labels; checked with AT-SPI on a private bus (files: app-rs/crates/app/src/a11y.rs, shell.rs, shell/*.rs, dialogs.rs, folder_picker.rs, chat_view.rs, chat_view/extras.rs)
 - [gpui] Empty project screen at parity (`EmptyState.tsx`): "<project> has no panes yet", New pane with its shortcut, start from a layout (the preset's slots, then New pane for the first) (files: app-rs/crates/app/src/shell/empty.rs, shell.rs, shell/{top_bar,sidebar}.rs)
