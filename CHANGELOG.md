@@ -2,6 +2,7 @@
 
 ## 2026-11-13
 
+- [gpui] Attach files to a chat (`Composer.tsx`): 📎 opens the file chooser, files dropped on the message box attach too; images (small enough) go as images, other files as paths under "Attached files:" with × chips; `WRAITHGRID_ATTACH` (debug) now takes paths like a drop (files: app-rs/crates/app/src/chat_view.rs, chat_view/extras.rs, shell.rs)
 - [gpui] Account folders on the Accounts page (`SidebarAccounts.tsx`, were parsed but never shown): folders with counts, drag an account onto a folder or the top level, collapse, double-click or right-click to rename, New folder (32 max), delete keeps the accounts; changes update the page in place (files: app-rs/crates/core/src/accounts.rs, app-rs/crates/app/src/accounts_view.rs, accounts_view/folders.rs, shell.rs)
 - [gpui] Right-click menus like Electron: a project page chat (Open / Reopen, Delete chat…) and a Scheduled job card (its actions) (files: app-rs/crates/app/src/project_view.rs, scheduled_view.rs)
 - [gpui] Accessibility, part 2: every screen (Settings with each field a named group, Accounts, sign-in, Scheduled and its job dialog, project page, teams, preview, About, themes gallery and editor, Changes, Mods, branch picker, Usage, shortcuts sheet) labels its buttons, toggles, tabs, switches and rows; glyph-only buttons (⋯ ← → ↻) and empty-label ones (update, ssh hosts) named (files: app-rs/crates/app/src/*.rs)

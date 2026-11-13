@@ -427,10 +427,10 @@ impl ChatView {
         false
     }
 
-    /// Debug builds only: attaches a PNG as if pasted, for tests.
-    pub fn attach_png(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
+    /// Debug builds only: attaches files as if dropped, for tests.
+    pub fn attach_dropped(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
         if cfg!(debug_assertions) {
-            self.attach_image(Image::from_bytes(ImageFormat::Png, bytes), cx);
+            self.attach_paths(paths, cx);
         }
     }
 
@@ -604,7 +604,11 @@ impl ChatView {
 
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let typed = self.composer.read(cx).value().trim().to_string();
-        if typed.is_empty() && self.images.is_empty() && self.x.quotes.is_empty() {
+        if typed.is_empty()
+            && self.images.is_empty()
+            && self.x.quotes.is_empty()
+            && self.x.files.is_empty()
+        {
             return;
         }
         // Reply quotes go first, as markdown blockquotes (#164).
@@ -626,12 +630,16 @@ impl ChatView {
         }
         self.error = None;
         let images: Vec<ChatImage> = self.images.drain(..).map(|(i, _)| i).collect();
-        // `@path` mentions go to the CLI as files, as the Electron chat sends them.
-        let files: Vec<String> = split_mentions(&text)
-            .into_iter()
-            .filter(|p| p.mention)
-            .map(|p| p.text.trim_start_matches('@').to_string())
-            .collect();
+        // Attached files, then `@path` mentions, go to the CLI as files, as the Electron chat
+        // sends them.
+        let mut files: Vec<String> = self.x.files.drain(..).collect();
+        for m in split_mentions(&text).into_iter().filter(|p| p.mention) {
+            let path = m.text.trim_start_matches('@').to_string();
+            if !files.contains(&path) {
+                files.push(path);
+            }
+        }
+        files.truncate(wraithgrid_chat::CHAT_FILES_MAX);
         self.thread.add_user_message(&text, images.len(), now_ms());
         if let Some(session) = &self.session {
             if !session.send(&text, &images, &files) {
@@ -1114,10 +1122,19 @@ impl Render for ChatView {
             .children(self.later_panel(cx))
             .children(self.quote_cards(cx))
             .when(!self.images.is_empty(), |d| d.child(self.image_row(cx)))
+            .children(self.file_chips(cx))
             .child(self.choices_row(cx))
             .child(
                 div()
+                    .id(SharedString::from(format!("composer-{}", self.pane_id)))
                     .p_2()
+                    .border_1()
+                    .border_color(gpui_kit::transparent_black())
+                    // Files dropped here are attached (#: like a paste for images).
+                    .drag_over::<ExternalPaths>(|d, _, _, cx| d.border_color(cx.theme().ring))
+                    .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
+                        this.attach_paths(paths.paths(), cx)
+                    }))
                     .flex()
                     .items_end()
                     .gap_2()
@@ -1162,6 +1179,7 @@ impl Render for ChatView {
                             }))
                             .child(Textarea::new(&self.composer)),
                     )
+                    .child(self.attach_button(cx))
                     .child(self.later_button(cx))
                     .when(busy, |d| {
                         d.child(

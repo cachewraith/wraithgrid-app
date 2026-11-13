@@ -45,6 +45,8 @@ pub(super) struct Extras {
     /// ("When home's limit resets", "in 2h"), when the account's reset is known.
     reset: Option<(String, String)>,
     question: Option<Questions>,
+    /// Attached files (paperclip or drop) other than images: sent as paths after the message.
+    pub files: Vec<String>,
 }
 
 /// Claude's questions being answered (`QuestionCard`): which one, and what was picked.
@@ -988,5 +990,126 @@ impl ChatView {
                     .into_any_element()
             })
             .collect()
+    }
+}
+
+impl ChatView {
+    /// The paperclip: the system file chooser, then [`Self::attach_paths`].
+    pub(super) fn pick_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let pick = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: None,
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = pick.await else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| this.attach_paths(&paths, cx));
+        })
+        .detach();
+    }
+
+    /// Picked or dropped files: images (small enough) go as images, like a paste; the rest as
+    /// paths listed after the message (`withAttachments`).
+    pub(super) fn attach_paths(&mut self, paths: &[std::path::PathBuf], cx: &mut Context<Self>) {
+        use base64::Engine as _;
+        let picked = wraithgrid_chat::attach::read_picked(paths);
+        for img in picked.images {
+            if self.images.len() >= wraithgrid_chat::CHAT_IMAGES_MAX {
+                break;
+            }
+            let format = match img.media_type {
+                wraithgrid_chat::ChatImageType::Png => ImageFormat::Png,
+                wraithgrid_chat::ChatImageType::Jpeg => ImageFormat::Jpeg,
+                wraithgrid_chat::ChatImageType::Gif => ImageFormat::Gif,
+                wraithgrid_chat::ChatImageType::Webp => ImageFormat::Webp,
+            };
+            let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&img.data) else {
+                continue;
+            };
+            self.images
+                .push((img, std::sync::Arc::new(Image::from_bytes(format, bytes))));
+        }
+        for f in picked.files {
+            if !self.x.files.contains(&f) && self.x.files.len() < wraithgrid_chat::CHAT_FILES_MAX {
+                self.x.files.push(f);
+            }
+        }
+        cx.notify();
+    }
+
+    pub(super) fn attach_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        div()
+            .id(SharedString::from(format!("attach-{}", self.pane_id)))
+            .a11y_button("Attach files")
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .border_1()
+            .border_color(theme.border)
+            .text_color(theme.muted_foreground)
+            .cursor_pointer()
+            .hover(|d| d.bg(theme.secondary))
+            .child("📎")
+            .tooltip(|window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new("Attach files (or drop them here)")
+                    .build(window, cx)
+            })
+            .on_click(cx.listener(|this, _, window, cx| this.pick_files(window, cx)))
+            .into_any_element()
+    }
+
+    /// The attached files as chips, each with ×.
+    pub(super) fn file_chips(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.x.files.is_empty() {
+            return None;
+        }
+        let theme = cx.theme().clone();
+        let chips = self.x.files.iter().enumerate().map(|(i, f)| {
+            let name = wraithgrid_core::paths::base_name(f);
+            let path = f.clone();
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .px_2()
+                .py(px(2.))
+                .rounded_md()
+                .border_1()
+                .border_color(theme.border)
+                .text_xs()
+                .child(div().text_color(theme.muted_foreground).child("▤"))
+                .child(name.clone())
+                .child(
+                    div()
+                        .id(SharedString::from(format!("unfile-{i}")))
+                        .a11y_button(format!("Remove {name}"))
+                        .px_1()
+                        .rounded_sm()
+                        .cursor_pointer()
+                        .text_color(theme.muted_foreground)
+                        .hover(|d| d.bg(theme.secondary))
+                        .child("×")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.x.files.retain(|x| *x != path);
+                            cx.notify();
+                        })),
+                )
+        });
+        Some(
+            div()
+                .id(SharedString::from(format!("files-{}", self.pane_id)))
+                .role(Role::Group)
+                .aria_label("Attached files")
+                .px_2()
+                .flex()
+                .flex_wrap()
+                .gap_1()
+                .children(chips)
+                .into_any_element(),
+        )
     }
 }

@@ -673,16 +673,16 @@ impl Shell {
                 }
             });
         }
-        // `WRAITHGRID_ATTACH=<png>` (debug builds) attaches an image to the first chat's box.
-        if let Some(path) = std::env::var("WRAITHGRID_ATTACH")
+        // `WRAITHGRID_ATTACH=<path>[:<path>…]` (debug builds) attaches files to the first chat's
+        // box as a drop does: images as images, the rest as paths.
+        if let Some(paths) = std::env::var("WRAITHGRID_ATTACH")
             .ok()
             .filter(|_| cfg!(debug_assertions))
         {
+            let paths: Vec<std::path::PathBuf> = std::env::split_paths(&paths).collect();
             cx.on_next_frame(window, move |this, _, cx| {
-                if let (Some(chat), Ok(bytes)) =
-                    (this.chats.values().next().cloned(), std::fs::read(&path))
-                {
-                    chat.update(cx, |c, cx| c.attach_png(bytes, cx));
+                if let Some(chat) = this.chats.values().next().cloned() {
+                    chat.update(cx, |c, cx| c.attach_dropped(&paths, cx));
                 }
             });
         }
