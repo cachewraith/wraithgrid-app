@@ -47,6 +47,8 @@ pub(super) struct Extras {
     question: Option<Questions>,
     /// Attached files (paperclip or drop) other than images: sent as paths after the message.
     pub files: Vec<String>,
+    /// Thinking blocks opened ("Thought process"), by item id.
+    thinking_open: std::collections::HashSet<String>,
 }
 
 /// Claude's questions being answered (`QuestionCard`): which one, and what was picked.
@@ -1155,5 +1157,51 @@ impl ChatView {
                 )
                 .into_any_element(),
         )
+    }
+}
+
+impl ChatView {
+    /// "Thought process": closed by default, a click shows it all (`cthink`).
+    pub(super) fn thinking(&self, id: &str, text: &str, cx: &mut Context<Self>) -> AnyElement {
+        if text.trim().is_empty() {
+            return div().into_any_element();
+        }
+        let theme = cx.theme();
+        let open = self.x.thinking_open.contains(id);
+        let key = id.to_string();
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .id(SharedString::from(format!("think-{id}")))
+                    .role(Role::Button)
+                    .aria_label("Thought process")
+                    .aria_expanded(open)
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .cursor_pointer()
+                    .child(format!("{} Thought process", if open { "▾" } else { "▸" }))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !this.x.thinking_open.remove(&key) {
+                            this.x.thinking_open.insert(key.clone());
+                        }
+                        cx.notify();
+                    })),
+            )
+            .when(open, |d| {
+                d.child(
+                    div()
+                        .pl_3()
+                        .border_l_2()
+                        .border_color(theme.border)
+                        .text_sm()
+                        .italic()
+                        .text_color(theme.muted_foreground)
+                        .child(text.to_string()),
+                )
+            })
+            .into_any_element()
     }
 }

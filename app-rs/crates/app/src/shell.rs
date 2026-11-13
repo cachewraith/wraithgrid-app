@@ -101,6 +101,8 @@ pub struct Shell {
     switch_declined: HashMap<String, String>,
     told_none_left: HashSet<String>,
     switching: HashSet<String>,
+    /// The Changes panel's width while its edge is dragged.
+    diff_drag: Option<f32>,
     /// The top row's ⋯ menu, open at a point.
     utility_menu: Option<Point<Pixels>>,
     /// The empty layout slot a new pane goes into ("New pane here").
@@ -191,6 +193,7 @@ impl Shell {
             switch_declined: HashMap::new(),
             told_none_left: HashSet::new(),
             switching: HashSet::new(),
+            diff_drag: None,
             utility_menu: None,
             pending_slot: None,
             updated_to: None,
@@ -3395,17 +3398,7 @@ impl Render for Shell {
                         self.changes.clone().filter(|_| {
                             self.settings_view.is_none() && self.accounts_view.is_none()
                         }),
-                        |d, panel| {
-                            d.child(
-                                div()
-                                    .w(px(self.config().settings.diff_width as f32))
-                                    .h_full()
-                                    .flex_shrink_0()
-                                    .border_l_1()
-                                    .border_color(theme.border)
-                                    .child(panel),
-                            )
-                        },
+                        |d, panel| d.child(self.changes_panel(panel, cx)),
                     ),
             )
             .child(status_bar)
@@ -3507,6 +3500,94 @@ fn auto_title(shell: bool, cwd: &str) -> String {
 pub(crate) fn parse_hex(s: &str) -> Option<Hsla> {
     let hex = s.strip_prefix('#').filter(|h| h.len() == 6)?;
     u32::from_str_radix(hex, 16).ok().map(|v| rgb(v).into())
+}
+
+/// The Changes panel's left edge being dragged.
+#[derive(Clone)]
+struct DiffResize;
+
+impl Render for DiffResize {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
+}
+
+impl Shell {
+    /// The Changes panel at its width, with an edge to drag (`EdgeResizer`): live while
+    /// dragging, saved on release, double-click resets.
+    fn changes_panel(&mut self, panel: Entity<ChangesPanel>, cx: &mut Context<Self>) -> AnyElement {
+        use wraithgrid_core::types::{DIFF_WIDTH_DEFAULT, DIFF_WIDTH_MAX, DIFF_WIDTH_MIN};
+        let theme = cx.theme().clone();
+        let width = self
+            .diff_drag
+            .unwrap_or(self.config().settings.diff_width as f32);
+        let dragging = self.diff_drag.is_some();
+        let commit = |this: &mut Shell, cx: &mut Context<Shell>| {
+            if let Some(w) = this.diff_drag.take() {
+                this.update(cx, |c| c.settings.diff_width = w as i64);
+            }
+        };
+        div()
+            .id("changes-panel")
+            .relative()
+            .w(px(width))
+            .h_full()
+            .flex_shrink_0()
+            .border_l_1()
+            .border_color(theme.border)
+            .on_drag_move(cx.listener(|this, e: &DragMoveEvent<DiffResize>, _, cx| {
+                let w = f32::from(e.bounds.right() - e.event.position.x);
+                this.diff_drag = Some(
+                    w.clamp(DIFF_WIDTH_MIN as f32, DIFF_WIDTH_MAX as f32)
+                        .round(),
+                );
+                cx.notify();
+            }))
+            .child(panel)
+            .child(
+                div()
+                    .id("changes-resize")
+                    .group("changes-resize")
+                    .role(Role::Splitter)
+                    .aria_label("Resize changes panel")
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left(px(-3.))
+                    .w(px(6.))
+                    .cursor(CursorStyle::ResizeLeftRight)
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .left(px(2.))
+                            .w(px(2.))
+                            .bg(theme.ring)
+                            .opacity(if dragging { 0.6 } else { 0. })
+                            .group_hover("changes-resize", |s| s.opacity(0.6)),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, e: &MouseDownEvent, _, cx| {
+                            if e.click_count == 2 {
+                                this.diff_drag = None;
+                                this.update(cx, |c| c.settings.diff_width = DIFF_WIDTH_DEFAULT);
+                            }
+                        }),
+                    )
+                    .on_drag(DiffResize, |r, _, _, cx| cx.new(|_| r.clone()))
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| commit(this, cx)),
+                    )
+                    .on_mouse_up_out(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| commit(this, cx)),
+                    ),
+            )
+            .into_any_element()
+    }
 }
 
 /// A CLI's mark (`ProviderLogo`), else the name's letter; for views outside the shell.

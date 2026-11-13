@@ -1023,12 +1023,7 @@ impl Render for ChatView {
                         .child(TextView::new(&state).selectable(true))
                         .into_any_element()
                 }
-                ChatItem::Thinking { text, .. } => div()
-                    .text_sm()
-                    .italic()
-                    .text_color(theme.muted_foreground)
-                    .child(text.lines().take(4).collect::<Vec<_>>().join("\n"))
-                    .into_any_element(),
+                ChatItem::Thinking { id, text } => self.thinking(id, text, cx),
                 ChatItem::Tool(t) => self.tool_card(t, cx),
                 ChatItem::Notice { level, text, .. } => match level {
                     ItemLevel::Divider => div()
