@@ -1551,6 +1551,7 @@ impl Shell {
             let _ = this.update(cx, |this, cx| {
                 if this.git_heads != heads {
                     this.git_heads = heads;
+                    this.refresh_chat_later(cx);
                     cx.notify();
                 }
             });

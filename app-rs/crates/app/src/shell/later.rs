@@ -122,9 +122,27 @@ impl Shell {
                 })
                 .collect();
             let current = account.map(|a| a.id.clone());
+            // Under the box: the chat's folder and branch (`cc-folder`).
+            let pane = c
+                .workspaces
+                .iter()
+                .flat_map(|w| &w.panes)
+                .find(|p| p.id == pane_id);
+            let meta: Vec<String> = pane
+                .map(|p| {
+                    let branch = self
+                        .git_heads
+                        .get(&p.cwd)
+                        .filter(|g| g.repo)
+                        .and_then(|g| g.branch.clone());
+                    let folder = wraithgrid_core::folders::middle_truncate(&p.cwd, 40);
+                    std::iter::once(folder).chain(branch).collect()
+                })
+                .unwrap_or_default();
             view.update(cx, |v, cx| {
                 v.set_later(queued, reset, cx);
                 v.set_accounts(current, choices, cx);
+                v.set_meta(meta, cx);
             });
         }
     }

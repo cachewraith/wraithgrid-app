@@ -131,6 +131,8 @@ pub struct ChatView {
     markdown: HashMap<String, Entity<TextViewState>>,
     views_dir: PathBuf,
     scroll: ScrollHandle,
+    /// Under the box: the folder and branch.
+    meta: Vec<String>,
     /// Redraws every second while a turn or background work runs (the elapsed times).
     _tick: Option<Task<()>>,
     error: Option<String>,
@@ -178,6 +180,7 @@ impl ChatView {
             views_dir,
             scroll,
             _tick: None,
+            meta: Vec::new(),
             error: None,
             menu: None,
             picker: None,
@@ -322,6 +325,13 @@ impl ChatView {
         self.ensure_tick(cx);
         self.schedule_save(cx);
         cx.notify();
+    }
+
+    pub fn set_meta(&mut self, meta: Vec<String>, cx: &mut Context<Self>) {
+        if self.meta != meta {
+            self.meta = meta;
+            cx.notify();
+        }
     }
 
     fn ensure_tick(&mut self, cx: &mut Context<Self>) {
@@ -1259,6 +1269,17 @@ impl Render for ChatView {
                         )
                     }),
             )
+            .when(!self.meta.is_empty(), |d| {
+                d.child(
+                    div()
+                        .px_3()
+                        .pb_1()
+                        .truncate()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(self.meta.join(" · ")),
+                )
+            })
             .children(self.reply_button(cx))
             .children(viewer)
     }
