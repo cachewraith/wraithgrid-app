@@ -14,6 +14,8 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+
+use crate::a11y::A11y as _;
 use wraithgrid_core::login::{last_line, login_url, AuthStatus, LoginFlow};
 
 const OUTPUT_MAX: usize = 64_000;
@@ -289,6 +291,7 @@ impl Render for LoginDialog {
         let button = |id: &'static str, label: &'static str, primary: bool| {
             div()
                 .id(id)
+                .a11y_button(label)
                 .px_3()
                 .py_1()
                 .rounded_md()
@@ -448,6 +451,8 @@ impl Render for LoginDialog {
             }
         }
         div()
+            .id("login-dialog")
+            .a11y_dialog(title.clone())
             .w(px(440.))
             .p_4()
             .flex()

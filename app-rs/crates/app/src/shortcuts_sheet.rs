@@ -3,6 +3,8 @@
 
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::*;
+
+use crate::a11y::A11y as _;
 use wraithgrid_core::shortcuts::{binding_keys, bindings, chord_keys, Binding};
 use wraithgrid_core::types::ShortcutId;
 
@@ -141,6 +143,7 @@ impl Render for ShortcutsSheet {
         let button = |id: &'static str, label: &'static str| {
             div()
                 .id(id)
+                .a11y_button(label)
                 .px_3()
                 .py_1()
                 .rounded_md()
@@ -182,6 +185,7 @@ impl Render for ShortcutsSheet {
                     .child(
                         div()
                             .id("shortcuts-x")
+                            .a11y_button("Close")
                             .px_2()
                             .rounded_md()
                             .cursor_pointer()

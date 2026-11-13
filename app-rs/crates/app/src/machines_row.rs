@@ -8,6 +8,8 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+
+use crate::a11y::A11y as _;
 use wraithgrid_core::config::{is_ssh_host, Machine};
 use wraithgrid_core::ids::new_id;
 
@@ -145,6 +147,7 @@ impl Render for MachinesRow {
         let button = |id: String, label: &'static str| {
             div()
                 .id(SharedString::from(id))
+                .a11y_button(label)
                 .px_2()
                 .py(px(2.))
                 .rounded_md()
@@ -230,6 +233,7 @@ impl Render for MachinesRow {
                         .children(suggestions.into_iter().map(|h| {
                             let pick = h.clone();
                             button(format!("m-host-{h}"), "")
+                                .aria_label(h.clone())
                                 .child(h)
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     let pick = pick.clone();

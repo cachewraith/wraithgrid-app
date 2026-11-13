@@ -6,6 +6,8 @@ use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+
+use crate::a11y::A11y as _;
 use wraithgrid_core::config::{
     is_chat_model, Config, ScheduleTarget, ScheduleWhen, ScheduledJob, Workspace,
 };
@@ -155,6 +157,7 @@ impl Render for ScheduledView {
         let small = |id: String, label: &str| {
             div()
                 .id(SharedString::from(id))
+                .a11y_button(label.to_string())
                 .px_2()
                 .py(px(2.))
                 .rounded_md()
@@ -253,6 +256,13 @@ impl Render for ScheduledView {
                 let id = id.clone();
                 div()
                     .id(SharedString::from(format!("sw-{}", j.id)))
+                    .role(Role::Switch)
+                    .aria_label(format!("Run {}", first_line(&j.prompt)))
+                    .aria_toggled(if enabled {
+                        Toggled::True
+                    } else {
+                        Toggled::False
+                    })
                     .w(px(30.))
                     .h(px(16.))
                     .rounded_full()
@@ -330,6 +340,8 @@ impl Render for ScheduledView {
             let toggle_menu = id.clone();
             div()
                 .id(SharedString::from(format!("job-{}", j.id)))
+                .role(Role::Group)
+                .aria_label(first_line(&j.prompt))
                 .p_3()
                 .rounded_lg()
                 .border_1()
@@ -409,17 +421,19 @@ impl Render for ScheduledView {
                                     None => div().child("–"),
                                 }),
                         )
-                        .child(small(format!("more-{}", j.id), "⋯").on_click(cx.listener(
-                            move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.menu = if this.menu.as_ref() == Some(&toggle_menu) {
-                                    None
-                                } else {
-                                    Some(toggle_menu.clone())
-                                };
-                                cx.notify();
-                            },
-                        ))),
+                        .child(
+                            small(format!("more-{}", j.id), "⋯")
+                                .aria_label("Job actions")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.menu = if this.menu.as_ref() == Some(&toggle_menu) {
+                                        None
+                                    } else {
+                                        Some(toggle_menu.clone())
+                                    };
+                                    cx.notify();
+                                })),
+                        ),
                 )
                 .when(menu_open, |d| d.child(actions))
         });
@@ -467,6 +481,7 @@ impl Render for ScheduledView {
                             .child(
                                 div()
                                     .id("job-new")
+                                    .a11y_button("New job")
                                     .px_3()
                                     .py_1()
                                     .rounded_md()
@@ -481,6 +496,7 @@ impl Render for ScheduledView {
                             .child(
                                 div()
                                     .id("scheduled-close")
+                                    .a11y_button("Back to panes")
                                     .px_3()
                                     .py_1()
                                     .rounded_md()
@@ -824,6 +840,7 @@ impl Render for JobDialog {
         let chip = |id: String, label: String, on: bool| {
             div()
                 .id(SharedString::from(id))
+                .a11y_toggle(label.clone(), on)
                 .px_2()
                 .py(px(2.))
                 .rounded_md()
@@ -971,6 +988,9 @@ impl Render for JobDialog {
             let on = self.job.at_limit == value;
             div()
                 .id(SharedString::from(format!("job-limit-{value}")))
+                .role(Role::RadioButton)
+                .aria_label(text)
+                .aria_toggled(if on { Toggled::True } else { Toggled::False })
                 .flex()
                 .gap_2()
                 .cursor_pointer()
@@ -1007,6 +1027,7 @@ impl Render for JobDialog {
 
         div()
             .id("job-dialog")
+            .a11y_dialog(if self.editing { "Edit job" } else { "New job" })
             .w(px(640.))
             .max_h(relative(0.94))
             .overflow_y_scroll()
@@ -1130,6 +1151,7 @@ impl Render for JobDialog {
                     .child(
                         div()
                             .id("job-cancel")
+                            .a11y_button("Cancel")
                             .px_3()
                             .py_1()
                             .rounded_md()
@@ -1141,6 +1163,7 @@ impl Render for JobDialog {
                     .child(
                         div()
                             .id("job-save")
+                            .a11y_button("Save job")
                             .px_3()
                             .py_1()
                             .rounded_md()

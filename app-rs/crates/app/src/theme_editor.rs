@@ -11,6 +11,8 @@ use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
 use gpui_kit::component::{ActiveTheme as _, IndexPath, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+
+use crate::a11y::A11y as _;
 use serde_json::Value;
 use wraithgrid_core::config::Settings;
 use wraithgrid_core::paths::{home_dir, themes_root};
@@ -602,8 +604,10 @@ fn button(
     cx: &App,
 ) -> Stateful<Div> {
     let theme = cx.theme();
+    let text = text.into();
     div()
         .id(id)
+        .a11y_button(text.clone())
         .px_3()
         .py_1()
         .rounded_md()
@@ -623,7 +627,7 @@ fn button(
             })
         })
         .when(!enabled, |d| d.opacity(0.5))
-        .child(text.into())
+        .child(text)
 }
 
 /// A fieldset: a bordered group under a small title.
@@ -664,6 +668,7 @@ fn seg<T: Copy + PartialEq + 'static>(
             let (o, on) = (*o, *o == value);
             div()
                 .id(SharedString::from(format!("ted-{key}-{}", name(o))))
+                .a11y_toggle(label(name(o)).to_string(), on)
                 .px(px(10.))
                 .py(px(3.))
                 .rounded_full()

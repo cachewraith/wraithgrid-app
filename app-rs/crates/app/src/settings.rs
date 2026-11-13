@@ -6,6 +6,8 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+
+use crate::a11y::A11y as _;
 use wraithgrid_core::agent_cli::AgentCli;
 use wraithgrid_core::args::{format_args, parse_args};
 use wraithgrid_core::config::{Config, Settings};
@@ -646,6 +648,7 @@ impl SettingsView {
         let small = |id: String, label: &'static str, enabled: bool| {
             div()
                 .id(SharedString::from(id))
+                .a11y_button(label)
                 .px_2()
                 .py(px(2.))
                 .rounded_md()
@@ -797,6 +800,9 @@ impl Render for SettingsView {
             let tab = *tab;
             div()
                 .id(SharedString::from(format!("tab-{label}")))
+                .role(Role::Tab)
+                .aria_label(*label)
+                .aria_selected(self.tab == tab)
                 .px_3()
                 .py_1()
                 .rounded_md()
@@ -852,6 +858,7 @@ impl Render for SettingsView {
                     .child(
                         div()
                             .id("settings-close")
+                            .a11y_button("Back to panes")
                             .px_3()
                             .py_1()
                             .rounded_md()
@@ -887,8 +894,12 @@ impl Render for SettingsView {
 
 // ---- Row building blocks -------------------------------------------------------------------
 
-fn row(title: &'static str, explain: &'static str, cx: &App) -> Div {
+fn row(title: &'static str, explain: &'static str, cx: &App) -> Stateful<Div> {
     div()
+        .id(title)
+        .role(Role::Group)
+        .aria_label(title)
+        .aria_description(explain)
         .flex()
         .flex_col()
         .gap_2()
@@ -917,8 +928,10 @@ fn chips(children: Vec<AnyElement>) -> Div {
 
 fn chip(id: SharedString, label: impl Into<SharedString>, on: bool, cx: &App) -> Stateful<Div> {
     let theme = cx.theme();
+    let label = label.into();
     div()
         .id(id)
+        .a11y_toggle(label.clone(), on)
         .px_3()
         .py_1()
         .rounded_md()
@@ -928,7 +941,7 @@ fn chip(id: SharedString, label: impl Into<SharedString>, on: bool, cx: &App) ->
         .border_color(if on { theme.ring } else { theme.border })
         .when(on, |d| d.bg(theme.secondary))
         .hover(|d| d.bg(theme.secondary))
-        .child(label.into())
+        .child(label)
 }
 
 /// One of several values: a row of chips, the current one marked.

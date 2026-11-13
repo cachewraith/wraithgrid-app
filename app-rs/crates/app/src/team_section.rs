@@ -9,6 +9,8 @@ use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, Textar
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+
+use crate::a11y::A11y as _;
 use wraithgrid_core::config::{is_chat_model, Account, Config, Pane, TeamAgent};
 use wraithgrid_core::ids::new_id;
 use wraithgrid_core::paths::slugify;
@@ -314,6 +316,8 @@ impl TeamSection {
         let item = |key: &'static str, label: &'static str, danger: bool| {
             div()
                 .id(key)
+                .role(Role::MenuItem)
+                .aria_label(label)
                 .px_2()
                 .py_1()
                 .rounded_md()
@@ -388,6 +392,7 @@ impl TeamSection {
         let chip = |id: String, text: String, on: bool| {
             div()
                 .id(SharedString::from(id))
+                .a11y_toggle(text.clone(), on)
                 .px_2()
                 .py(px(2.))
                 .rounded_md()
@@ -460,6 +465,9 @@ impl TeamSection {
             let on = a.folder == value;
             div()
                 .id(SharedString::from(format!("team-folder-{value}")))
+                .role(Role::RadioButton)
+                .aria_label(value)
+                .aria_toggled(if on { Toggled::True } else { Toggled::False })
                 .flex()
                 .gap_2()
                 .cursor_pointer()
@@ -496,6 +504,7 @@ impl TeamSection {
         let button = |id: &'static str, text: &'static str| {
             div()
                 .id(id)
+                .a11y_button(text)
                 .px_3()
                 .py_1()
                 .rounded_md()
@@ -651,6 +660,7 @@ impl TeamSection {
                     .child(
                         div()
                             .id("team-save")
+                            .a11y_button("Save")
                             .px_3()
                             .py_1()
                             .rounded_md()
@@ -802,6 +812,7 @@ impl Render for TeamSection {
             rows.push(
                 div()
                     .id(SharedString::from(format!("team-row-{}", a.id)))
+                    .a11y_toggle(a.role.clone(), sel)
                     .h(px(44.))
                     .pl(px(10.))
                     .pr_1()
@@ -853,6 +864,7 @@ impl Render for TeamSection {
                     .child(
                         div()
                             .id(SharedString::from(format!("team-more-{}", a.id)))
+                            .a11y_button(format!("Actions: {}", a.role))
                             .w(px(24.))
                             .flex_none()
                             .flex()
@@ -906,6 +918,7 @@ impl Render for TeamSection {
         let add = (new_form.is_none() && team.len() < TEAM_MAX).then(|| {
             div()
                 .id("team-add")
+                .a11y_button("Add an agent")
                 .h(px(40.))
                 .px(px(10.))
                 .flex()
@@ -935,6 +948,11 @@ impl Render for TeamSection {
         let action = (!team.is_empty()).then(|| {
             let base = div()
                 .id("team-start")
+                .a11y_button(if running > 0 {
+                    "Stop team"
+                } else {
+                    "Start team"
+                })
                 .ml_auto()
                 .px_3()
                 .py_1()

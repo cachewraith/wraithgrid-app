@@ -7,6 +7,8 @@ use std::sync::Arc;
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+
+use crate::a11y::A11y as _;
 use wraithgrid_core::config::Config;
 use wraithgrid_mods::mods::ClaudeCli;
 use wraithgrid_mods::{AccountMods, CatalogMod, CommunityCatalog, ModDeps, ModManager};
@@ -125,6 +127,7 @@ impl Render for ModsView {
         let small = |id: String, label: String| {
             div()
                 .id(SharedString::from(id))
+                .a11y_button(label.clone())
                 .px_2()
                 .py(px(2.))
                 .rounded_md()
@@ -338,6 +341,7 @@ impl Render for ModsView {
                     .child(
                         div()
                             .id("mods-close")
+                            .a11y_button("Back to panes")
                             .px_3()
                             .py_1()
                             .rounded_md()

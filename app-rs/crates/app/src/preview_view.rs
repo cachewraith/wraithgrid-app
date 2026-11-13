@@ -14,6 +14,8 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+
+use crate::a11y::A11y as _;
 use gpui_webview::WebView;
 use wraithgrid_core::preview::{
     detect_dev_command, is_local_url, preview_report, read_project_files, shell_launch, DevServer,
@@ -432,8 +434,10 @@ impl Drop for PreviewView {
 
 fn button(id: impl Into<SharedString>, label: impl Into<SharedString>, cx: &App) -> Stateful<Div> {
     let theme = cx.theme();
+    let label = label.into();
     div()
         .id(ElementId::Name(id.into()))
+        .a11y_button(label.clone())
         .px_2()
         .py_1()
         .rounded_md()
@@ -442,7 +446,7 @@ fn button(id: impl Into<SharedString>, label: impl Into<SharedString>, cx: &App)
         .text_sm()
         .cursor_pointer()
         .hover(|d| d.bg(theme.secondary))
-        .child(label.into())
+        .child(label)
 }
 
 impl Render for PreviewView {
@@ -601,7 +605,7 @@ impl Render for PreviewView {
                                     cx.notify();
                                 })),
                             )
-                            .child(button("pv-restart", "↻ Restart", cx).on_click(cx.listener(
+                            .child(button("pv-restart", "↻ Restart", cx).aria_label("Restart").on_click(cx.listener(
                                 |this, _, _, cx| this.start(cx),
                             ))),
                     )
@@ -621,7 +625,7 @@ impl Render for PreviewView {
                         .gap_1()
                         .border_b_1()
                         .border_color(theme.border)
-                        .child(button("pv-back", "←", cx).on_click(cx.listener(
+                        .child(button("pv-back", "←", cx).aria_label("Back").on_click(cx.listener(
                             move |_, _, _, cx| {
                                 if let Some(w) = &back {
                                     w.update(cx, |w, _| {
@@ -630,7 +634,7 @@ impl Render for PreviewView {
                                 }
                             },
                         )))
-                        .child(button("pv-fwd", "→", cx).on_click(cx.listener(
+                        .child(button("pv-fwd", "→", cx).aria_label("Forward").on_click(cx.listener(
                             move |_, _, _, cx| {
                                 if let Some(w) = &fwd {
                                     w.update(cx, |w, _| {
@@ -639,7 +643,7 @@ impl Render for PreviewView {
                                 }
                             },
                         )))
-                        .child(button("pv-reload", "↻", cx).on_click(cx.listener(
+                        .child(button("pv-reload", "↻", cx).aria_label("Reload").on_click(cx.listener(
                             move |_, _, _, cx| {
                                 if let Some(w) = &reload {
                                     let _ = w.read(cx).raw().reload();

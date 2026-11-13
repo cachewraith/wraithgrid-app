@@ -13,6 +13,8 @@ use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::{ActiveTheme as _, IndexPath, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+
+use crate::a11y::A11y as _;
 use wraithgrid_core::paths::{home_dir, themes_root};
 use wraithgrid_themes::{
     all_themes, repo_from_url, AppTheme, CommunityTheme, CommunityThemes, CommunityThemesDeps,
@@ -273,6 +275,7 @@ impl ThemesGallery {
         let small = |id: String, text: String, primary: bool| {
             div()
                 .id(SharedString::from(id))
+                .a11y_button(text.clone())
                 .px_2()
                 .py(px(2.))
                 .rounded_md()
@@ -354,6 +357,8 @@ impl ThemesGallery {
         let page = format!("https://github.com/{}", t.repo);
         div()
             .id(SharedString::from(format!("ctg-{}", t.repo)))
+            .role(Role::Group)
+            .aria_label(t.repo.clone())
             .flex()
             .flex_col()
             .w(px(228.))
@@ -478,6 +483,7 @@ impl Render for ThemesGallery {
                 let on = self.mode == m;
                 div()
                     .id(SharedString::from(format!("ctg-mode-{label}")))
+                    .a11y_toggle(label, on)
                     .px(px(10.))
                     .py(px(3.))
                     .rounded_full()
@@ -501,6 +507,7 @@ impl Render for ThemesGallery {
         let button = |id: &'static str, text: &'static str, enabled: bool| {
             div()
                 .id(id)
+                .a11y_button(text)
                 .flex_none()
                 .px_3()
                 .py_1()
@@ -613,6 +620,7 @@ impl Render for ThemesGallery {
                     .child(
                         div()
                             .id("ctg-template")
+                            .a11y_button("theme template")
                             .cursor_pointer()
                             .text_color(theme.link)
                             .hover(|d| d.underline())

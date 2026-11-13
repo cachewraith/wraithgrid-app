@@ -6,6 +6,8 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+
+use crate::a11y::A11y as _;
 use wraithgrid_core::agent_cli::AgentCli;
 use wraithgrid_core::config::Config;
 use wraithgrid_core::types::ACCOUNT_COLORS;
@@ -125,6 +127,7 @@ impl Render for AccountsView {
         let small = |id: SharedString, label: &'static str| {
             div()
                 .id(id)
+                .a11y_button(label)
                 .px_2()
                 .py(px(2.))
                 .rounded_md()
@@ -244,6 +247,7 @@ impl Render for AccountsView {
             let on = self.cli == cli;
             div()
                 .id(SharedString::from(format!("cli-{cli}")))
+                .a11y_toggle(cli.spec().provider_label, on)
                 .px_2()
                 .py_1()
                 .rounded_md()
@@ -263,6 +267,7 @@ impl Render for AccountsView {
             let on = self.color.eq_ignore_ascii_case(&value);
             div()
                 .id(SharedString::from(format!("color-{name}")))
+                .a11y_toggle(format!("Color {name}"), on)
                 .size(px(22.))
                 .rounded_full()
                 .cursor_pointer()
@@ -307,6 +312,7 @@ impl Render for AccountsView {
                     .child(
                         div()
                             .id("accounts-close")
+                            .a11y_button("Back to panes")
                             .px_3()
                             .py_1()
                             .rounded_md()
@@ -356,6 +362,7 @@ impl Render for AccountsView {
                         div().flex().justify_end().child(
                             div()
                                 .id("add-account")
+                                .a11y_button("Add account")
                                 .px_3()
                                 .py_1()
                                 .rounded_md()

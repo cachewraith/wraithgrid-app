@@ -10,6 +10,8 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+
+use crate::a11y::A11y as _;
 use wraithgrid_git::{
     commit_all, git_diff, git_log, git_show, git_status, layout_graph, parse_patch, pull_branch,
     push_branch, ref_labels, DiffFile, DiffLineKind, DiffStatus, GitCli, GitCommit, GitStatus,
@@ -284,6 +286,7 @@ impl Render for ChangesPanel {
         let button = |id: &'static str, label: String, cx: &mut Context<Self>| {
             div()
                 .id(id)
+                .a11y_button(label.clone())
                 .px_2()
                 .py(px(2.))
                 .rounded_md()
@@ -297,6 +300,9 @@ impl Render for ChangesPanel {
         let tab = |id: &'static str, label: &'static str, on: bool| {
             div()
                 .id(id)
+                .role(Role::Tab)
+                .aria_label(label)
+                .aria_selected(on)
                 .px_2()
                 .py(px(2.))
                 .rounded_md()
@@ -384,6 +390,8 @@ impl Render for ChangesPanel {
             };
             div()
                 .id(SharedString::from(format!("file-{i}")))
+                .role(Role::ListItem)
+                .aria_label(format!("{letter} {}", f.path))
                 .px_2()
                 .py(px(2.))
                 .flex()
@@ -550,6 +558,7 @@ impl Render for ChangesPanel {
                             .child(
                                 div()
                                     .id("commit")
+                                    .a11y_button("Commit all")
                                     .px_3()
                                     .py_1()
                                     .rounded_md()
@@ -591,6 +600,7 @@ impl ChangesPanel {
             .child(
                 div()
                     .id("ask-cancel")
+                    .a11y_button("Cancel")
                     .px_2()
                     .py(px(2.))
                     .rounded_md()
@@ -606,6 +616,7 @@ impl ChangesPanel {
             .child(
                 div()
                     .id("ask-ok")
+                    .a11y_button(label)
                     .px_2()
                     .py(px(2.))
                     .rounded_md()
@@ -653,6 +664,8 @@ impl ChangesPanel {
             });
             div()
                 .id(SharedString::from(format!("commit-{}", c.sha)))
+                .role(Role::ListItem)
+                .aria_label(c.subject.clone())
                 .h(px(ROW_H))
                 .flex()
                 .items_center()

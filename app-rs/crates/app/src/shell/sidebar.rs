@@ -1221,6 +1221,7 @@ impl Shell {
         let foot = |d: Div| d.mt(z(6.)).text_size(z(11.)).text_color(p.fa);
         div()
             .id("side-usage")
+            .a11y_button("Usage")
             .flex_none()
             .flex()
             .flex_col()

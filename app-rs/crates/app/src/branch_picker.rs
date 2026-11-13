@@ -10,6 +10,8 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+
+use crate::a11y::A11y as _;
 use wraithgrid_core::paths::{contract_home, home_dir, worktrees_root};
 use wraithgrid_git::{
     add_worktree, list_branches, switch_branch, valid_branch_name, GitBranches, GitCli,
@@ -272,6 +274,8 @@ impl Render for BranchPicker {
             let pick = o.clone();
             div()
                 .id(SharedString::from(format!("branch-{i}")))
+                .role(Role::ListItem)
+                .aria_label(o.name.clone())
                 .px_2()
                 .py_1()
                 .rounded_md()
@@ -331,6 +335,7 @@ impl Render for BranchPicker {
         let button = |id: &'static str, label: String, primary: bool| {
             div()
                 .id(id)
+                .a11y_button(label.clone())
                 .px_2()
                 .py(px(2.))
                 .rounded_md()

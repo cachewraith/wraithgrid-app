@@ -2667,6 +2667,7 @@ impl Shell {
             .when_some(self.update_button(), |d, (label, enabled)| {
                 d.child(
                     button("update", "", cx)
+                        .aria_label(label.clone())
                         .child(label)
                         .when(enabled, |b| {
                             b.bg(cx.theme().primary)

@@ -8,6 +8,8 @@ use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+
+use crate::a11y::A11y as _;
 use wraithgrid_core::config::{Config, Pane};
 use wraithgrid_core::paths::{contract_home, expand_home, home_dir};
 
@@ -202,6 +204,7 @@ impl Render for ProjectView {
         let row = |id: String, title: String, account: String, state: AnyElement| {
             div()
                 .id(SharedString::from(id))
+                .a11y_button(format!("{title} ({account})"))
                 .flex_1()
                 .min_w(px(0.))
                 .flex()
@@ -219,6 +222,7 @@ impl Render for ProjectView {
         let trash = |id: String| {
             div()
                 .id(SharedString::from(id))
+                .a11y_button("Delete chat")
                 .px_2()
                 .py_1()
                 .rounded_md()
@@ -360,6 +364,7 @@ impl Render for ProjectView {
                                     .child(
                                         div()
                                             .id("pj-new-chat")
+                                            .a11y_button("New chat")
                                             .px_3()
                                             .py_1()
                                             .rounded_md()
@@ -374,6 +379,7 @@ impl Render for ProjectView {
                                     .child(
                                         div()
                                             .id("project-close")
+                                            .a11y_button("Back to panes")
                                             .px_3()
                                             .py_1()
                                             .rounded_md()
@@ -468,6 +474,7 @@ impl Render for ProjectView {
                                         .child(
                                             div()
                                                 .id("pj-keep")
+                                                .a11y_button("Keep it")
                                                 .px_3()
                                                 .py_1()
                                                 .rounded_md()
@@ -482,6 +489,7 @@ impl Render for ProjectView {
                                         .child(
                                             div()
                                                 .id("pj-delete")
+                                                .a11y_button("Delete chat")
                                                 .px_3()
                                                 .py_1()
                                                 .rounded_md()

@@ -11,6 +11,8 @@ use gpui_kit::component::text::{TextView, TextViewState};
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+
+use crate::a11y::A11y as _;
 use wraithgrid_core::paths::current_user_data_dir;
 use wraithgrid_core::release_notes::{
     cmp_versions, note_parts, parse_whats_new, release_page_url, NoteParts, NotesView,
@@ -423,13 +425,15 @@ impl AboutView {
                     .items_center()
                     .gap_2()
                     .text_sm()
-                    .child(switch("upd-launch", on, cx).on_click(cx.listener(
-                        move |this, _, _, cx| {
-                            this.on_launch = !on;
-                            cx.emit(AboutEvent::CheckOnLaunch(!on));
-                            cx.notify();
-                        },
-                    )))
+                    .child(
+                        switch("upd-launch", on, cx)
+                            .aria_label("Check when Wraithgrid starts")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.on_launch = !on;
+                                cx.emit(AboutEvent::CheckOnLaunch(!on));
+                                cx.notify();
+                            })),
+                    )
                     .child(div().flex_1().child("Check when Wraithgrid starts"))
                     .child(
                         div()
@@ -503,6 +507,7 @@ impl AboutView {
             let version = e.version.clone();
             div()
                 .id(SharedString::from(format!("ver-{}", e.version)))
+                .a11y_button(format!("Version {}", e.version))
                 .px_3()
                 .py_2()
                 .rounded_md()
@@ -618,6 +623,7 @@ impl AboutView {
                             .child(
                                 div()
                                     .id("ab-all")
+                                    .a11y_button("Release notes on GitHub")
                                     .mt_2()
                                     .px_3()
                                     .py_1()
@@ -832,6 +838,7 @@ fn btn(id: &'static str, label: &str, primary: bool, cx: &App) -> Stateful<Div> 
     let theme = cx.theme();
     div()
         .id(id)
+        .a11y_button(label.to_string())
         .px_3()
         .py_1()
         .rounded_md()
@@ -850,6 +857,8 @@ fn switch(id: &'static str, on: bool, cx: &App) -> Stateful<Div> {
     let theme = cx.theme();
     div()
         .id(id)
+        .role(Role::Switch)
+        .aria_toggled(if on { Toggled::True } else { Toggled::False })
         .w(px(30.))
         .h(px(17.))
         .flex_shrink_0()
