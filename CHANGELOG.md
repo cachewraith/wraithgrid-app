@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-11-13
+
+- [gpui] Chat extras: Reply quotes from a selection (#164), Send later with queued messages (#77), Claude's questions one at a time (#127, were not shown), prompt history (#132), pasted-image viewer (#163); composer keys now intercept the text box's actions (up/down/tab/shift-tab/esc/ctrl-v never reached the key handler, so the `/` menu arrows, mode cycling and image paste were dead) (files: app-rs/crates/app/src/chat_view.rs, chat_view/extras.rs, shell/later.rs, app-rs/crates/chat/src/compose.rs)
+- [gpui] Web preview pane (#74): dev server per project, Wry page (local addresses only), toolbar, log, Attach to chat; stops with its pane and on quit; GTK forced onto X11 for WebKitGTK with the session's GDK_BACKEND given back to children; on native Wayland the pane offers the browser (files: app-rs/crates/app/src/preview_view.rs, shell/preview.rs, runtime.rs, main.rs, app-rs/crates/core/src/preview.rs)
+- [gpui] Sidebar at parity (project/chat tree, project menu, icon picker, account switcher, rail, drawer, resize); the window keeps its own focus so shortcuts and Esc work with nothing focused (files: app-rs/crates/app/src/shell/sidebar.rs, shell.rs, assets/*.json)
+- [gpui] Keep running in the tray (StatusNotifierItem via ksni on Linux): chats and scheduled jobs carry on with the window closed; a second launch shows the running app's window (files: app-rs/crates/app/src/tray.rs, shell/tray.rs, runtime.rs, main.rs)
+- [gpui] ssh machines in the window (H5): remote panes through each machine's host; Settings → Advanced → Machines (files: app-rs/crates/app/src/shell/machines.rs, machines_row.rs, settings.rs)
+- [gpui] Project page (open chats, History, search, delete), closing a chat keeps it in History and stops its CLI, Scheduled screen at parity and run settling, teams (#79), theme editor + community gallery, About + release notes + keyboard rebinding, Git button + worktree panes (#162), Windows NSIS and macOS dmg/zip packaging + CI fixes (files: app-rs/**, .github/workflows/gpui.yml)
+
 ## 2026-11-12
 
 - [gpui] Chat composer (/ and @ menus, pasted images, model/effort/mode pickers, /new /model /effort /mode /usage), codex + agy chat adapters, Continue as… another account (transcript/rollout copy) and auto-switch at the limit (ask/auto), scheduled chats (runner + Scheduled screen: jobs, on/off, run now, delete, new job form), `wraithgrid-schedule` and `wraithgrid-remote` (ssh machines, not wired into the window yet) crates; `host_stop` example refuses without WRAITHGRID_USER_DATA_DIR (files: app-rs/crates/{app,schedule,remote,chat,usage}/**, app-rs/crates/core/examples/host_stop.rs)
