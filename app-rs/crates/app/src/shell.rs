@@ -942,10 +942,8 @@ impl Shell {
                         Ok(())
                     }
                     AccountsEvent::Login { id } => {
-                        // Signing in happens in the CLI's own screen: a terminal running it.
                         this.accounts_view = None;
-                        this.add_pane(None, Some(id.clone()), "~".into(), vec![], false, false, cx);
-                        return this.close_modal(window, cx);
+                        return this.login(id.clone(), window, cx);
                     }
                     AccountsEvent::Close => {
                         this.accounts_view = None;
@@ -2302,6 +2300,91 @@ impl Shell {
         json!({ "ok": true, "paneId": pane_id })
     }
 
+    /// Signs an account in: claude and codex in a dialog over pipes (`LoginDialog`), the rest
+    /// in their own screen, a terminal running the CLI.
+    fn login(&mut self, account_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let c = self.config().clone();
+        let Some(account) = c.account(&account_id).cloned() else {
+            return self.close_modal(window, cx);
+        };
+        let Some(flow) = wraithgrid_core::login::login_flow(account.cli) else {
+            return self.login_in_terminal(account_id, window, cx);
+        };
+        let env = crate::runtime::spawn_env();
+        let home = home_dir();
+        let program = if account.cli == AgentCli::Claude {
+            crate::mods_glue::claude_binary(&c, &env)
+        } else {
+            c.settings
+                .cli_paths
+                .iter()
+                .find(|(cli, p)| *cli == account.cli && !p.trim().is_empty())
+                .map(|(_, p)| wraithgrid_core::paths::resolve_user_path(p.trim(), &home))
+                .or_else(|| {
+                    wraithgrid_core::platform::find_on_path(
+                        account.cli.spec().bin,
+                        |k| env.get(k).cloned(),
+                        Os::current(),
+                    )
+                })
+        };
+        let Some(program) = program else {
+            return self.login_in_terminal(account_id, window, cx);
+        };
+        let pane_env =
+            wraithgrid_core::pane_env::build_pane_env(wraithgrid_core::pane_env::PaneEnvInput {
+                base: &env,
+                shell: false,
+                cli: account.cli,
+                config_dir: Some(account.config_dir.as_str()),
+                home: &home,
+                mod_dirs: &c.settings.mod_dirs,
+                os: Os::current(),
+            });
+        let codex = account.cli == AgentCli::Codex;
+        let name = account.name.clone();
+        let dialog = cx.new(|cx| {
+            crate::login_dialog::LoginDialog::new(
+                flow, program, pane_env, home, name, codex, window, cx,
+            )
+        });
+        cx.subscribe_in(
+            &dialog,
+            window,
+            move |this, _, e: &crate::login_dialog::LoginEvent, window, cx| {
+                use crate::login_dialog::LoginEvent;
+                match e {
+                    LoginEvent::SignedIn => {
+                        let id = account_id.clone();
+                        this.update(cx, |c| {
+                            if let Some(a) = c.accounts.iter_mut().find(|a| a.id == id) {
+                                a.signed_in = true;
+                            }
+                        });
+                    }
+                    LoginEvent::UseTerminal => {
+                        this.login_in_terminal(account_id.clone(), window, cx)
+                    }
+                    LoginEvent::Close => this.close_modal(window, cx),
+                }
+            },
+        )
+        .detach();
+        self.modal = Some(Modal::Login(dialog));
+        cx.notify();
+    }
+
+    /// Signing in in the CLI's own screen: a terminal running it.
+    fn login_in_terminal(
+        &mut self,
+        account_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.add_pane(None, Some(account_id), "~".into(), vec![], false, false, cx);
+        self.close_modal(window, cx);
+    }
+
     /// `closePane`: a conversation is kept in the project's History; an unused pane or a
     /// shell is not.
     fn close_pane(&mut self, pane_id: String, cx: &mut Context<Self>) {
@@ -3194,6 +3277,7 @@ impl Render for Shell {
             Modal::Branches(d) => d.clone().into_any_element(),
             Modal::RemoveWorktree(d) => d.clone().into_any_element(),
             Modal::Shortcuts(s) => s.clone().into_any_element(),
+            Modal::Login(d) => d.clone().into_any_element(),
         });
         let focus = self.focus.get_or_insert_with(|| cx.focus_handle()).clone();
         if window.focused(cx).is_none() {
@@ -3412,6 +3496,7 @@ enum Modal {
     Branches(Entity<crate::branch_picker::BranchPicker>),
     RemoveWorktree(Entity<git_button::RemoveWorktreeDialog>),
     Shortcuts(Entity<ShortcutsSheet>),
+    Login(Entity<crate::login_dialog::LoginDialog>),
 }
 
 /// Where the in-app update is (`update-install.ts` phases); About shows it.

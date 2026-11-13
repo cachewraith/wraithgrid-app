@@ -13,6 +13,7 @@ mod chat_view;
 mod cli_tty;
 mod dialogs;
 mod keys;
+mod login_dialog;
 mod machines_row;
 mod mods_glue;
 mod mods_view;

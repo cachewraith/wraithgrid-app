@@ -10,6 +10,7 @@ pub mod config;
 pub mod host;
 pub mod ids;
 pub mod layout;
+pub mod login;
 pub mod pane_env;
 pub mod paths;
 pub mod platform;
