@@ -540,6 +540,11 @@ impl ChatView {
         true
     }
 
+    /// "New conversation" from the pane's menu: as `/new`.
+    pub fn new_conversation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.app_command("new", window, cx);
+    }
+
     /// Puts `text` into the box after what is there, unsent ("Attach to chat" from a preview).
     pub fn add_to_draft(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         let cur = self.composer.read(cx).value().trim_end().to_string();

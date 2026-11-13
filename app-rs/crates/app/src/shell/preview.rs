@@ -188,7 +188,9 @@ impl Shell {
             || self.scheduled_view.is_some()
             || self.project_view.is_some()
             || self.sidebar_popup_open()
-            || self.git_menu.is_some();
+            || self.git_menu.is_some()
+            || self.pane_menu.is_some()
+            || self.closing.is_some();
         let views: Vec<(String, Entity<PreviewView>)> = self
             .previews
             .iter()

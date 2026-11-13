@@ -49,6 +49,7 @@ use crate::usage_view::{UsageView, UsageViewEvent};
 mod git_button;
 mod later;
 mod machines;
+mod pane_menu;
 mod preview;
 mod sidebar;
 mod team;
@@ -83,6 +84,10 @@ pub struct Shell {
     live_runs: std::collections::HashSet<String>,
     /// Chat panes opened as terminals this session (until the chat view is ported).
     as_terminal: Vec<String>,
+    /// A pane's menu, open at a point (`Pane.tsx`'s ContextMenu).
+    pane_menu: Option<(String, Point<Pixels>)>,
+    /// The pane whose close asks first: its process still works.
+    closing: Option<String>,
     /// Web preview panes' views (#74), made when first shown.
     previews: HashMap<String, Entity<crate::preview_view::PreviewView>>,
     focused: Option<String>,
@@ -157,6 +162,8 @@ impl Shell {
             remotes: HashMap::new(),
             live_runs: Default::default(),
             as_terminal: Vec::new(),
+            pane_menu: None,
+            closing: None,
             previews: HashMap::new(),
             focused: None,
             zoomed: None,
@@ -2948,6 +2955,7 @@ impl Shell {
         };
         let focused = self.focused.as_deref() == Some(pane.id.as_str());
         let close = id.clone();
+        let confirm = self.close_confirm(&pane.id, &label, &pane.cwd, cx);
         let (bounds, key) = (self.pane_bounds.clone(), pane.id.clone());
         div()
             .relative()
@@ -2971,6 +2979,7 @@ impl Shell {
             })
             .child(
                 div()
+                    .id(SharedString::from(format!("pane-head-{id}")))
                     .h(px(26.))
                     .flex_shrink_0()
                     .px_2()
@@ -2979,6 +2988,12 @@ impl Shell {
                     .gap_2()
                     .text_xs()
                     .bg(theme.title_bar)
+                    .on_mouse_down(MouseButton::Right, {
+                        let id = id.clone();
+                        cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                            this.open_pane_menu(id.clone(), e.position, cx)
+                        })
+                    })
                     .child(status_dot(
                         match self.chat_states.get(&pane.id) {
                             Some(
@@ -3040,6 +3055,46 @@ impl Shell {
                                 })),
                         )
                     })
+                    .child({
+                        let zoom = id.clone();
+                        let zoomed = self.zoomed.as_deref() == Some(id.as_str());
+                        div()
+                            .id(SharedString::from(format!("zoom-{id}")))
+                            .px_1()
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .hover(|d| d.bg(theme.secondary))
+                            .child(if zoomed { "⤡" } else { "⤢" })
+                            .tooltip(move |window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new(if zoomed {
+                                    "Back to the grid"
+                                } else {
+                                    "Zoom pane"
+                                })
+                                .build(window, cx)
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.zoomed = if this.zoomed.as_deref() == Some(zoom.as_str()) {
+                                    None
+                                } else {
+                                    Some(zoom.clone())
+                                };
+                                cx.notify();
+                            }))
+                    })
+                    .child({
+                        let more = id.clone();
+                        div()
+                            .id(SharedString::from(format!("more-{id}")))
+                            .px_1()
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .hover(|d| d.bg(theme.secondary))
+                            .child("⋯")
+                            .on_click(cx.listener(move |this, e: &ClickEvent, _, cx| {
+                                this.open_pane_menu(more.clone(), e.position(), cx)
+                            }))
+                    })
                     .child(
                         div()
                             .id(SharedString::from(format!("close-{id}")))
@@ -3049,11 +3104,12 @@ impl Shell {
                             .hover(|d| d.bg(theme.secondary))
                             .child("✕")
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.close_pane(close.clone(), cx)
+                                this.request_close_pane(close.clone(), cx)
                             })),
                     ),
             )
             .child(div().flex_1().min_h(px(0.)).overflow_hidden().child(body))
+            .children(confirm)
             .into_any_element()
     }
 }
@@ -3094,6 +3150,7 @@ impl Render for Shell {
         };
         self.sync_preview_visibility(&on_screen, cx);
         let grid = self.grid(window, cx);
+        let pane_menu = self.pane_menu_layer(window, cx);
         let modal: Option<AnyElement> = self.modal.as_ref().map(|m| match m {
             Modal::NewPane(d) => d.clone().into_any_element(),
             Modal::Palette(p) => p.clone().into_any_element(),
@@ -3154,6 +3211,7 @@ impl Render for Shell {
                         },
                     ),
             )
+            .children(pane_menu)
             .when_some(modal, |d, modal| {
                 d.child(
                     div()
