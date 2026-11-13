@@ -8,7 +8,9 @@ use std::path::Path;
 use crate::agent_cli::AgentCli;
 use crate::config::{Account, AccountFolder, Config, Extra};
 use crate::ids::new_id;
-use crate::paths::{accounts_root, base_name, contract_home, slugify};
+use crate::paths::{
+    accounts_root, base_name, contract_home, is_strictly_inside, resolve_user_path, slugify,
+};
 use crate::types::ACCOUNT_COLORS;
 
 /// The first account color no account uses yet, else one by count.
@@ -135,6 +137,70 @@ pub fn remove_account(config: &mut Config, id: &str) -> Vec<String> {
         config.settings.default_account_id = None;
     }
     panes
+}
+
+/// `importAccount`: an existing claude config dir (`~/.claude`) becomes an account where it is;
+/// nothing is copied. Named after the folder (`.claude` → `claude`).
+pub fn import_account(config: &mut Config, dir: &str) -> Result<String, String> {
+    let dir = dir.trim();
+    if dir.is_empty() {
+        return Err("Choose a folder.".into());
+    }
+    if config.accounts.iter().any(|a| a.config_dir == dir) {
+        return Err("That folder is already an account.".into());
+    }
+    let base = match slugify(base_name(dir).trim_start_matches('.')) {
+        s if s.is_empty() => "imported".to_string(),
+        s => s,
+    };
+    let taken: HashSet<String> = config.accounts.iter().map(|a| a.name.clone()).collect();
+    let account = Account {
+        id: new_id("a"),
+        name: unique_slug(&base, &taken),
+        cli: AgentCli::Claude,
+        config_dir: dir.to_string(),
+        color: next_free_color(&config.accounts),
+        signed_in: true,
+        imported: true,
+        icon: String::new(),
+        folder_id: None,
+        extra: Extra::new(),
+    };
+    let id = account.id.clone();
+    config.accounts.push(account);
+    if config.settings.default_account_id.is_none() {
+        config.settings.default_account_id = Some(id.clone());
+    }
+    Ok(id)
+}
+
+/// Where "Also delete its config dir" may delete (`accountDeleteDir`): only a dir a current
+/// account points at, and only strictly inside home, also once links are resolved. Ok(None):
+/// already gone.
+pub fn deletable_config_dir(
+    config: &Config,
+    dir: &str,
+    home: &Path,
+) -> Result<Option<std::path::PathBuf>, String> {
+    let target = resolve_user_path(dir, home);
+    let owned = config
+        .accounts
+        .iter()
+        .any(|a| resolve_user_path(&a.config_dir, home) == target);
+    if !owned {
+        return Err("That folder does not belong to an account".into());
+    }
+    if !is_strictly_inside(&target, home) {
+        return Err("Refusing to delete a folder outside your home directory".into());
+    }
+    let Ok(real) = std::fs::canonicalize(&target) else {
+        return Ok(None);
+    };
+    let real_home = std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
+    if !is_strictly_inside(&real, &real_home) {
+        return Err("Refusing to delete a folder outside your home directory".into());
+    }
+    Ok(Some(real))
 }
 
 /// Folders an account list may have (`createFolder`).
@@ -289,5 +355,57 @@ mod tests {
         }
         assert_eq!(create_folder(&mut c, "one too many"), None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn imports_a_config_dir_where_it_is() {
+        let mut c = default_config();
+        assert_eq!(import_account(&mut c, " "), Err("Choose a folder.".into()));
+        let id = import_account(&mut c, "~/.claude").unwrap();
+        let a = c.account(&id).unwrap();
+        assert_eq!(
+            (a.name.as_str(), a.imported, a.signed_in),
+            ("claude", true, true)
+        );
+        assert_eq!(a.config_dir, "~/.claude");
+        assert_eq!(c.settings.default_account_id.as_deref(), Some(id.as_str()));
+        assert_eq!(
+            import_account(&mut c, "~/.claude"),
+            Err("That folder is already an account.".into())
+        );
+        let other = import_account(&mut c, "/x/claude").unwrap();
+        assert_eq!(c.account(&other).unwrap().name, "claude-2");
+    }
+
+    #[test]
+    fn deletes_only_an_accounts_dir_inside_home() {
+        let h = home("deldir");
+        let outside = home("deldir-outside");
+        std::fs::create_dir_all(h.join("acc")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let mut c = default_config();
+        import_account(&mut c, "~/acc").unwrap();
+        import_account(&mut c, &outside.to_string_lossy()).unwrap();
+        import_account(&mut c, "~").unwrap();
+        // Not an account's dir.
+        assert!(deletable_config_dir(&c, "~/other", &h).is_err());
+        // Outside home, and home itself.
+        assert!(deletable_config_dir(&c, &outside.to_string_lossy(), &h).is_err());
+        assert!(deletable_config_dir(&c, "~", &h).is_err());
+        // Inside home: its real path.
+        let ok = deletable_config_dir(&c, "~/acc", &h).unwrap().unwrap();
+        assert_eq!(ok, std::fs::canonicalize(h.join("acc")).unwrap());
+        // A link inside home that points out of it.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&outside, h.join("link")).unwrap();
+            import_account(&mut c, "~/link").unwrap();
+            assert!(deletable_config_dir(&c, "~/link", &h).is_err());
+        }
+        // Gone already.
+        import_account(&mut c, "~/gone").unwrap();
+        assert_eq!(deletable_config_dir(&c, "~/gone", &h), Ok(None));
+        let _ = std::fs::remove_dir_all(&h);
+        let _ = std::fs::remove_dir_all(&outside);
     }
 }

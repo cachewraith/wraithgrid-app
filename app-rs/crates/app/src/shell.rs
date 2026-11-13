@@ -963,7 +963,27 @@ impl Shell {
                         }
                         wraithgrid_core::accounts::rename_account(&mut next, id, name)
                     }
-                    AccountsEvent::Remove { id } => {
+                    AccountsEvent::Remove { id, delete_dir } => {
+                        // "Also delete its config dir": only an account's dir inside home.
+                        let doomed = match next.account(id).filter(|_| *delete_dir) {
+                            None => None,
+                            Some(a) => {
+                                let cli = a.cli.as_str().to_string();
+                                match wraithgrid_core::accounts::deletable_config_dir(
+                                    &next,
+                                    &a.config_dir,
+                                    &home,
+                                ) {
+                                    Ok(real) => real.map(|r| (r, cli)),
+                                    Err(e) => {
+                                        return view.update(cx, |v, cx| {
+                                            v.error = Some(e);
+                                            cx.notify();
+                                        })
+                                    }
+                                }
+                            }
+                        };
                         // Panes first: a running agent must not keep writing into its account.
                         for pane in wraithgrid_core::accounts::remove_account(&mut next, id) {
                             this.close_pane(pane.clone(), cx);
@@ -972,7 +992,39 @@ impl Shell {
                                 w.layout = remove_pane(w.layout.as_ref(), &pane);
                             }
                         }
-                        Ok(())
+                        let Some((real, cli)) = doomed else {
+                            return {
+                                this.update(cx, |c| *c = next);
+                                this.open_accounts(window, cx);
+                            };
+                        };
+                        // The shared links out first, so the delete can never reach through
+                        // them; then the folder, off the main thread; the account goes once
+                        // it is gone.
+                        wraithgrid_mods::shared_config::SharedBrains::new(home.clone())
+                            .unshare(&cli, &real.to_string_lossy());
+                        let task = cx.background_spawn(async move {
+                            std::fs::remove_dir_all(&real).map_err(|e| e.to_string())
+                        });
+                        let view = view.clone();
+                        cx.spawn_in(window, async move |this, cx| {
+                            let res = task.await;
+                            let _ = this.update_in(cx, |this, window, cx| match res {
+                                Ok(()) => {
+                                    this.update(cx, |c| *c = next);
+                                    this.open_accounts(window, cx);
+                                }
+                                Err(e) => view.update(cx, |v, cx| {
+                                    v.error = Some(format!("Could not delete the config dir: {e}"));
+                                    cx.notify();
+                                }),
+                            });
+                        })
+                        .detach();
+                        return;
+                    }
+                    AccountsEvent::Import { dir } => {
+                        wraithgrid_core::accounts::import_account(&mut next, dir).map(|_| ())
                     }
                     AccountsEvent::MarkSignedIn { id } => {
                         next.accounts
