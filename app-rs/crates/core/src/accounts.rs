@@ -152,10 +152,12 @@ mod tests {
     fn add_rename_remove() {
         let h = home("arr");
         let mut c = default_config();
+        // The OS's separator after `~`, as Node's path.join gives the Electron app.
+        let tilde = |rest: &str| format!("~{}", rest.replace('/', std::path::MAIN_SEPARATOR_STR));
         let id = add_account(&mut c, "  Work Stuff ", "#7c5cff", AgentCli::Claude, &h).unwrap();
         assert_eq!(
             c.accounts[0].config_dir,
-            "~/.wraithgrid/accounts/work-stuff"
+            tilde("/.wraithgrid/accounts/work-stuff")
         );
         assert!(h.join(".wraithgrid/accounts/work-stuff").is_dir());
         assert!(!c.accounts[0].signed_in);
@@ -167,7 +169,7 @@ mod tests {
         let second = add_account(&mut c, "Work-Stuff!", "#2dd4bf", AgentCli::Gemini, &h).unwrap();
         assert_eq!(
             c.accounts[1].config_dir,
-            "~/.wraithgrid/accounts/work-stuff-2"
+            tilde("/.wraithgrid/accounts/work-stuff-2")
         );
         assert!(c.accounts[1].signed_in);
         assert_eq!(

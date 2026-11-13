@@ -237,6 +237,13 @@ pub fn build_pane_env(i: PaneEnvInput) -> BTreeMap<String, String> {
 mod tests {
     use super::*;
 
+    /// A home on the OS running the tests: `~` paths resolve as that OS's paths.
+    const HOME: &str = if cfg!(windows) {
+        r"C:\Users\u"
+    } else {
+        "/home/u"
+    };
+
     fn base(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         pairs
             .iter()
@@ -255,7 +262,7 @@ mod tests {
             shell,
             cli,
             config_dir: dir,
-            home: Path::new("/home/u"),
+            home: Path::new(HOME),
             mod_dirs: &[],
             os: Os::Linux,
         })
@@ -295,9 +302,10 @@ mod tests {
             Some("~/.wraithgrid/accounts/a"),
             &b,
         );
+        let account_dir = Path::new(HOME).join(".wraithgrid/accounts/a");
         assert_eq!(
-            env.get("CLAUDE_CONFIG_DIR").unwrap(),
-            "/home/u/.wraithgrid/accounts/a"
+            Path::new(env.get("CLAUDE_CONFIG_DIR").unwrap()),
+            account_dir
         );
         assert!(!env.contains_key("CODEX_HOME"));
         assert_eq!(env.get("LANG").unwrap(), "de_DE.UTF-8");
@@ -312,6 +320,23 @@ mod tests {
         assert!(!env.values().any(|v| v == "/x"));
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn plugin_dirs_windows() {
+        let dirs = vec![
+            r"~\mods\a".to_string(),
+            " ".to_string(),
+            r"C:\x;y".to_string(),
+            r"C:\opt\b".to_string(),
+        ];
+        assert_eq!(
+            plugin_dirs_value(Some(r"C:\opt\b;C:\c"), &dirs, Path::new(HOME), Os::Windows),
+            r"C:\opt\b;C:\c;C:\Users\u\mods\a"
+        );
+    }
+
+    // Linux paths: they only resolve as written on a Unix machine.
+    #[cfg(unix)]
     #[test]
     fn plugin_dirs() {
         let home = Path::new("/home/u");
