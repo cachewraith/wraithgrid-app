@@ -3,6 +3,7 @@
 //! at a time (#127). Lengths count characters (the TS counted UTF-16 units); carets are byte
 //! offsets.
 
+use crate::thread::ChatItem;
 use crate::types::{take_chars, ChatQuestion, CHAT_TEXT_MAX};
 
 // --- Reply quotes (#164) ---
@@ -273,9 +274,98 @@ pub fn answer_of(q: &ChatQuestion, p: &QuestionPick) -> String {
     }
 }
 
+// --- Cross-CLI handoffs (#78) ---
+
+/// The first message of a chat continued in another CLI (`buildHandoff`): the visible text
+/// only, newest messages kept under the size cap. The text, and how many messages it carries.
+pub fn build_handoff(
+    items: &[ChatItem],
+    provider: &str,
+    account: &str,
+    max_chars: usize,
+    max_messages: usize,
+) -> (String, u64) {
+    let header = format!("Continuing a conversation from {provider} ({account}):\n\n");
+    let mut remaining = max_chars.saturating_sub(header.chars().count());
+    let mut parts: Vec<String> = Vec::new();
+    for item in items.iter().rev() {
+        if parts.len() >= max_messages {
+            break;
+        }
+        let (kind, text) = match item {
+            ChatItem::User { text, .. } => ("user", text),
+            ChatItem::Assistant { text, .. } => ("assistant", text),
+            _ => continue,
+        };
+        if text.trim().is_empty() {
+            continue;
+        }
+        let prefix = format!("{kind}: ");
+        let gap = if parts.is_empty() { 0 } else { 2 };
+        if remaining <= prefix.len() + gap {
+            break;
+        }
+        let available = remaining - prefix.len() - gap;
+        let len = text.chars().count();
+        // Too long: its end is kept, and nothing older fits after it.
+        let kept: String = if len > available {
+            text.chars().skip(len - available).collect()
+        } else {
+            text.clone()
+        };
+        let cut = kept.chars().count() != len;
+        remaining -= prefix.len() + kept.chars().count() + gap;
+        parts.insert(0, format!("{prefix}{kept}"));
+        if cut {
+            break;
+        }
+    }
+    let text: String = format!("{header}{}", parts.join("\n\n"))
+        .chars()
+        .take(max_chars)
+        .collect();
+    (text, parts.len() as u64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn said(user: bool, text: &str) -> ChatItem {
+        if user {
+            ChatItem::User {
+                id: "u".into(),
+                text: text.into(),
+                images: 0,
+                thumbs: None,
+            }
+        } else {
+            ChatItem::Assistant {
+                id: "a".into(),
+                text: text.into(),
+            }
+        }
+    }
+
+    #[test]
+    fn handoffs_carry_the_newest_messages() {
+        let items = vec![said(true, "fix it"), said(false, "done"), said(true, "  ")];
+        let (text, n) = build_handoff(&items, "Claude", "home", 20_000, 60);
+        assert_eq!(
+            text,
+            "Continuing a conversation from Claude (home):\n\nuser: fix it\n\nassistant: done"
+        );
+        assert_eq!(n, 2);
+        // Over the cap: the newest message's end survives, older ones go.
+        let long = "x".repeat(100);
+        let items = vec![said(true, "old"), said(false, &long)];
+        let (text, n) = build_handoff(&items, "Claude", "home", 80, 60);
+        assert_eq!(n, 1);
+        assert!(text.ends_with("xxx") && !text.contains("old"));
+        assert!(text.chars().count() <= 80);
+        let (_, n) = build_handoff(&[said(true, "a"), said(true, "b")], "Codex", "w", 20_000, 1);
+        assert_eq!(n, 1);
+    }
 
     fn q(text: &str) -> Quote {
         Quote {

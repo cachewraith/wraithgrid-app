@@ -225,6 +225,10 @@ impl ChatView {
             )
         })?;
         let mut launch = ChatLaunch::new(program, s.cwd.clone());
+        // Codex reads the project's CLAUDE.md when it has no AGENTS.md, as its terminals do.
+        if let Some(cli) = wraithgrid_core::agent_cli::AgentCli::parse(&s.cli) {
+            launch.args = wraithgrid_core::agent_cli::with_project_doc_args(cli, &[]);
+        }
         launch.env = s.env.clone();
         launch.config_dir = s.config_dir.clone();
         launch.options = ArgsOptions {
@@ -538,6 +542,34 @@ impl ChatView {
             .update(cx, |c, cx| c.set_value("", window, cx));
         cx.notify();
         true
+    }
+
+    pub fn items(&self) -> &[ChatItem] {
+        &self.thread.items
+    }
+
+    /// A chat continued from another CLI (#78): the handoff shows (collapsed) and goes to the
+    /// new CLI as its first message.
+    pub fn start_handoff(
+        &mut self,
+        text: &str,
+        messages: u64,
+        from_cli: &str,
+        to_cli: &str,
+        divider: &str,
+        cx: &mut Context<Self>,
+    ) {
+        self.thread
+            .add_handoff(text, messages, from_cli, to_cli, divider);
+        if let Err(e) = self.start(cx) {
+            self.error = Some(e);
+        } else if let Some(session) = &self.session {
+            session.send(text, &[], &[]);
+            self.thread.busy = true;
+            self.thread.turn_started_at = Some(now_ms());
+        }
+        self.schedule_save(cx);
+        cx.notify();
     }
 
     /// "New conversation" from the pane's menu: as `/new`.
@@ -1017,16 +1049,24 @@ impl Render for ChatView {
                         .into_any_element()
                 }
                 ChatItem::Handoff {
-                    from_cli,
-                    to_cli,
-                    messages,
-                    ..
+                    messages, divider, ..
                 } => div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
                     .text_xs()
                     .text_color(theme.muted_foreground)
+                    .child(div().flex_1().h(px(1.)).bg(theme.border))
                     .child(format!(
-                        "Continued from {from_cli} to {to_cli} ({messages} messages)"
+                        "{} · {messages} message{} carried over",
+                        if divider.is_empty() {
+                            "continued"
+                        } else {
+                            divider.as_str()
+                        },
+                        if *messages == 1 { "" } else { "s" }
                     ))
+                    .child(div().flex_1().h(px(1.)).bg(theme.border))
                     .into_any_element(),
             };
             rows.push(row);

@@ -47,6 +47,7 @@ use crate::terminal::{
 use crate::usage_view::{UsageView, UsageViewEvent};
 
 mod git_button;
+mod handoff;
 mod later;
 mod machines;
 mod pane_menu;
@@ -1779,27 +1780,42 @@ impl Shell {
         let Some(from) = pane.account_id.as_deref().and_then(|id| c.account(id)) else {
             return;
         };
-        let choices: Vec<(String, String, String)> = c
-            .accounts
-            .iter()
-            .filter(|a| a.id != from.id && a.cli == from.cli)
+        // This CLI's accounts first (the whole conversation moves), then the others (a new
+        // chat there starts from the visible text, #78; a CLI without chat gets a terminal).
+        let mut others: Vec<&wraithgrid_core::config::Account> =
+            c.accounts.iter().filter(|a| a.id != from.id).collect();
+        others.sort_by_key(|a| a.cli != from.cli);
+        let choices: Vec<(String, String, String)> = others
+            .into_iter()
             .map(|a| {
-                let detail = match (a.signed_in, self.limits_label(&a.id)) {
+                let mut detail = match (a.signed_in, self.limits_label(&a.id)) {
                     (false, _) => "not signed in".to_string(),
                     (true, Some((l, _))) => l,
                     (true, None) => String::new(),
                 };
+                if a.cli != from.cli {
+                    let how = if a.cli.spec().chat {
+                        format!("new {} chat", a.cli.spec().provider_label)
+                    } else {
+                        "terminal".to_string()
+                    };
+                    detail = if detail.is_empty() {
+                        how
+                    } else {
+                        format!("{how} · {detail}")
+                    };
+                }
                 (a.id.clone(), a.name.clone(), detail)
             })
             .collect();
-        let title = format!(
-            "Continue as another {} account",
-            from.cli.spec().provider_label
-        );
+        let title = "Continue as another account".to_string();
         let message = if choices.is_empty() {
-            "No other account of this CLI yet.".to_string()
+            "No other account yet.".to_string()
         } else {
-            "The whole conversation goes with it.".to_string()
+            format!(
+                "A {} account takes the whole conversation; another CLI starts a new chat from what it shows.",
+                from.cli.spec().provider_label
+            )
         };
         let dialog = cx.new(|_| ChoiceDialog::new(title, message, choices, "Cancel"));
         cx.subscribe_in(
@@ -1827,6 +1843,23 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Another CLI can't take the conversation itself: a handoff (#78).
+        let other_cli = {
+            let c = self.config();
+            let from = c
+                .workspaces
+                .iter()
+                .flat_map(|w| &w.panes)
+                .find(|p| p.id == pane_id)
+                .and_then(|p| p.account_id.as_deref())
+                .and_then(|id| c.account(id))
+                .map(|a| a.cli);
+            let to = c.account(to_id).map(|a| a.cli);
+            matches!((from, to), (Some(f), Some(t)) if f != t)
+        };
+        if other_cli {
+            return self.continue_in_cli(pane_id, to_id, window, cx);
+        }
         let result = (|| -> Result<String, String> {
             let c = self.config();
             let pane = c
