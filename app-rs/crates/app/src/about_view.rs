@@ -30,9 +30,10 @@ fn notes_file() -> PathBuf {
     current_user_data_dir().join("release-notes.json")
 }
 
-/// Records this run in release-notes.json (the version that ran last), once at launch.
-pub fn record_launch() {
-    wraithgrid_core::release_notes::start(&notes_file(), APP_VERSION);
+/// Records this run in release-notes.json (the version that ran last), once at launch; the
+/// version that ran before when the app was updated.
+pub fn record_launch() -> Option<String> {
+    wraithgrid_core::release_notes::start(&notes_file(), APP_VERSION)
 }
 
 /// After every check that reached GitHub: keeps the latest release's notes for after the

@@ -460,7 +460,7 @@ fn chord(parts: &[&str]) -> String {
 }
 
 /// `bindingHint`: a rebindable shortcut as its keys.
-fn binding_hint(b: &Binding) -> String {
+pub(super) fn binding_hint(b: &Binding) -> String {
     let key = match b.code.as_str() {
         "Slash" => "/".to_string(),
         code => code

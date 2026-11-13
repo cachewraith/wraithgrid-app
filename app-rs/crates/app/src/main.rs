@@ -62,13 +62,14 @@ fn main() {
         )
     });
     let mut second_launches = None;
+    let mut updated = false;
     if blocked.is_none() {
         match runtime::single_instance(&user_data) {
             runtime::Instance::Second => return,
             runtime::Instance::First(rx) => second_launches = rx,
         }
         resolve_path_in_background();
-        about_view::record_launch();
+        updated = about_view::record_launch().is_some();
     }
     let mut store = ConfigStore::new(config_file_path(&user_data));
     // Beside a running Electron app nothing is read: a corrupt file would be moved aside.
@@ -95,6 +96,9 @@ fn main() {
         cx.set_global(terminal::MonoFont(mono));
         let shell = cx.new(|cx| {
             let mut shell = Shell::new(store, host, router, blocked);
+            if updated {
+                shell.updated_to = Some(runtime::APP_VERSION.to_string());
+            }
             shell.listen_for_commands(cx);
             shell.check_updates_on_launch(cx);
             shell.start_usage(cx);

@@ -53,6 +53,7 @@ mod machines;
 mod pane_menu;
 mod preview;
 mod sidebar;
+mod status_bar;
 mod team;
 mod tray;
 
@@ -85,6 +86,8 @@ pub struct Shell {
     live_runs: std::collections::HashSet<String>,
     /// Chat panes opened as terminals this session (until the chat view is ported).
     as_terminal: Vec<String>,
+    /// This version, once after an update restarted the app ("Updated to X").
+    pub updated_to: Option<String>,
     /// A pane's menu, open at a point (`Pane.tsx`'s ContextMenu).
     pane_menu: Option<(String, Point<Pixels>)>,
     /// The pane whose close asks first: its process still works.
@@ -163,6 +166,7 @@ impl Shell {
             remotes: HashMap::new(),
             live_runs: Default::default(),
             as_terminal: Vec::new(),
+            updated_to: None,
             pane_menu: None,
             closing: None,
             previews: HashMap::new(),
@@ -3267,6 +3271,7 @@ impl Render for Shell {
         self.sync_preview_visibility(&on_screen, cx);
         let grid = self.grid(window, cx);
         let pane_menu = self.pane_menu_layer(window, cx);
+        let status_bar = self.status_bar(cx).into_any_element();
         let modal: Option<AnyElement> = self.modal.as_ref().map(|m| match m {
             Modal::NewPane(d) => d.clone().into_any_element(),
             Modal::Palette(p) => p.clone().into_any_element(),
@@ -3328,6 +3333,7 @@ impl Render for Shell {
                         },
                     ),
             )
+            .child(status_bar)
             .children(pane_menu)
             .when_some(modal, |d, modal| {
                 d.child(
