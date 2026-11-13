@@ -2,6 +2,7 @@
 
 ## 2026-11-13
 
+- [gpui] A cross-CLI handoff in a chat (#78) shows the new CLI's mark on its divider and "Handoff from X · N messages · show" that opens on the text carried over (files: app-rs/crates/app/src/chat_view.rs, chat_view/extras.rs)
 - [gpui] Changes panel resizes by its left edge (live, saved on release, double-click resets; `EdgeResizer`); thinking shows as a closed "Thought process" that opens on a click (was 4 cut lines, and an empty one drew a blank line) (files: app-rs/crates/app/src/shell.rs, chat_view.rs, chat_view/extras.rs)
 - [gpui] Chat follows a streaming answer only from the bottom (it scrolled to the end on every event, so earlier output could not be read during a turn), and a ↓ "Scroll to the latest message" button shows when scrolled up (files: app-rs/crates/app/src/chat_view.rs, chat_view/extras.rs)
 - [gpui] Account chip under a chat (#160, `AccountPicker`): Continue as another account from a picker with a provider rail (count, same chat / new chat / terminal), the chosen provider's accounts current first with their 5-hour use, search across providers grouped, ↑↓ Enter Tab/Shift+Tab Esc; an account not signed in opens sign-in (files: app-rs/crates/app/src/chat_view/accounts.rs, chat_view.rs, shell.rs, shell/later.rs)

@@ -1071,25 +1071,13 @@ impl Render for ChatView {
                         .into_any_element()
                 }
                 ChatItem::Handoff {
-                    messages, divider, ..
-                } => div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(div().flex_1().h(px(1.)).bg(theme.border))
-                    .child(format!(
-                        "{} · {messages} message{} carried over",
-                        if divider.is_empty() {
-                            "continued"
-                        } else {
-                            divider.as_str()
-                        },
-                        if *messages == 1 { "" } else { "s" }
-                    ))
-                    .child(div().flex_1().h(px(1.)).bg(theme.border))
-                    .into_any_element(),
+                    id,
+                    text,
+                    messages,
+                    from_cli,
+                    to_cli,
+                    divider,
+                } => self.handoff(id, text, *messages, from_cli, to_cli, divider, cx),
             };
             rows.push(row);
         }

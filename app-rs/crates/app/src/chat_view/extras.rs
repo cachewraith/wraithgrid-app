@@ -47,8 +47,8 @@ pub(super) struct Extras {
     question: Option<Questions>,
     /// Attached files (paperclip or drop) other than images: sent as paths after the message.
     pub files: Vec<String>,
-    /// Thinking blocks opened ("Thought process"), by item id.
-    thinking_open: std::collections::HashSet<String>,
+    /// Thinking blocks and handoff texts opened, by item id.
+    opened: std::collections::HashSet<String>,
 }
 
 /// Claude's questions being answered (`QuestionCard`): which one, and what was picked.
@@ -1167,7 +1167,7 @@ impl ChatView {
             return div().into_any_element();
         }
         let theme = cx.theme();
-        let open = self.x.thinking_open.contains(id);
+        let open = self.x.opened.contains(id);
         let key = id.to_string();
         div()
             .flex()
@@ -1183,12 +1183,7 @@ impl ChatView {
                     .text_color(theme.muted_foreground)
                     .cursor_pointer()
                     .child(format!("{} Thought process", if open { "▾" } else { "▸" }))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if !this.x.thinking_open.remove(&key) {
-                            this.x.thinking_open.insert(key.clone());
-                        }
-                        cx.notify();
-                    })),
+                    .on_click(cx.listener(move |this, _, _, cx| this.toggle_opened(&key, cx))),
             )
             .when(open, |d| {
                 d.child(
@@ -1202,6 +1197,96 @@ impl ChatView {
                         .child(text.to_string()),
                 )
             })
+            .into_any_element()
+    }
+}
+
+impl ChatView {
+    fn toggle_opened(&mut self, id: &str, cx: &mut Context<Self>) {
+        if !self.x.opened.remove(id) {
+            self.x.opened.insert(id.to_string());
+        }
+        cx.notify();
+    }
+
+    /// A handoff from another CLI (#78): the divider, then "Handoff from X · N messages" that
+    /// opens on what was carried over.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn handoff(
+        &self,
+        id: &str,
+        text: &str,
+        messages: u64,
+        from_cli: &str,
+        to_cli: &str,
+        divider: &str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme().clone();
+        let open = self.x.opened.contains(id);
+        let from = wraithgrid_core::agent_cli::AgentCli::parse(from_cli)
+            .map_or(from_cli, |c| c.spec().provider_label);
+        let key = id.to_string();
+        let line = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .text_xs()
+            .text_color(theme.muted_foreground)
+            .child(div().flex_1().h(px(1.)).bg(theme.border))
+            .when(!to_cli.is_empty(), |d| {
+                d.child(crate::shell::provider_mark(to_cli, to_cli, 12., cx))
+            })
+            .child(format!(
+                "{} · {messages} message{} carried over",
+                if divider.is_empty() {
+                    "continued"
+                } else {
+                    divider
+                },
+                if messages == 1 { "" } else { "s" }
+            ))
+            .child(div().flex_1().h(px(1.)).bg(theme.border));
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(line)
+            .when(
+                !text.trim().is_empty() && !from_cli.is_empty() && from_cli != to_cli,
+                |d| {
+                    d.child(
+                        div()
+                            .id(SharedString::from(format!("handoff-{id}")))
+                            .role(Role::Button)
+                            .aria_label(format!("Handoff from {from}"))
+                            .aria_expanded(open)
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .cursor_pointer()
+                            .child(format!(
+                                "{} Handoff from {from} · {messages} messages · {}",
+                                if open { "▾" } else { "▸" },
+                                if open { "hide" } else { "show" }
+                            ))
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.toggle_opened(&key, cx)),
+                            ),
+                    )
+                    .when(open, |d| {
+                        d.child(
+                            div()
+                                .p_2()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(theme.border)
+                                .text_xs()
+                                .font_family(crate::terminal::mono(cx))
+                                .child(text.to_string()),
+                        )
+                    })
+                },
+            )
             .into_any_element()
     }
 }
