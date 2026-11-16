@@ -210,6 +210,8 @@ pub fn electron_running(user_data: &Path) -> Option<u32> {
 /// second launch that asked the running one to show its window and should exit.
 pub enum Instance {
     First(Option<std::sync::mpsc::Receiver<()>>),
+    /// Only unix has the socket so far; elsewhere every launch is the first.
+    #[cfg_attr(not(unix), allow(dead_code))]
     Second,
 }
 

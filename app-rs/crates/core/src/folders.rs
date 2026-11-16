@@ -337,7 +337,7 @@ mod tests {
         assert_eq!(ok.branch, None);
 
         let p = list_folder("proj", &home);
-        assert_eq!(p.path, "~/proj");
+        assert_eq!(p.path, format!("~{}proj", std::path::MAIN_SEPARATOR));
         assert_eq!(p.parent.as_deref(), Some("~"));
         assert_eq!(p.result.unwrap().branch.as_deref(), Some("main"));
 

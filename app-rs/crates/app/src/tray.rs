@@ -8,6 +8,8 @@ use futures::channel::mpsc::UnboundedSender;
 
 /// What the tray asks the window side to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// Sent from the Linux tray only, for now.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub enum TrayCommand {
     Open,
     StopAndQuit,

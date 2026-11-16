@@ -686,7 +686,7 @@ impl ChatView {
         let images: Vec<ChatImage> = self.images.drain(..).map(|(i, _)| i).collect();
         // Attached files, then `@path` mentions, go to the CLI as files, as the Electron chat
         // sends them.
-        let mut files: Vec<String> = self.x.files.drain(..).collect();
+        let mut files: Vec<String> = std::mem::take(&mut self.x.files);
         for m in split_mentions(&text).into_iter().filter(|p| p.mention) {
             let path = m.text.trim_start_matches('@').to_string();
             if !files.contains(&path) {
