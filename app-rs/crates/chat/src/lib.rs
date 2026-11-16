@@ -1,7 +1,8 @@
 //! The chat view's engine without its UI (ADR 0002, ported for the GPUI rewrite, ADR 0005):
 //! the chat's own event language, the per-CLI adapters that translate a headless CLI into it,
 //! the process runner, the thread reducer the view draws from, and the helpers around them
-//! (the `/` and `@` menus, attachments, saved views, moving a transcript between accounts).
+//! (the `/` and `@` menus, the message box's quotes, history and questions, attachments, saved
+//! views, moving a transcript between accounts).
 //!
 //! Driving a chat: build a [`ChatLaunch`], take an adapter from [`chat_adapter_for`], call
 //! [`ChatSession::start`], and fold each received [`ChatEvent`] into a [`ChatThread`] with
@@ -13,6 +14,7 @@ pub mod agy;
 pub mod attach;
 pub mod claude;
 pub mod codex;
+pub mod compose;
 pub mod files;
 mod json;
 pub mod session;

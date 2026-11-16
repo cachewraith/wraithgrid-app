@@ -4,6 +4,8 @@
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+
+use crate::a11y::A11y as _;
 use wraithgrid_core::config::Config;
 use wraithgrid_usage::format::{fmt_cost, fmt_tokens, reset_label, severity, Severity};
 use wraithgrid_usage::model::{
@@ -135,6 +137,7 @@ impl Render for UsageView {
             let r = *r;
             div()
                 .id(SharedString::from(format!("range-{label}")))
+                .a11y_toggle(*label, self.range == r)
                 .px_3()
                 .py_1()
                 .rounded_md()
@@ -310,6 +313,7 @@ impl Render for UsageView {
                     .child(
                         div()
                             .id("usage-close")
+                            .a11y_button("Back to panes")
                             .px_3()
                             .py_1()
                             .rounded_md()

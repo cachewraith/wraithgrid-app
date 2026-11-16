@@ -487,12 +487,27 @@ pub fn resolve_ui_theme(
     system_dark: bool,
 ) -> ResolvedTheme {
     let (picked, drawn) = drawn_theme(themes, settings, system_dark);
+    resolved(
+        &picked.id,
+        picked.built_in,
+        drawn,
+        settings.terminal_palette,
+    )
+}
+
+/// A theme file drawn as it is, no accent laid over it: the theme editor's draft.
+pub fn resolve_draft(draft: &ThemeFile, palette: TerminalPalette) -> ResolvedTheme {
+    resolved("", false, draft.clone(), palette)
+}
+
+fn resolved(id: &str, built_in: bool, drawn: ThemeFile, palette: TerminalPalette) -> ResolvedTheme {
     let colors = UiColors::from_vars(&theme_vars(&drawn));
-    let term = terminal_theme(settings.terminal_palette, &drawn);
+    let term = terminal_theme(palette, &drawn);
     ResolvedTheme {
-        id: picked.id.clone(),
-        name: picked.name.clone(),
-        built_in: picked.built_in,
+        id: id.to_owned(),
+        // `with_accent` keeps the name.
+        name: drawn.name.clone(),
+        built_in,
         mode: drawn.mode,
         style: ResolvedStyle::of(&drawn, &colors),
         colors,

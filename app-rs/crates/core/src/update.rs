@@ -264,8 +264,13 @@ pub enum PackageKind {
     Manual,
 }
 
+/// The NSIS uninstaller beside `Wraithgrid.exe`, named as electron-builder names it (both
+/// the Electron installer and `app-rs/packaging/windows` write it).
+pub const NSIS_UNINSTALLER: &str = "Uninstall Wraithgrid.exe";
+
 /// The packaging writes `package-type` (deb, rpm, pacman) beside the binary, as
-/// electron-builder does; an AppImage is recognised by `$APPIMAGE`.
+/// electron-builder does; an AppImage is recognised by `$APPIMAGE`, an NSIS install by its
+/// uninstaller.
 pub fn package_kind(exe: &Path, env: impl Fn(&str) -> Option<String>) -> PackageKind {
     if cfg!(target_os = "macos") {
         return PackageKind::Manual;
@@ -273,7 +278,7 @@ pub fn package_kind(exe: &Path, env: impl Fn(&str) -> Option<String>) -> Package
     if cfg!(windows) {
         return if exe
             .parent()
-            .is_some_and(|d| d.join("uninstall.exe").exists())
+            .is_some_and(|d| d.join(NSIS_UNINSTALLER).is_file())
         {
             PackageKind::Nsis
         } else {
@@ -712,6 +717,11 @@ mod tests {
                 package_kind(&exe, |k| (k == "APPIMAGE").then(|| "/x.AppImage".into())),
                 PackageKind::AppImage
             );
+        }
+        if cfg!(windows) {
+            assert_eq!(package_kind(&exe, |_| None), PackageKind::Manual);
+            std::fs::write(dir.join(NSIS_UNINSTALLER), "").unwrap();
+            assert_eq!(package_kind(&exe, |_| None), PackageKind::Nsis);
         }
         let _ = std::fs::remove_dir_all(dir);
     }

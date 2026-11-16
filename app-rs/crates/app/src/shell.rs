@@ -4,7 +4,7 @@
 //! after, in the same file and shape the Electron app uses.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -14,6 +14,8 @@ use futures::StreamExt as _;
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+
+use crate::a11y::A11y as _;
 use wraithgrid_core::agent_cli::AgentCli;
 use wraithgrid_core::config::{Config, LayoutNode, Pane};
 use wraithgrid_core::host::client::PaneHost;
@@ -36,13 +38,32 @@ use crate::dialogs::{
     Palette, PaletteAction, PaletteEvent, ProjectDialog, ProjectEvent, QuitDialog, QuitEvent,
 };
 use crate::mods_view::{ModsView, ModsViewEvent};
+use crate::project_view::{ProjectPageEvent, ProjectView};
 use crate::runtime::{spawn_env, Router};
 use crate::scheduled_view::{ScheduledEvent, ScheduledView};
 use crate::settings::{SettingsEvent, SettingsView};
+use crate::shortcuts_sheet::{ShortcutsSheet, ShortcutsSheetEvent};
 use crate::terminal::{
     PaneResizer, PaneStarter, PaneWriter, TermCore, TerminalEvent, TerminalStyle, TerminalView,
 };
 use crate::usage_view::{UsageView, UsageViewEvent};
+
+mod auto_switch;
+mod empty;
+mod git_button;
+mod handoff;
+mod later;
+mod machines;
+mod pane_bars;
+mod pane_menu;
+mod preview;
+mod sidebar;
+mod status_bar;
+mod team;
+mod top_bar;
+mod tray;
+
+pub use machines::{probe_text, remote_host};
 
 const TITLE_BAR: f32 = 36.0;
 const SAVE_DELAY: Duration = Duration::from_millis(300);
@@ -56,8 +77,44 @@ pub struct Shell {
     chats: HashMap<String, Entity<ChatView>>,
     /// Each chat's status, for its header dot.
     chat_states: HashMap<String, wraithgrid_chat::ChatStatus>,
+    /// Shown while the window is closed but the app keeps running (`keepInTray`).
+    tray: Option<crate::tray::Tray>,
+    _tray_tasks: Vec<Task<()>>,
+    _second_launch: Option<Task<()>>,
+    /// The window's own focus: holds the keys when no pane or screen has them, so shortcuts
+    /// and Esc still reach the shell.
+    focus: Option<FocusHandle>,
+    /// A window was attached once: later ones are reopens from the tray.
+    opened: bool,
+    /// Each machine's host (H5), by machine id, with the ssh host it was made for.
+    remotes: HashMap<String, (String, Arc<wraithgrid_remote::RemoteHost>)>,
+    /// Scheduled runs started by this launch (`live_key`); others left running are stale.
+    live_runs: std::collections::HashSet<String>,
     /// Chat panes opened as terminals this session (until the chat view is ported).
     as_terminal: Vec<String>,
+    /// Panes whose sign-in banner was closed, and those where /login was run.
+    banner_hidden: Vec<String>,
+    login_started: Vec<String>,
+    /// Account-switch questions waiting, oldest first (#161).
+    switch_asks: Vec<auto_switch::SwitchAsk>,
+    /// Panes answered Stay, by the account they stayed on.
+    switch_declined: HashMap<String, String>,
+    told_none_left: HashSet<String>,
+    switching: HashSet<String>,
+    /// The Changes panel's width while its edge is dragged.
+    diff_drag: Option<f32>,
+    /// The top row's ⋯ menu, open at a point.
+    utility_menu: Option<Point<Pixels>>,
+    /// The empty layout slot a new pane goes into ("New pane here").
+    pending_slot: Option<String>,
+    /// This version, once after an update restarted the app ("Updated to X").
+    pub updated_to: Option<String>,
+    /// A pane's menu, open at a point (`Pane.tsx`'s ContextMenu).
+    pane_menu: Option<(String, Point<Pixels>)>,
+    /// The pane whose close asks first: its process still works.
+    closing: Option<String>,
+    /// Web preview panes' views (#74), made when first shown.
+    previews: HashMap<String, Entity<crate::preview_view::PreviewView>>,
     focused: Option<String>,
     /// The pane shown alone (Zoom pane), until toggled back to the grid.
     zoomed: Option<String>,
@@ -81,11 +138,15 @@ pub struct Shell {
     usage_view: Option<Entity<UsageView>>,
     mods_view: Option<Entity<ModsView>>,
     scheduled_view: Option<Entity<ScheduledView>>,
+    project_view: Option<Entity<ProjectView>>,
     update: UpdateState,
     /// The Changes panel beside the panes, for one folder.
     changes: Option<Entity<ChangesPanel>>,
     /// Each shown pane folder's branch and changed count, polled.
     git_heads: HashMap<String, wraithgrid_git::GitStatus>,
+    /// The top bar's Git menu, while open (#162).
+    git_menu: Option<git_button::GitMenu>,
+    sidebar: sidebar::SidebarState,
     /// usage.json, shared with the poll; and the latest limits per account.
     usage: Arc<std::sync::Mutex<wraithgrid_usage::store::UsageStore>>,
     limits: std::collections::BTreeMap<String, wraithgrid_usage::model::AccountLimits>,
@@ -118,7 +179,27 @@ impl Shell {
             terminals: HashMap::new(),
             chats: HashMap::new(),
             chat_states: HashMap::new(),
+            tray: None,
+            _tray_tasks: vec![],
+            _second_launch: None,
+            focus: None,
+            opened: false,
+            remotes: HashMap::new(),
+            live_runs: Default::default(),
             as_terminal: Vec::new(),
+            banner_hidden: vec![],
+            login_started: vec![],
+            switch_asks: vec![],
+            switch_declined: HashMap::new(),
+            told_none_left: HashSet::new(),
+            switching: HashSet::new(),
+            diff_drag: None,
+            utility_menu: None,
+            pending_slot: None,
+            updated_to: None,
+            pane_menu: None,
+            closing: None,
+            previews: HashMap::new(),
             focused: None,
             zoomed: None,
             split_bounds: Rc::default(),
@@ -136,9 +217,12 @@ impl Shell {
             usage_view: None,
             mods_view: None,
             scheduled_view: None,
+            project_view: None,
             update: UpdateState::Idle,
             changes: None,
             git_heads: HashMap::new(),
+            git_menu: None,
+            sidebar: Default::default(),
             usage: Arc::new(std::sync::Mutex::new(
                 wraithgrid_usage::store::UsageStore::new(
                     wraithgrid_usage::store::UsageStoreDeps::new(
@@ -188,6 +272,7 @@ impl Shell {
                     if this.states != states {
                         this.state_changes(&states, cx);
                         this.states = states;
+                        this.refresh_project_view(cx);
                         cx.notify();
                     }
                 })
@@ -290,6 +375,8 @@ impl Shell {
             let config = self.store.get().clone();
             view.update(cx, |v, cx| v.set_config(config, cx));
         }
+        self.refresh_project_view(cx);
+        self.refresh_chat_later(cx);
         cx.notify();
         if self.store.is_dirty() {
             self.save_task = Some(cx.spawn(async move |this, cx| {
@@ -340,10 +427,16 @@ impl Shell {
         pane_env.insert("WRAITHGRID_PANE".into(), pane.id.clone());
         let setup = ChatSetup {
             cli: cli.as_str().into(),
+            // Settings' path for the CLI, as `resolveSpawn` picks it; else found on PATH.
             program: if cli == AgentCli::Claude {
                 crate::mods_glue::claude_binary(&config, &env)
             } else {
-                None
+                config
+                    .settings
+                    .cli_paths
+                    .iter()
+                    .find(|(c, p)| *c == cli && !p.trim().is_empty())
+                    .map(|(_, p)| wraithgrid_core::paths::resolve_user_path(p.trim(), &home))
             },
             cwd: wraithgrid_core::paths::resolve_user_path(&pane.cwd, &home),
             env: pane_env,
@@ -362,8 +455,21 @@ impl Shell {
         let views_dir = wraithgrid_core::paths::current_user_data_dir().join("chats");
         let pane_id = pane.id.clone();
         let view = cx.new(|cx| ChatView::new(pane_id.clone(), setup, views_dir, window, cx));
+        self.subscribe_chat(&view, pane_id, window, cx);
+        self.chats.insert(pane.id.clone(), view.clone());
+        view
+    }
+
+    /// The chat view's events, handled in this window (again after the window reopens).
+    fn subscribe_chat(
+        &mut self,
+        view: &Entity<ChatView>,
+        pane_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         cx.subscribe_in(
-            &view,
+            view,
             window,
             move |this, _, event: &ChatViewEvent, window, cx| match event {
                 ChatViewEvent::Submitted { text } => {
@@ -377,7 +483,7 @@ impl Shell {
                             .filter(|p| p.id == id)
                         {
                             // A new chat is named after its first message, like a chat app's history.
-                            if !p.has_conversation {
+                            if !p.has_conversation && p.title == auto_title(p.shell, &p.cwd) {
                                 p.title = title.clone();
                             }
                             p.has_conversation = true;
@@ -399,6 +505,7 @@ impl Shell {
                 }
                 ChatViewEvent::Status(status) => {
                     this.chat_states.insert(pane_id.clone(), *status);
+                    this.refresh_project_view(cx);
                     cx.notify();
                 }
                 ChatViewEvent::Choices {
@@ -431,14 +538,25 @@ impl Shell {
                 ChatViewEvent::OpenUsage => this.open_usage(window, cx),
                 ChatViewEvent::Usage(e) => this.record_usage(&pane_id, e, cx),
                 ChatViewEvent::TurnEnded { error } => {
-                    this.settle_job_runs(&pane_id, error.is_some(), cx);
+                    this.settle_runs(cx);
                     this.maybe_switch(&pane_id, error.clone(), window, cx)
                 }
+                ChatViewEvent::Queue { text, when } => {
+                    this.queue_message(&pane_id, text, *when, cx)
+                }
+                ChatViewEvent::CancelQueued(id) => {
+                    let id = id.clone();
+                    this.update(cx, |c| c.schedules.retain(|j| j.id != id));
+                }
+                ChatViewEvent::SendQueuedNow(id) => this.run_job_now(&id.clone(), window, cx),
+                ChatViewEvent::ContinueAs(to) => {
+                    let to = to.clone();
+                    this.continue_as(&pane_id, &to, None, window, cx)
+                }
+                ChatViewEvent::SignIn(id) => this.login(id.clone(), window, cx),
             },
         )
         .detach();
-        self.chats.insert(pane.id.clone(), view.clone());
-        view
     }
 
     fn select_workspace(&mut self, id: String, cx: &mut Context<Self>) {
@@ -464,7 +582,21 @@ impl Shell {
             &dialog,
             window,
             |this, _, event: &NewPaneEvent, window, cx| {
-                if let NewPaneEvent::Start { account, cwd, args } = event {
+                if let NewPaneEvent::PinFolders(pins) = event {
+                    let pins = pins.clone();
+                    this.update(cx, |c| c.settings.pinned_folders = pins);
+                    return;
+                }
+                if let NewPaneEvent::Start {
+                    account,
+                    cwd,
+                    args,
+                    worktree_panes,
+                } = event
+                {
+                    if let Some(on) = worktree_panes {
+                        this.remember_worktree_panes(*on, cx);
+                    }
                     let shell = account.is_none();
                     let id = this.add_pane(
                         None,
@@ -488,6 +620,7 @@ impl Shell {
     fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let config = self.config().clone();
         let palette = cx.new(|cx| Palette::new(&config, window, cx));
+        self.add_git_commands(&palette, cx);
         cx.subscribe_in(
             &palette,
             window,
@@ -499,6 +632,7 @@ impl Shell {
                             this.focused = Some(pane);
                         }
                         PaletteAction::Project(id) => this.select_workspace(id, cx),
+                        PaletteAction::Preview(id) => this.open_preview(&id, window, cx),
                         PaletteAction::NewPane => return this.open_new_pane(window, cx),
                         PaletteAction::NewTerminal => this.new_pane(None, cx),
                         PaletteAction::ToggleZoom => {
@@ -514,6 +648,10 @@ impl Shell {
                         PaletteAction::Usage => return this.open_usage(window, cx),
                         PaletteAction::Mods => return this.open_mods(window, cx),
                         PaletteAction::Scheduled => return this.open_scheduled(window, cx),
+                        a @ (PaletteAction::SwitchBranch
+                        | PaletteAction::BranchPane
+                        | PaletteAction::OpenBranch) => return this.palette_git(a, window, cx),
+                        PaletteAction::Shortcuts => return this.toggle_shortcuts(window, cx),
                         PaletteAction::ClosePane => {
                             if let Some(id) = this.focused.clone() {
                                 this.close_pane(id, cx);
@@ -543,6 +681,19 @@ impl Shell {
                 }
             });
         }
+        // `WRAITHGRID_ATTACH=<path>[:<path>…]` (debug builds) attaches files to the first chat's
+        // box as a drop does: images as images, the rest as paths.
+        if let Some(paths) = std::env::var("WRAITHGRID_ATTACH")
+            .ok()
+            .filter(|_| cfg!(debug_assertions))
+        {
+            let paths: Vec<std::path::PathBuf> = std::env::split_paths(&paths).collect();
+            cx.on_next_frame(window, move |this, _, cx| {
+                if let Some(chat) = this.chats.values().next().cloned() {
+                    chat.update(cx, |c, cx| c.attach_dropped(&paths, cx));
+                }
+            });
+        }
         // `WRAITHGRID_TYPE=<text>` types into the first chat's box a moment after start.
         if let Ok(text) = std::env::var("WRAITHGRID_TYPE") {
             cx.spawn_in(window, async move |this, cx| {
@@ -559,6 +710,13 @@ impl Shell {
             Ok("new-pane") => self.open_new_pane(window, cx),
             Ok("palette") => self.open_palette(window, cx),
             Ok("settings") => self.open_settings(window, cx),
+            Ok(what @ ("theme-editor" | "themes")) => {
+                self.open_settings(window, cx);
+                if let Some(view) = self.settings_view.clone() {
+                    let editor = what == "theme-editor";
+                    view.update(cx, |v, cx| v.open_theme_tool(editor, window, cx));
+                }
+            }
             Ok("quit") => self.request_close(window, cx),
             Ok("new-project") => self.open_new_project(window, cx),
             Ok("accounts") => self.open_accounts(window, cx),
@@ -572,6 +730,18 @@ impl Shell {
             Ok("usage") => self.open_usage(window, cx),
             Ok("mods") => self.open_mods(window, cx),
             Ok("scheduled") => self.open_scheduled(window, cx),
+            Ok("projectpage") => {
+                let ws = self.config().active_workspace.clone();
+                self.open_project_page(ws, window, cx)
+            }
+            Ok("shortcuts") => self.toggle_shortcuts(window, cx),
+            Ok(tab @ ("about" | "keyboard")) => {
+                self.open_settings(window, cx);
+                let label = if tab == "about" { "About" } else { "Keyboard" };
+                if let Some(view) = self.settings_view.clone() {
+                    view.update(cx, |s, cx| s.show_tab(label, cx));
+                }
+            }
             Ok("continue") => {
                 if let Some(id) = self.config().active().panes.first().map(|p| p.id.clone()) {
                     self.ask_continue_as(id, window, cx);
@@ -581,6 +751,7 @@ impl Shell {
                 let id = self.config().active_workspace.clone();
                 self.open_project(id, window, cx)
             }
+            Ok(hook) if hook.starts_with("git-") => self.open_git_from_env(hook, window, cx),
             _ => {}
         }
     }
@@ -593,6 +764,7 @@ impl Shell {
         self.usage_view = None;
         self.mods_view = None;
         self.scheduled_view = None;
+        self.project_view = None;
         let config = self.config().clone();
         let view = cx.new(|cx| SettingsView::new(&config, window, cx));
         cx.subscribe_in(
@@ -637,6 +809,31 @@ impl Shell {
                         crate::theme::apply(&resolved, Some(window), cx);
                     }
                 }
+                SettingsEvent::Machines(e) => {
+                    match e {
+                        crate::machines_row::MachinesEvent::Add(m) => {
+                            let m = m.clone();
+                            this.update(cx, |c| c.machines.push(m));
+                        }
+                        // Its projects run here again; its panes there keep running.
+                        crate::machines_row::MachinesEvent::Remove(id) => {
+                            let id = id.clone();
+                            this.remotes.remove(&id);
+                            this.update(cx, |c| {
+                                c.machines.retain(|m| m.id != id);
+                                for w in c.workspaces.iter_mut() {
+                                    if w.machine_id.as_deref() == Some(id.as_str()) {
+                                        w.machine_id = None;
+                                    }
+                                }
+                            });
+                        }
+                    }
+                    let machines = this.config().machines.clone();
+                    if let Some(view) = this.settings_view.clone() {
+                        view.update(cx, |v, cx| v.set_machines(machines, cx));
+                    }
+                }
                 SettingsEvent::Close => {
                     this.settings_view = None;
                     this.close_modal(window, cx);
@@ -644,8 +841,27 @@ impl Shell {
             },
         )
         .detach();
+        let on_launch = config.settings.check_updates_on_launch;
+        crate::about_view::attach(&view, cx.entity().downgrade(), on_launch, cx);
         window.focus(&view.focus_handle(cx), cx);
         self.settings_view = Some(view);
+        cx.notify();
+    }
+
+    /// The shortcuts sheet; its own shortcut closes it again.
+    fn toggle_shortcuts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.modal, Some(Modal::Shortcuts(_))) {
+            return self.close_modal(window, cx);
+        }
+        let sheet = cx.new(|cx| ShortcutsSheet::new(&self.config().settings.shortcuts, cx));
+        cx.subscribe_in(
+            &sheet,
+            window,
+            |this, _, _: &ShortcutsSheetEvent, window, cx| this.close_modal(window, cx),
+        )
+        .detach();
+        window.focus(&sheet.focus_handle(cx), cx);
+        self.modal = Some(Modal::Shortcuts(sheet));
         cx.notify();
     }
 
@@ -671,6 +887,10 @@ impl Shell {
                         cx.notify();
                     }),
                 },
+                NewProjectEvent::PinFolders(pins) => {
+                    let pins = pins.clone();
+                    this.update(cx, |c| c.settings.pinned_folders = pins);
+                }
                 NewProjectEvent::Cancel => this.close_modal(window, cx),
             },
         )
@@ -731,6 +951,7 @@ impl Shell {
         self.usage_view = None;
         self.mods_view = None;
         self.scheduled_view = None;
+        self.project_view = None;
         let config = self.config().clone();
         let view = cx.new(|cx| AccountsView::new(&config, window, cx));
         cx.subscribe_in(
@@ -750,7 +971,27 @@ impl Shell {
                         }
                         wraithgrid_core::accounts::rename_account(&mut next, id, name)
                     }
-                    AccountsEvent::Remove { id } => {
+                    AccountsEvent::Remove { id, delete_dir } => {
+                        // "Also delete its config dir": only an account's dir inside home.
+                        let doomed = match next.account(id).filter(|_| *delete_dir) {
+                            None => None,
+                            Some(a) => {
+                                let cli = a.cli.as_str().to_string();
+                                match wraithgrid_core::accounts::deletable_config_dir(
+                                    &next,
+                                    &a.config_dir,
+                                    &home,
+                                ) {
+                                    Ok(real) => real.map(|r| (r, cli)),
+                                    Err(e) => {
+                                        return view.update(cx, |v, cx| {
+                                            v.error = Some(e);
+                                            cx.notify();
+                                        })
+                                    }
+                                }
+                            }
+                        };
                         // Panes first: a running agent must not keep writing into its account.
                         for pane in wraithgrid_core::accounts::remove_account(&mut next, id) {
                             this.close_pane(pane.clone(), cx);
@@ -759,7 +1000,39 @@ impl Shell {
                                 w.layout = remove_pane(w.layout.as_ref(), &pane);
                             }
                         }
-                        Ok(())
+                        let Some((real, cli)) = doomed else {
+                            return {
+                                this.update(cx, |c| *c = next);
+                                this.open_accounts(window, cx);
+                            };
+                        };
+                        // The shared links out first, so the delete can never reach through
+                        // them; then the folder, off the main thread; the account goes once
+                        // it is gone.
+                        wraithgrid_mods::shared_config::SharedBrains::new(home.clone())
+                            .unshare(&cli, &real.to_string_lossy());
+                        let task = cx.background_spawn(async move {
+                            std::fs::remove_dir_all(&real).map_err(|e| e.to_string())
+                        });
+                        let view = view.clone();
+                        cx.spawn_in(window, async move |this, cx| {
+                            let res = task.await;
+                            let _ = this.update_in(cx, |this, window, cx| match res {
+                                Ok(()) => {
+                                    this.update(cx, |c| *c = next);
+                                    this.open_accounts(window, cx);
+                                }
+                                Err(e) => view.update(cx, |v, cx| {
+                                    v.error = Some(format!("Could not delete the config dir: {e}"));
+                                    cx.notify();
+                                }),
+                            });
+                        })
+                        .detach();
+                        return;
+                    }
+                    AccountsEvent::Import { dir } => {
+                        wraithgrid_core::accounts::import_account(&mut next, dir).map(|_| ())
                     }
                     AccountsEvent::MarkSignedIn { id } => {
                         next.accounts
@@ -768,11 +1041,27 @@ impl Shell {
                             .for_each(|a| a.signed_in = true);
                         Ok(())
                     }
+                    AccountsEvent::Folder(op) => {
+                        use crate::accounts_view::FolderOp;
+                        use wraithgrid_core::accounts as acc;
+                        match op {
+                            FolderOp::Create(name) => {
+                                acc::create_folder(&mut next, name);
+                            }
+                            FolderOp::Rename(id, name) => acc::rename_folder(&mut next, id, name),
+                            FolderOp::Toggle(id) => acc::toggle_folder(&mut next, id),
+                            FolderOp::Delete(id) => acc::delete_folder(&mut next, id),
+                            FolderOp::Move(id, to) => {
+                                acc::move_account_to_folder(&mut next, id, to.as_deref())
+                            }
+                        }
+                        this.update(cx, |c| *c = next.clone());
+                        // In place: a folder toggle must not reset the page.
+                        return view.update(cx, |v, cx| v.set_folders(&next, cx));
+                    }
                     AccountsEvent::Login { id } => {
-                        // Signing in happens in the CLI's own screen: a terminal running it.
                         this.accounts_view = None;
-                        this.add_pane(None, Some(id.clone()), "~".into(), vec![], false, false, cx);
-                        return this.close_modal(window, cx);
+                        return this.login(id.clone(), window, cx);
                     }
                     AccountsEvent::Close => {
                         this.accounts_view = None;
@@ -889,6 +1178,7 @@ impl Shell {
                     .await;
                 let _ = this.update(cx, |this, cx| {
                     this.limits = limits;
+                    this.refresh_chat_later(cx);
                     if let Some(view) = this.usage_view.clone() {
                         let data = this.usage.lock().unwrap().get();
                         view.update(cx, |v, cx| v.set_data(data, cx));
@@ -931,6 +1221,7 @@ impl Shell {
                 poller = back;
                 let _ = this.update(cx, |this, cx| {
                     this.limits = limits;
+                    this.refresh_chat_later(cx);
                     if let Some(view) = this.usage_view.clone() {
                         let data = this.usage.lock().unwrap().get();
                         view.update(cx, |v, cx| v.set_data(data, cx));
@@ -976,6 +1267,7 @@ impl Shell {
         self.accounts_view = None;
         self.mods_view = None;
         self.scheduled_view = None;
+        self.project_view = None;
         let data = self.usage.lock().unwrap().get();
         let config = self.config().clone();
         let view = cx.new(|cx| UsageView::new(data, config, cx));
@@ -1003,6 +1295,7 @@ impl Shell {
         self.accounts_view = None;
         self.usage_view = None;
         self.scheduled_view = None;
+        self.project_view = None;
         let config = self.config().clone();
         let view = cx.new(|cx| ModsView::new(config, cx));
         cx.subscribe_in(
@@ -1029,12 +1322,13 @@ impl Shell {
         self.accounts_view = None;
         self.usage_view = None;
         self.mods_view = None;
+        self.project_view = None;
         let config = self.config().clone();
-        let view = cx.new(|cx| ScheduledView::new(config, window, cx));
+        let view = cx.new(|cx| ScheduledView::new(config, cx));
         cx.subscribe_in(
             &view,
             window,
-            |this, view, event: &ScheduledEvent, window, cx| {
+            |this, _, event: &ScheduledEvent, window, cx| {
                 let tz = chrono::Local;
                 let now = wraithgrid_usage::now_ms();
                 match event {
@@ -1042,11 +1336,16 @@ impl Shell {
                         this.scheduled_view = None;
                         this.close_modal(window, cx);
                     }
-                    ScheduledEvent::Save(job) => {
+                    ScheduledEvent::Save(job, folder) => {
                         let limits = this.job_limits(&job.account_id);
-                        let mut saved = true;
                         this.update(cx, |c| {
-                            saved = wraithgrid_schedule::save_job(
+                            if let Some(folder) = folder {
+                                if let Some(w) = c.workspaces.iter_mut().find(|w| w.id == job.ws_id)
+                                {
+                                    w.folder = folder.clone();
+                                }
+                            }
+                            wraithgrid_schedule::save_job(
                                 &tz,
                                 &mut c.schedules,
                                 (**job).clone(),
@@ -1054,12 +1353,11 @@ impl Shell {
                                 limits.as_ref(),
                             );
                         });
-                        if !saved {
-                            let max = wraithgrid_schedule::SCHEDULES_MAX;
-                            view.update(cx, |v, cx| {
-                                v.fail(format!("At most {max} scheduled chats."), cx)
-                            });
-                        }
+                    }
+                    ScheduledEvent::OpenChat(ws, pane) => {
+                        this.scheduled_view = None;
+                        this.reveal_chat(ws, pane, cx);
+                        this.close_modal(window, cx);
                     }
                     ScheduledEvent::Toggle(id, on) => {
                         if let Some(job) = this
@@ -1092,6 +1390,106 @@ impl Shell {
         window.focus(&view.focus_handle(cx), cx);
         self.scheduled_view = Some(view);
         cx.notify();
+    }
+
+    /// A pane's status as Electron's `PaneStatus` names it.
+    fn pane_status(&self, pane_id: &str) -> Option<&'static str> {
+        use wraithgrid_chat::ChatStatus;
+        match self.chat_states.get(pane_id) {
+            Some(ChatStatus::Running) => Some("running"),
+            Some(ChatStatus::Background) => Some("background"),
+            Some(ChatStatus::Approval) => Some("approval"),
+            Some(ChatStatus::Idle) => Some("idle"),
+            None => self.states.get(pane_id).map(|s| match s.as_str() {
+                "running" => "running",
+                "blocked" => "approval",
+                "exited" => "exited",
+                _ => "idle",
+            }),
+        }
+    }
+
+    fn pane_statuses(&self) -> HashMap<String, &'static str> {
+        self.config()
+            .workspaces
+            .iter()
+            .flat_map(|w| &w.panes)
+            .filter_map(|p| self.pane_status(&p.id).map(|s| (p.id.clone(), s)))
+            .collect()
+    }
+
+    fn refresh_project_view(&mut self, cx: &mut Context<Self>) {
+        if let Some(view) = self.project_view.clone() {
+            let (config, statuses) = (self.store.get().clone(), self.pane_statuses());
+            view.update(cx, |v, cx| v.set_data(config, statuses, cx));
+        }
+    }
+
+    /// `openProject`: switches to the project and shows its page (open chats and History).
+    fn open_project_page(&mut self, ws_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.blocked.is_some() {
+            return;
+        }
+        self.settings_view = None;
+        self.accounts_view = None;
+        self.usage_view = None;
+        self.mods_view = None;
+        self.scheduled_view = None;
+        self.select_workspace(ws_id.clone(), cx);
+        let (config, statuses) = (self.config().clone(), self.pane_statuses());
+        let view = cx.new(|cx| ProjectView::new(config, ws_id, statuses, window, cx));
+        cx.subscribe_in(
+            &view,
+            window,
+            |this, _, event: &ProjectPageEvent, window, cx| match event {
+                ProjectPageEvent::Close => {
+                    this.project_view = None;
+                    this.close_modal(window, cx);
+                }
+                ProjectPageEvent::Reveal(pane) => {
+                    this.project_view = None;
+                    let ws = this.config().active_workspace.clone();
+                    this.reveal_chat(&ws, pane, cx);
+                    this.close_modal(window, cx);
+                }
+                ProjectPageEvent::Reopen(ws, pane) => {
+                    this.project_view = None;
+                    this.reopen_chat(ws, pane, true, cx);
+                    this.close_modal(window, cx);
+                }
+                ProjectPageEvent::Delete(ws, pane) => this.delete_chat(ws, pane, cx),
+                ProjectPageEvent::NewChat => {
+                    this.project_view = None;
+                    this.open_new_pane(window, cx);
+                }
+            },
+        )
+        .detach();
+        self.wire_team(&view, window, cx);
+        window.focus(&view.focus_handle(cx), cx);
+        self.project_view = Some(view);
+        cx.notify();
+    }
+
+    /// `deleteChat`: an open chat is stopped and not archived; a History one is removed. Its
+    /// saved view goes either way; the CLI's own session files stay.
+    fn delete_chat(&mut self, ws_id: &str, pane_id: &str, cx: &mut Context<Self>) {
+        let open = self
+            .config()
+            .workspaces
+            .iter()
+            .any(|w| w.panes.iter().any(|p| p.id == pane_id));
+        if open {
+            return self.drop_pane(pane_id, false, cx);
+        }
+        let (ws, id) = (ws_id.to_string(), pane_id.to_string());
+        self.update(cx, |c| {
+            if let Some(w) = c.workspaces.iter_mut().find(|w| w.id == ws) {
+                w.history.retain(|h| h.pane.id != id);
+            }
+        });
+        let views = wraithgrid_core::paths::current_user_data_dir().join("chats");
+        let _ = wraithgrid_chat::views::delete_view(&views, pane_id);
     }
 
     /// Shows or hides the Changes panel for the focused pane's folder (else the project's).
@@ -1153,6 +1551,7 @@ impl Shell {
             let _ = this.update(cx, |this, cx| {
                 if this.git_heads != heads {
                     this.git_heads = heads;
+                    this.refresh_chat_later(cx);
                     cx.notify();
                 }
             });
@@ -1163,25 +1562,39 @@ impl Shell {
     /// Asks GitHub for a newer release once at startup (Settings → check on launch).
     pub fn check_updates_on_launch(&mut self, cx: &mut Context<Self>) {
         if self.blocked.is_none() && self.config().settings.check_updates_on_launch {
-            self.check_updates(cx);
+            self.check_updates(true, cx);
         }
     }
 
-    fn check_updates(&mut self, cx: &mut Context<Self>) {
+    /// `launch`: a newer release is also announced through the OS, once per version.
+    pub(crate) fn check_updates(&mut self, launch: bool, cx: &mut Context<Self>) {
         self.update = UpdateState::Checking;
         self._update_task = Some(cx.spawn(async move |this, cx| {
-            let result = cx
+            let (result, notice) = cx
                 .background_spawn(async move {
                     let ua = format!("Wraithgrid/{}", crate::runtime::APP_VERSION);
-                    update::check(crate::runtime::APP_VERSION, &|url| update::fetch(url, &ua))
+                    let result =
+                        update::check(crate::runtime::APP_VERSION, &|url| update::fetch(url, &ua));
+                    let notice = crate::about_view::after_check(&result, launch);
+                    (result, notice)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.update = match result {
                     update::CheckResult::Available { latest, .. } => UpdateState::Available(latest),
-                    update::CheckResult::Current { .. } => UpdateState::Idle,
+                    update::CheckResult::Current { .. } => {
+                        UpdateState::Current(wraithgrid_usage::now_ms())
+                    }
                     update::CheckResult::Error { error, .. } => UpdateState::Error(error),
                 };
+                if let Some((title, body)) = notice {
+                    cx.show_system_notification(SystemNotification {
+                        tag: "update".into(),
+                        title: title.into(),
+                        body: body.into(),
+                        actions: vec![],
+                    });
+                }
                 cx.notify();
             });
         }));
@@ -1190,18 +1603,22 @@ impl Shell {
 
     /// The title bar's update button: download and verify, then restart into it. Builds that
     /// can't update themselves (macOS, from source) open the release page instead.
-    fn run_update(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn run_update(&mut self, cx: &mut Context<Self>) {
         let exe = std::env::current_exe().unwrap_or_default();
         let kind = update::package_kind(&exe, |k| std::env::var(k).ok());
         match std::mem::replace(&mut self.update, UpdateState::Idle) {
-            UpdateState::Available(release) if kind == update::PackageKind::Manual => {
+            UpdateState::Available(release) | UpdateState::Failed { release, .. }
+                if kind == update::PackageKind::Manual =>
+            {
                 cx.open_url(&release.url);
                 self.update = UpdateState::Available(release);
             }
-            UpdateState::Available(release) => {
+            UpdateState::Available(release) | UpdateState::Failed { release, .. } => {
+                let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 self.update = UpdateState::Downloading {
                     version: release.version.clone(),
                     percent: 0,
+                    cancel: cancel.clone(),
                 };
                 let (tx, mut rx) = futures::channel::mpsc::unbounded::<u8>();
                 let dir = std::env::temp_dir().join("wraithgrid-update");
@@ -1217,7 +1634,7 @@ impl Shell {
                             &mut |p| {
                                 let _ = tx.unbounded_send(p);
                             },
-                            &|| false,
+                            &|| cancel.load(std::sync::atomic::Ordering::Relaxed),
                         )
                     }
                 });
@@ -1240,7 +1657,8 @@ impl Shell {
                                 file,
                                 kind,
                             },
-                            Err(e) => UpdateState::Error(e),
+                            Err(e) if e == "cancelled" => UpdateState::Available(release),
+                            Err(error) => UpdateState::Failed { release, error },
                         };
                         cx.notify();
                     });
@@ -1294,8 +1712,8 @@ impl Shell {
                         .await;
                     let _ = this.update(cx, |this, cx| match result {
                         Ok(()) => cx.quit(),
-                        Err(e) => {
-                            this.update = UpdateState::Error(e);
+                        Err(error) => {
+                            this.update = UpdateState::Failed { release, error };
                             cx.notify();
                         }
                     });
@@ -1310,15 +1728,29 @@ impl Shell {
     fn update_button(&self) -> Option<(String, bool)> {
         match &self.update {
             UpdateState::Available(r) => Some((format!("Update to v{}", r.version), true)),
-            UpdateState::Downloading { version, percent } => {
-                Some((format!("Downloading v{version}… {percent}%"), false))
-            }
+            UpdateState::Downloading {
+                version, percent, ..
+            } => Some((format!("Downloading v{version}… {percent}%"), false)),
             UpdateState::Ready { release, .. } => {
                 Some((format!("Restart to update to v{}", release.version), true))
             }
             UpdateState::Installing(v) => Some((format!("Installing v{v}…"), false)),
-            UpdateState::Error(e) => Some((format!("Update failed: {e}"), false)),
-            UpdateState::Idle | UpdateState::Checking => None,
+            UpdateState::Error(e) | UpdateState::Failed { error: e, .. } => {
+                Some((format!("Update failed: {e}"), false))
+            }
+            UpdateState::Idle | UpdateState::Checking | UpdateState::Current(_) => None,
+        }
+    }
+
+    /// Where the updater is, for About.
+    pub(crate) fn update_state(&self) -> &UpdateState {
+        &self.update
+    }
+
+    /// Stops a download; the release stays available.
+    pub(crate) fn cancel_update(&self) {
+        if let UpdateState::Downloading { cancel, .. } = &self.update {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
         }
     }
 
@@ -1333,6 +1765,7 @@ impl Shell {
         store.on_chat_event(pane_id, e);
         self.limits = store.get().limits;
         drop(store);
+        self.refresh_chat_later(cx);
         let usage = self.usage.clone();
         self._usage_save = Some(cx.spawn(async move |_, cx| {
             cx.background_executor()
@@ -1358,98 +1791,6 @@ impl Shell {
             .collect()
     }
 
-    /// After a turn: at the account's limit the chat carries on as the next account with room,
-    /// asking first, on its own, or not at all (#61, #161).
-    fn maybe_switch(
-        &mut self,
-        pane_id: &str,
-        error: Option<String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let s = &self.config().settings;
-        if s.auto_switch_mode == wraithgrid_core::types::AutoSwitchMode::Off {
-            return;
-        }
-        let (mode, at) = (s.auto_switch_mode, s.auto_switch_at);
-        let Some(from_id) = self
-            .config()
-            .workspaces
-            .iter()
-            .flat_map(|w| &w.panes)
-            .find(|p| p.id == pane_id)
-            .and_then(|p| p.account_id.clone())
-        else {
-            return;
-        };
-        let accounts = self.usage_accounts();
-        let Some(from) = accounts.iter().find(|a| a.id == from_id) else {
-            return;
-        };
-        let decision = wraithgrid_usage::auto_switch::decide_switch(
-            &accounts,
-            from,
-            &self.limits,
-            wraithgrid_usage::now_ms(),
-            at,
-            error.as_deref(),
-        );
-        let chat = self.chats.get(pane_id).cloned();
-        match decision {
-            wraithgrid_usage::auto_switch::SwitchDecision::Stay => {}
-            wraithgrid_usage::auto_switch::SwitchDecision::NoneLeft { reason } => {
-                if let Some(chat) = chat {
-                    chat.update(cx, |c, cx| {
-                        c.add_notice(wraithgrid_chat::ItemLevel::Error, &reason, cx)
-                    });
-                }
-            }
-            wraithgrid_usage::auto_switch::SwitchDecision::Switch { to, reason, resend } => {
-                let (to_id, to_name) = (to.id.clone(), to.name.clone());
-                let resend_text = if resend {
-                    chat.as_ref().and_then(|c| c.read(cx).last_user_text())
-                } else {
-                    None
-                };
-                if mode == wraithgrid_core::types::AutoSwitchMode::Auto {
-                    if let Some(chat) = &chat {
-                        chat.update(cx, |c, cx| {
-                            c.add_notice(
-                                wraithgrid_chat::ItemLevel::Info,
-                                &format!("{reason}: switching to {to_name}"),
-                                cx,
-                            )
-                        });
-                    }
-                    self.continue_as(pane_id, &to_id, resend_text, window, cx);
-                    return;
-                }
-                let dialog = cx.new(|_| {
-                    ChoiceDialog::new(
-                        reason,
-                        "The chat can carry on as your next account with room, with the whole conversation.",
-                        vec![(to_id.clone(), format!("Switch to {to_name}"), if resend { "and send the message again".into() } else { String::new() })],
-                        "Stay",
-                    )
-                });
-                let pane = pane_id.to_string();
-                cx.subscribe_in(
-                    &dialog,
-                    window,
-                    move |this, _, e: &ChoiceEvent, window, cx| {
-                        if let ChoiceEvent::Pick(to) = e {
-                            this.continue_as(&pane, to, resend_text.clone(), window, cx);
-                        }
-                        this.close_modal(window, cx);
-                    },
-                )
-                .detach();
-                self.modal = Some(Modal::Choice(dialog));
-                cx.notify();
-            }
-        }
-    }
-
     /// "Continue as…" for a chat pane: the other signed-in accounts of its CLI.
     fn ask_continue_as(&mut self, pane_id: String, window: &mut Window, cx: &mut Context<Self>) {
         let c = self.config();
@@ -1464,27 +1805,42 @@ impl Shell {
         let Some(from) = pane.account_id.as_deref().and_then(|id| c.account(id)) else {
             return;
         };
-        let choices: Vec<(String, String, String)> = c
-            .accounts
-            .iter()
-            .filter(|a| a.id != from.id && a.cli == from.cli)
+        // This CLI's accounts first (the whole conversation moves), then the others (a new
+        // chat there starts from the visible text, #78; a CLI without chat gets a terminal).
+        let mut others: Vec<&wraithgrid_core::config::Account> =
+            c.accounts.iter().filter(|a| a.id != from.id).collect();
+        others.sort_by_key(|a| a.cli != from.cli);
+        let choices: Vec<(String, String, String)> = others
+            .into_iter()
             .map(|a| {
-                let detail = match (a.signed_in, self.limits_label(&a.id)) {
+                let mut detail = match (a.signed_in, self.limits_label(&a.id)) {
                     (false, _) => "not signed in".to_string(),
                     (true, Some((l, _))) => l,
                     (true, None) => String::new(),
                 };
+                if a.cli != from.cli {
+                    let how = if a.cli.spec().chat {
+                        format!("new {} chat", a.cli.spec().provider_label)
+                    } else {
+                        "terminal".to_string()
+                    };
+                    detail = if detail.is_empty() {
+                        how
+                    } else {
+                        format!("{how} · {detail}")
+                    };
+                }
                 (a.id.clone(), a.name.clone(), detail)
             })
             .collect();
-        let title = format!(
-            "Continue as another {} account",
-            from.cli.spec().provider_label
-        );
+        let title = "Continue as another account".to_string();
         let message = if choices.is_empty() {
-            "No other account of this CLI yet.".to_string()
+            "No other account yet.".to_string()
         } else {
-            "The whole conversation goes with it.".to_string()
+            format!(
+                "A {} account takes the whole conversation; another CLI starts a new chat from what it shows.",
+                from.cli.spec().provider_label
+            )
         };
         let dialog = cx.new(|_| ChoiceDialog::new(title, message, choices, "Cancel"));
         cx.subscribe_in(
@@ -1512,6 +1868,23 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Another CLI can't take the conversation itself: a handoff (#78).
+        let other_cli = {
+            let c = self.config();
+            let from = c
+                .workspaces
+                .iter()
+                .flat_map(|w| &w.panes)
+                .find(|p| p.id == pane_id)
+                .and_then(|p| p.account_id.as_deref())
+                .and_then(|id| c.account(id))
+                .map(|a| a.cli);
+            let to = c.account(to_id).map(|a| a.cli);
+            matches!((from, to), (Some(f), Some(t)) if f != t)
+        };
+        if other_cli {
+            return self.continue_in_cli(pane_id, to_id, window, cx);
+        }
         let result = (|| -> Result<String, String> {
             let c = self.config();
             let pane = c
@@ -1609,7 +1982,7 @@ impl Shell {
 
     /// Starts an exited pane again: its old process is cleared from the host first.
     fn restart_pane(&mut self, pane_id: String, cx: &mut Context<Self>) {
-        self.host.kill(&pane_id);
+        self.host_for(&pane_id).kill(&pane_id);
         self.router.unregister(&pane_id);
         self.terminals.remove(&pane_id);
         self.focused = Some(pane_id);
@@ -1638,7 +2011,7 @@ impl Shell {
                     c.settings.on_window_close
                 };
                 match mode {
-                    CloseMode::Keep => this.quit(true, cx),
+                    CloseMode::Keep => this.keep_in_tray(window, cx),
                     CloseMode::Stop => this.quit(false, cx),
                     CloseMode::Ask => {
                         let dialog = cx.new(|_| QuitDialog::new(live));
@@ -1656,7 +2029,11 @@ impl Shell {
                                             }
                                         });
                                     }
-                                    this.quit(keep, cx);
+                                    if keep {
+                                        this.keep_in_tray(window, cx);
+                                    } else {
+                                        this.quit(false, cx);
+                                    }
                                 }
                                 QuitEvent::Cancel => this.close_modal(window, cx),
                             },
@@ -1673,15 +2050,26 @@ impl Shell {
 
     /// Saves, then leaves the agents to the host (`keep`) or stops them all, and quits.
     fn quit(&mut self, keep: bool, cx: &mut Context<Self>) {
+        self.tray = None;
+        self._tray_tasks.clear();
+        // Dev servers belong to their preview panes: they stop with the app (`devServers`).
+        for v in self.previews.drain().map(|(_, v)| v) {
+            v.update(cx, |v, _| v.stop_server());
+        }
         self.flush();
         self.flush_chats(cx);
         let host = self.host.clone();
+        // A machine's agents keep running there either way.
+        let remotes: Vec<_> = self.remotes.drain().map(|(_, (_, r))| r).collect();
         cx.spawn(async move |_, cx| {
             cx.background_spawn(async move {
                 if keep {
                     host.detach();
                 } else {
                     host.stop_all();
+                }
+                for r in remotes {
+                    r.detach();
                 }
             })
             .await;
@@ -1693,6 +2081,11 @@ impl Shell {
     /// Closes the overlay and gives the keyboard back to the focused pane.
     fn close_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.modal = None;
+        self.pending_slot = None;
+        self.show_switch_ask(window, cx);
+        if self.modal.is_some() {
+            return;
+        }
         if let Some(pane_id) = self.focused.clone() {
             // A new pane has no view until it is drawn: focus it on the next frame.
             cx.on_next_frame(window, move |this, window, cx| {
@@ -1721,7 +2114,18 @@ impl Shell {
     ) -> String {
         let s = &self.config().settings;
         let acct = account.as_deref().and_then(|id| self.config().account(id));
-        let view = if !shell && chat && acct.is_some_and(|a| a.cli.spec().chat && a.signed_in) {
+        // Chats run on this computer only: a machine's project gets terminals (H5).
+        let remote = self
+            .config()
+            .workspaces
+            .iter()
+            .find(|w| Some(&w.id) == ws.as_ref().or(Some(&self.config().active_workspace)))
+            .is_some_and(|w| w.machine_id.is_some());
+        let view = if !shell
+            && chat
+            && !remote
+            && acct.is_some_and(|a| a.cli.spec().chat && a.signed_in)
+        {
             PaneView::Chat
         } else {
             PaneView::Terminal
@@ -1747,6 +2151,8 @@ impl Shell {
         let into = ws.unwrap_or_else(|| self.config().active_workspace.clone());
         let here = into == self.config().active_workspace;
         let target = if here { self.focused.clone() } else { None };
+        // From an empty slot's "New pane here": that slot.
+        let slot = self.pending_slot.take();
         let dir = target
             .as_ref()
             .and_then(|t| self.pane_bounds.borrow().get(t).copied())
@@ -1765,7 +2171,7 @@ impl Shell {
                 w.layout = Some(place_new_pane(
                     shown.as_ref(),
                     &pane_id,
-                    None,
+                    slot.as_deref(),
                     target.as_deref(),
                     dir,
                 ));
@@ -1928,19 +2334,234 @@ impl Shell {
         json!({ "ok": true, "paneId": pane_id })
     }
 
-    /// Closes a pane: its process stops and it leaves the project.
+    /// Signs an account in: claude and codex in a dialog over pipes (`LoginDialog`), the rest
+    /// in their own screen, a terminal running the CLI.
+    fn login(&mut self, account_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let c = self.config().clone();
+        let Some(account) = c.account(&account_id).cloned() else {
+            return self.close_modal(window, cx);
+        };
+        let Some(flow) = wraithgrid_core::login::login_flow(account.cli) else {
+            return self.login_in_terminal(account_id, window, cx);
+        };
+        let env = crate::runtime::spawn_env();
+        let home = home_dir();
+        let program = if account.cli == AgentCli::Claude {
+            crate::mods_glue::claude_binary(&c, &env)
+        } else {
+            c.settings
+                .cli_paths
+                .iter()
+                .find(|(cli, p)| *cli == account.cli && !p.trim().is_empty())
+                .map(|(_, p)| wraithgrid_core::paths::resolve_user_path(p.trim(), &home))
+                .or_else(|| {
+                    wraithgrid_core::platform::find_on_path(
+                        account.cli.spec().bin,
+                        |k| env.get(k).cloned(),
+                        Os::current(),
+                    )
+                })
+        };
+        let Some(program) = program else {
+            return self.login_in_terminal(account_id, window, cx);
+        };
+        let pane_env =
+            wraithgrid_core::pane_env::build_pane_env(wraithgrid_core::pane_env::PaneEnvInput {
+                base: &env,
+                shell: false,
+                cli: account.cli,
+                config_dir: Some(account.config_dir.as_str()),
+                home: &home,
+                mod_dirs: &c.settings.mod_dirs,
+                os: Os::current(),
+            });
+        let codex = account.cli == AgentCli::Codex;
+        let name = account.name.clone();
+        let dialog = cx.new(|cx| {
+            crate::login_dialog::LoginDialog::new(
+                flow, program, pane_env, home, name, codex, window, cx,
+            )
+        });
+        cx.subscribe_in(
+            &dialog,
+            window,
+            move |this, _, e: &crate::login_dialog::LoginEvent, window, cx| {
+                use crate::login_dialog::LoginEvent;
+                match e {
+                    LoginEvent::SignedIn => {
+                        let id = account_id.clone();
+                        this.update(cx, |c| {
+                            if let Some(a) = c.accounts.iter_mut().find(|a| a.id == id) {
+                                a.signed_in = true;
+                            }
+                        });
+                    }
+                    LoginEvent::UseTerminal => {
+                        this.login_in_terminal(account_id.clone(), window, cx)
+                    }
+                    LoginEvent::Close => this.close_modal(window, cx),
+                }
+            },
+        )
+        .detach();
+        self.modal = Some(Modal::Login(dialog));
+        cx.notify();
+    }
+
+    /// Signing in in the CLI's own screen: a terminal running it.
+    fn login_in_terminal(
+        &mut self,
+        account_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.add_pane(None, Some(account_id), "~".into(), vec![], false, false, cx);
+        self.close_modal(window, cx);
+    }
+
+    /// `closePane`: a conversation is kept in the project's History; an unused pane or a
+    /// shell is not.
     fn close_pane(&mut self, pane_id: String, cx: &mut Context<Self>) {
-        self.host.kill(&pane_id);
-        self.router.unregister(&pane_id);
-        self.terminals.remove(&pane_id);
+        let archive = self
+            .config()
+            .workspaces
+            .iter()
+            .flat_map(|w| &w.panes)
+            .find(|p| p.id == pane_id)
+            .is_some_and(|p| !p.shell && p.has_conversation);
+        let closed = self.closing_pane(&pane_id);
+        self.drop_pane(&pane_id, archive, cx);
+        // The last pane on a Wraithgrid worktree: offer to remove its folder.
+        self.offer_remove_worktree(closed, cx);
+    }
+
+    /// `dropPane`: ends the pane's process (terminal or chat CLI) and removes it; `archive`
+    /// keeps it, with its saved chat view, at the top of the project's History.
+    fn drop_pane(&mut self, pane_id: &str, archive: bool, cx: &mut Context<Self>) {
+        self.host_for(pane_id).kill(pane_id);
+        self.router.unregister(pane_id);
+        self.terminals.remove(pane_id);
+        // Dropping the view stops its dev server.
+        self.previews.remove(pane_id);
+        if let Some(chat) = self.chats.remove(pane_id) {
+            chat.update(cx, |c, _| {
+                c.save();
+                c.stop_session();
+            });
+        }
+        let views = wraithgrid_core::paths::current_user_data_dir().join("chats");
+        let mut forget: Vec<String> = vec![];
+        if !archive {
+            forget.push(pane_id.to_string());
+        }
+        let now = wraithgrid_usage::now_ms();
+        let id = pane_id.to_string();
         self.update(cx, |c| {
             for w in &mut c.workspaces {
-                if w.panes.iter().any(|p| p.id == pane_id) {
-                    w.panes.retain(|p| p.id != pane_id);
-                    w.layout = remove_pane(w.layout.as_ref(), &pane_id);
+                let Some(at) = w.panes.iter().position(|p| p.id == id) else {
+                    continue;
+                };
+                let pane = w.panes.remove(at);
+                w.layout = remove_pane(w.layout.as_ref(), &id);
+                if archive {
+                    w.history.insert(
+                        0,
+                        wraithgrid_core::config::ArchivedChat {
+                            pane,
+                            closed_at: now,
+                        },
+                    );
+                    // Past the limit, the oldest entries go, with their saved views.
+                    let max = wraithgrid_core::types::HISTORY_MAX;
+                    forget.extend(
+                        w.history
+                            .drain(max.min(w.history.len())..)
+                            .map(|h| h.pane.id),
+                    );
                 }
             }
         });
+        for id in forget {
+            let _ = wraithgrid_chat::views::delete_view(&views, &id);
+        }
+        if self.focused.as_deref() == Some(pane_id) {
+            self.focused = pane_ids(self.config().active().layout.as_ref())
+                .into_iter()
+                .next();
+        }
+        if self.zoomed.as_deref() == Some(pane_id) {
+            self.zoomed = None;
+        }
+    }
+
+    /// `reopenChat`: a History chat back into its project, same id (its saved view loads and
+    /// its first start resumes); `show` switches to it.
+    fn reopen_chat(
+        &mut self,
+        ws_id: &str,
+        pane_id: &str,
+        show: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let c = self.config();
+        let open = c
+            .workspaces
+            .iter()
+            .any(|w| w.panes.iter().any(|p| p.id == pane_id));
+        let Some(ws) = c.workspaces.iter().find(|w| w.id == ws_id) else {
+            return false;
+        };
+        if open || !ws.history.iter().any(|h| h.pane.id == pane_id) {
+            return false;
+        }
+        let (ws, id) = (ws_id.to_string(), pane_id.to_string());
+        self.update(cx, |c| {
+            if let Some(w) = c.workspaces.iter_mut().find(|w| w.id == ws) {
+                let ids: Vec<String> = w.panes.iter().map(|p| p.id.clone()).collect();
+                let shown = shown_layout(w.layout.as_ref(), &ids);
+                if let Some(at) = w.history.iter().position(|h| h.pane.id == id) {
+                    let mut pane = w.history.remove(at).pane;
+                    pane.resume = true;
+                    w.panes.push(pane);
+                    w.layout = Some(place_new_pane(
+                        shown.as_ref(),
+                        &id,
+                        None,
+                        None,
+                        SplitDir::Row,
+                    ));
+                }
+            }
+            if show {
+                c.active_workspace = ws.clone();
+            }
+        });
+        if show {
+            self.focused = Some(pane_id.to_string());
+            self.zoomed = None;
+        }
+        true
+    }
+
+    /// Shows a chat: switches to its project and focuses it, reopening it from History.
+    fn reveal_chat(&mut self, ws_id: &str, pane_id: &str, cx: &mut Context<Self>) {
+        let open = self
+            .config()
+            .workspaces
+            .iter()
+            .find(|w| w.panes.iter().any(|p| p.id == pane_id))
+            .map(|w| w.id.clone());
+        match open {
+            Some(ws) => {
+                self.select_workspace(ws, cx);
+                self.focused = Some(pane_id.to_string());
+                self.zoomed = None;
+            }
+            None => {
+                self.reopen_chat(ws_id, pane_id, true, cx);
+            }
+        }
+        cx.notify();
     }
 
     /// The pane's terminal view, made the first time it is shown: it reattaches to the
@@ -1949,7 +2570,9 @@ impl Shell {
         if let Some(view) = self.terminals.get(&pane.id) {
             return view.clone();
         }
-        let host = self.host.clone();
+        // A machine's pane: its host, and the machine resolves what to run (H5).
+        let remote = self.machine_of_pane(&pane.id).map(|m| self.remote_for(&m));
+        let host = remote.as_ref().map_or(self.host.clone(), |r| r.pane_host());
         let pane_id = pane.id.clone();
         let writer: PaneWriter = {
             let (host, id) = (host.clone(), pane_id.clone());
@@ -1978,6 +2601,12 @@ impl Shell {
                         return;
                     }
                     let spec = SpawnSpec { cols, rows, ..spec };
+                    if let Some(remote) = remote {
+                        if let Err(error) = remote.spawn(&spec) {
+                            core.end(error);
+                        }
+                        return;
+                    }
                     // The provider's shared instructions and skills, linked in first (`syncShared`).
                     if let (false, Some(account)) = (spec.shell, account_id.as_deref()) {
                         crate::mods_glue::sync_before_start(&cfg, account);
@@ -2048,6 +2677,7 @@ impl Shell {
     }
 
     fn title_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let (left, right) = self.top_bar(window, cx);
         let theme = cx.theme();
         let tiled_edge = match window.window_decorations() {
             Decorations::Client { tiling } => {
@@ -2069,6 +2699,11 @@ impl Shell {
                        cx: &mut Context<Self>| {
             div()
                 .id(id)
+                .a11y_button(match area {
+                    WindowControlArea::Close => "Close window",
+                    WindowControlArea::Max => "Maximize",
+                    _ => "Minimize",
+                })
                 .w(px(40.))
                 .h_full()
                 .flex()
@@ -2084,7 +2719,6 @@ impl Shell {
                     _ => window.minimize_window(),
                 }))
         };
-        let project = self.config().active().name.clone();
         div()
             .id("title-bar")
             .h(px(TITLE_BAR))
@@ -2106,22 +2740,13 @@ impl Shell {
                 }
             })
             .child(div().font_weight(FontWeight::SEMIBOLD).child("Wraithgrid"))
-            .child(div().text_color(theme.muted_foreground).child(project))
+            .when(self.blocked.is_none(), |d| d.children(left))
             .child(div().flex_1())
-            .when(self.blocked.is_none(), |d| {
-                d.child(
-                    button("new-shell", "+ Terminal", cx)
-                        .on_click(cx.listener(|this, _, _, cx| this.new_pane(None, cx))),
-                )
-                .child(
-                    button("new-agent", "+ New chat", cx).on_click(
-                        cx.listener(|this, _, window, cx| this.open_new_pane(window, cx)),
-                    ),
-                )
-            })
+            .when(self.blocked.is_none(), |d| d.children(right))
             .when_some(self.update_button(), |d, (label, enabled)| {
                 d.child(
                     button("update", "", cx)
+                        .aria_label(label.clone())
                         .child(label)
                         .when(enabled, |b| {
                             b.bg(cx.theme().primary)
@@ -2139,190 +2764,8 @@ impl Shell {
             })
     }
 
-    fn sidebar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme().clone();
-        let c = self.config().clone();
-        let width = c.settings.sidebar_width as f32;
-        let section = |label: &'static str| {
-            div()
-                .px_3()
-                .pt_3()
-                .pb_1()
-                .text_xs()
-                .text_color(theme.muted_foreground)
-                .child(label)
-        };
-        let projects = c.workspaces.iter().map(|w| {
-            let active = w.id == c.active_workspace;
-            let id = w.id.clone();
-            let tint = parse_hex(&w.color).unwrap_or(theme.muted_foreground);
-            div()
-                .id(SharedString::from(format!("ws-{}", w.id)))
-                .mx_2()
-                .px_2()
-                .py_1()
-                .rounded_md()
-                .flex()
-                .items_center()
-                .gap_2()
-                .cursor_pointer()
-                .when(active, |d| d.bg(theme.secondary))
-                .hover(|d| d.bg(theme.secondary))
-                .child(badge(&w.name, tint))
-                .child(div().flex_1().truncate().child(w.name.clone()))
-                .child(div().text_xs().text_color(theme.muted_foreground).child(
-                    if w.panes.is_empty() {
-                        String::new()
-                    } else {
-                        w.panes.len().to_string()
-                    },
-                ))
-                .on_mouse_down(
-                    MouseButton::Right,
-                    cx.listener({
-                        let id = id.clone();
-                        move |this, _, window, cx| this.open_project(id.clone(), window, cx)
-                    }),
-                )
-                .on_click(cx.listener(move |this, _, _, cx| this.select_workspace(id.clone(), cx)))
-        });
-        let accounts = c.accounts.iter().map(|a| {
-            let color = parse_hex(&a.color).unwrap_or(theme.primary);
-            div()
-                .mx_2()
-                .px_2()
-                .py_1()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(badge(&a.name, color))
-                .child(div().flex_1().truncate().child(a.name.clone()))
-                .child(match self.limits_label(&a.id) {
-                    Some((text, worst)) => {
-                        let at = self.config().settings.auto_switch_at as f64 / 100.0;
-                        let color = if worst >= at {
-                            theme.danger
-                        } else if worst >= 0.8 {
-                            theme.warning
-                        } else {
-                            theme.muted_foreground
-                        };
-                        div().text_xs().text_color(color).child(text)
-                    }
-                    None => div()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(a.cli.spec().provider_label),
-                })
-        });
-        div()
-            .id("sidebar")
-            .w(px(width))
-            .h_full()
-            .flex_shrink_0()
-            .flex()
-            .flex_col()
-            .bg(theme.sidebar)
-            .border_r_1()
-            .border_color(theme.border)
-            .text_sm()
-            .child(
-                div()
-                    .id("sidebar-list")
-                    .flex_1()
-                    .min_h(px(0.))
-                    .flex()
-                    .flex_col()
-                    .overflow_y_scroll()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .child(div().flex_1().child(section("Projects")))
-                            .child(
-                                div()
-                                    .id("new-project")
-                                    .mr_3()
-                                    .mt_2()
-                                    .px_1()
-                                    .rounded_sm()
-                                    .cursor_pointer()
-                                    .text_color(theme.muted_foreground)
-                                    .hover(|d| d.bg(theme.secondary))
-                                    .child("+")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.open_new_project(window, cx)
-                                    })),
-                            ),
-                    )
-                    .children(projects)
-                    .child(
-                        div()
-                            .id("open-accounts")
-                            .cursor_pointer()
-                            .hover(|d| d.text_color(theme.foreground))
-                            .child(section("Accounts"))
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.open_accounts(window, cx)),
-                            ),
-                    )
-                    .children(accounts),
-            )
-            .child(
-                div()
-                    .id("open-settings")
-                    .m_2()
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .text_color(theme.muted_foreground)
-                    .hover(|d| d.bg(theme.secondary))
-                    .child("⚙ Settings")
-                    .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx))),
-            )
-            .child(
-                div()
-                    .id("open-usage")
-                    .mx_2()
-                    .mb_2()
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .text_color(theme.muted_foreground)
-                    .hover(|d| d.bg(theme.secondary))
-                    .child("◔ Usage")
-                    .on_click(cx.listener(|this, _, window, cx| this.open_usage(window, cx))),
-            )
-            .child(
-                div()
-                    .id("open-mods")
-                    .mx_2()
-                    .mb_2()
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .text_color(theme.muted_foreground)
-                    .hover(|d| d.bg(theme.secondary))
-                    .child("✦ Mods")
-                    .on_click(cx.listener(|this, _, window, cx| this.open_mods(window, cx))),
-            )
-            .child(
-                div()
-                    .id("open-scheduled")
-                    .mx_2()
-                    .mb_2()
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .text_color(theme.muted_foreground)
-                    .hover(|d| d.bg(theme.secondary))
-                    .child("◷ Scheduled")
-                    .on_click(cx.listener(|this, _, window, cx| this.open_scheduled(window, cx))),
-            )
+    fn sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.render_sidebar(window, cx)
     }
 
     fn grid(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -2341,6 +2784,9 @@ impl Shell {
         if let Some(view) = &self.scheduled_view {
             return view.clone().into_any_element();
         }
+        if let Some(view) = &self.project_view {
+            return view.clone().into_any_element();
+        }
         if let Some(message) = &self.blocked {
             return empty_state(message.clone(), cx).into_any_element();
         }
@@ -2354,11 +2800,7 @@ impl Shell {
             return self.pane(&p.clone(), window, cx);
         }
         match shown_layout(ws.layout.as_ref(), &ids) {
-            None => empty_state(
-                "No panes in this project yet. Start one with + Terminal or + Agent.".into(),
-                cx,
-            )
-            .into_any_element(),
+            None => self.empty_project(cx),
             Some(layout) => self.node(&layout, &ws.panes, vec![], window, cx),
         }
     }
@@ -2376,7 +2818,35 @@ impl Shell {
                 Some(p) => self.pane(&p.clone(), window, cx),
                 None => div().into_any_element(),
             },
-            LayoutNode::Empty { .. } => div().size_full().into_any_element(),
+            LayoutNode::Empty { slot_id } => {
+                let slot = slot_id.clone();
+                let theme = cx.theme().clone();
+                div()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .border_1()
+                    .border_dashed()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("slot-{slot_id}")))
+                            .a11y_button("New pane here")
+                            .px_3()
+                            .py_1()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .text_color(theme.muted_foreground)
+                            .hover(|d| d.bg(theme.secondary))
+                            .child("+ New pane here")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.pending_slot = Some(slot.clone());
+                                this.open_new_pane(window, cx);
+                            })),
+                    )
+                    .into_any_element()
+            }
             LayoutNode::Split {
                 dir,
                 sizes,
@@ -2510,10 +2980,17 @@ impl Shell {
 
     /// App shortcuts, before the focused terminal sees the key.
     fn shortcut(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if self.blocked.is_some() {
+        // Settings → Keyboard is recording a new chord: the key is the binding.
+        let recording = (self.settings_view.as_ref()).is_some_and(|v| v.read(cx).recording());
+        if self.blocked.is_some() || recording {
             return;
         }
         let k = &event.keystroke;
+        // A sidebar menu or picker closes on Esc wherever the focus is.
+        if k.key == "escape" && self.close_side_popups(cx) {
+            window.refresh();
+            return cx.stop_propagation();
+        }
         let m = k.modifiers;
         let press = Press {
             key: &k.key,
@@ -2547,8 +3024,7 @@ impl Shell {
                 cx.notify();
             }
             Action::Shortcut(ShortcutId::Diff) => self.toggle_changes(window, cx),
-            // The shortcuts sheet comes with its screen.
-            Action::Shortcut(_) => {}
+            Action::Shortcut(ShortcutId::Shortcuts) => self.toggle_shortcuts(window, cx),
             Action::Focus(dir) => self.move_focus(dir, window, cx),
             Action::Workspace(i) => {
                 if let Some(id) = self.config().workspaces.get(i).map(|w| w.id.clone()) {
@@ -2599,7 +3075,16 @@ impl Shell {
         let chat = pane.view == PaneView::Chat && !self.as_terminal.contains(&pane.id);
         let label = pane_label(&config, pane);
         let id = pane.id.clone();
-        let (body, status, stopped): (AnyElement, String, bool) = if chat {
+        let mut ended_text: Option<String> = None;
+        let (body, status, stopped): (AnyElement, String, bool) = if pane.view == PaneView::Preview
+        {
+            let view = self.preview(pane, window, cx);
+            (
+                div().size_full().child(view).into_any_element(),
+                "preview".to_string(),
+                false,
+            )
+        } else if chat {
             let view = self.chat(pane, window, cx);
             let status = match view.read(cx).status() {
                 wraithgrid_chat::ChatStatus::Running => "working",
@@ -2631,6 +3116,7 @@ impl Shell {
                 self.focused = Some(pane.id.clone());
             }
             let stopped = ended.is_some();
+            ended_text = ended.clone();
             let status = ended.unwrap_or(title);
             (
                 div().size_full().child(view).into_any_element(),
@@ -2640,9 +3126,20 @@ impl Shell {
         };
         let focused = self.focused.as_deref() == Some(pane.id.as_str());
         let close = id.clone();
+        let confirm = self.close_confirm(&pane.id, &label, &pane.cwd, cx);
+        let banner = self.login_banner(pane, chat, cx);
+        let exited = self.exited_bar(pane, ended_text.as_deref(), cx);
         let (bounds, key) = (self.pane_bounds.clone(), pane.id.clone());
+        let target = pane.id.clone();
         div()
+            .id(SharedString::from(format!("pane-{}", pane.id)))
             .relative()
+            .drag_over::<PaneDrag>(|d, _, _, cx| d.border_color(cx.theme().primary))
+            .on_drop(cx.listener(move |this, drag: &PaneDrag, _, cx| {
+                if drag.pane_id != target {
+                    this.swap_panes(&drag.pane_id, &target, cx);
+                }
+            }))
             .child(
                 canvas(
                     move |b, _, _| bounds.borrow_mut().insert(key, b),
@@ -2663,6 +3160,7 @@ impl Shell {
             })
             .child(
                 div()
+                    .id(SharedString::from(format!("pane-head-{id}")))
                     .h(px(26.))
                     .flex_shrink_0()
                     .px_2()
@@ -2671,6 +3169,21 @@ impl Shell {
                     .gap_2()
                     .text_xs()
                     .bg(theme.title_bar)
+                    .on_mouse_down(MouseButton::Right, {
+                        let id = id.clone();
+                        cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                            this.open_pane_menu(id.clone(), e.position, cx)
+                        })
+                    })
+                    .when(self.zoomed.is_none(), |d| {
+                        d.cursor_grab().on_drag(
+                            PaneDrag {
+                                pane_id: id.clone(),
+                                title: label.clone(),
+                            },
+                            |drag, _, _, cx| cx.new(|_| drag.clone()),
+                        )
+                    })
                     .child(status_dot(
                         match self.chat_states.get(&pane.id) {
                             Some(
@@ -2683,16 +3196,8 @@ impl Shell {
                         },
                         &theme,
                     ))
-                    .child(div().font_weight(FontWeight::MEDIUM).child(label))
-                    .when_some(self.git_heads.get(&pane.cwd).filter(|g| g.repo), |d, g| {
-                        let branch = g.branch.clone().unwrap_or_else(|| "detached".into());
-                        let text = if g.changed > 0 {
-                            format!("⑂ {branch} · {}", g.changed)
-                        } else {
-                            format!("⑂ {branch}")
-                        };
-                        d.child(div().text_color(theme.muted_foreground).child(text))
-                    })
+                    .child(div().font_weight(FontWeight::MEDIUM).child(label.clone()))
+                    .children(self.branch_chip(pane, cx))
                     .child(
                         div()
                             .flex_1()
@@ -2711,6 +3216,7 @@ impl Shell {
                             d.child(
                                 div()
                                     .id(SharedString::from(format!("continue-{id}")))
+                                    .a11y_button("Continue as…")
                                     .px_2()
                                     .rounded_sm()
                                     .cursor_pointer()
@@ -2728,6 +3234,7 @@ impl Shell {
                         d.child(
                             div()
                                 .id(SharedString::from(format!("restart-{id}")))
+                                .a11y_button("Restart")
                                 .px_2()
                                 .rounded_sm()
                                 .border_1()
@@ -2740,20 +3247,66 @@ impl Shell {
                                 })),
                         )
                     })
+                    .child({
+                        let zoom = id.clone();
+                        let zoomed = self.zoomed.as_deref() == Some(id.as_str());
+                        div()
+                            .id(SharedString::from(format!("zoom-{id}")))
+                            .a11y_button(if zoomed { "Back to grid" } else { "Zoom pane" })
+                            .px_1()
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .hover(|d| d.bg(theme.secondary))
+                            .child(if zoomed { "⤡" } else { "⤢" })
+                            .tooltip(move |window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new(if zoomed {
+                                    "Back to the grid"
+                                } else {
+                                    "Zoom pane"
+                                })
+                                .build(window, cx)
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.zoomed = if this.zoomed.as_deref() == Some(zoom.as_str()) {
+                                    None
+                                } else {
+                                    Some(zoom.clone())
+                                };
+                                cx.notify();
+                            }))
+                    })
+                    .child({
+                        let more = id.clone();
+                        div()
+                            .id(SharedString::from(format!("more-{id}")))
+                            .a11y_button(format!("Pane actions: {label}"))
+                            .px_1()
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .hover(|d| d.bg(theme.secondary))
+                            .child("⋯")
+                            .on_click(cx.listener(move |this, e: &ClickEvent, _, cx| {
+                                this.open_pane_menu(more.clone(), e.position(), cx)
+                            }))
+                    })
                     .child(
                         div()
                             .id(SharedString::from(format!("close-{id}")))
+                            .a11y_button(format!("Close pane: {label}"))
                             .px_1()
                             .rounded_sm()
                             .cursor_pointer()
                             .hover(|d| d.bg(theme.secondary))
                             .child("✕")
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.close_pane(close.clone(), cx)
+                                this.request_close_pane(close.clone(), cx)
                             })),
                     ),
             )
+            .children(banner)
             .child(div().flex_1().min_h(px(0.)).overflow_hidden().child(body))
+            .children(exited)
+            .children(confirm)
             .into_any_element()
     }
 }
@@ -2788,7 +3341,15 @@ impl Render for Shell {
         self.pane_bounds
             .borrow_mut()
             .retain(|id, _| shown.contains(id));
+        let on_screen = match &self.zoomed {
+            Some(z) => vec![z.clone()],
+            None => shown.clone(),
+        };
+        self.sync_preview_visibility(&on_screen, cx);
         let grid = self.grid(window, cx);
+        let pane_menu = self.pane_menu_layer(window, cx);
+        let utility_menu = self.utility_menu_layer(window, cx);
+        let status_bar = self.status_bar(cx).into_any_element();
         let modal: Option<AnyElement> = self.modal.as_ref().map(|m| match m {
             Modal::NewPane(d) => d.clone().into_any_element(),
             Modal::Palette(p) => p.clone().into_any_element(),
@@ -2796,9 +3357,19 @@ impl Render for Shell {
             Modal::NewProject(d) => d.clone().into_any_element(),
             Modal::Project(d) => d.clone().into_any_element(),
             Modal::Choice(d) => d.clone().into_any_element(),
+            Modal::Branches(d) => d.clone().into_any_element(),
+            Modal::RemoveWorktree(d) => d.clone().into_any_element(),
+            Modal::Shortcuts(s) => s.clone().into_any_element(),
+            Modal::Login(d) => d.clone().into_any_element(),
+            Modal::Switch(d) => d.clone().into_any_element(),
         });
+        let focus = self.focus.get_or_insert_with(|| cx.focus_handle()).clone();
+        if window.focused(cx).is_none() {
+            window.focus(&focus, cx);
+        }
         div()
             .id("shell")
+            .track_focus(&focus)
             .relative()
             .capture_key_down(cx.listener(Self::shortcut))
             .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| {
@@ -2822,25 +3393,18 @@ impl Render for Shell {
                     .flex_1()
                     .min_h(px(0.))
                     .flex()
-                    .child(self.sidebar(cx))
+                    .child(self.sidebar(window, cx))
                     .child(div().flex_1().min_w(px(0.)).h_full().child(grid))
                     .when_some(
                         self.changes.clone().filter(|_| {
                             self.settings_view.is_none() && self.accounts_view.is_none()
                         }),
-                        |d, panel| {
-                            d.child(
-                                div()
-                                    .w(px(self.config().settings.diff_width as f32))
-                                    .h_full()
-                                    .flex_shrink_0()
-                                    .border_l_1()
-                                    .border_color(theme.border)
-                                    .child(panel),
-                            )
-                        },
+                        |d, panel| d.child(self.changes_panel(panel, cx)),
                     ),
             )
+            .child(status_bar)
+            .children(pane_menu)
+            .children(utility_menu)
             .when_some(modal, |d, modal| {
                 d.child(
                     div()
@@ -2939,33 +3503,104 @@ pub(crate) fn parse_hex(s: &str) -> Option<Hsla> {
     u32::from_str_radix(hex, 16).ok().map(|v| rgb(v).into())
 }
 
-/// A rounded square with the name's first letter (projects and accounts without an icon).
-fn badge(name: &str, color: Hsla) -> impl IntoElement {
-    let letter = name
-        .chars()
-        .next()
-        .map(|c| c.to_uppercase().to_string())
-        .unwrap_or_default();
-    let mut bg = color;
-    bg.a = 0.22;
-    div()
-        .size(px(20.))
-        .flex_shrink_0()
-        .rounded_md()
-        .flex()
-        .items_center()
-        .justify_center()
-        .text_xs()
-        .font_weight(FontWeight::SEMIBOLD)
-        .bg(bg)
-        .text_color(color)
-        .child(letter)
+/// The Changes panel's left edge being dragged.
+#[derive(Clone)]
+struct DiffResize;
+
+impl Render for DiffResize {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
+}
+
+impl Shell {
+    /// The Changes panel at its width, with an edge to drag (`EdgeResizer`): live while
+    /// dragging, saved on release, double-click resets.
+    fn changes_panel(&mut self, panel: Entity<ChangesPanel>, cx: &mut Context<Self>) -> AnyElement {
+        use wraithgrid_core::types::{DIFF_WIDTH_DEFAULT, DIFF_WIDTH_MAX, DIFF_WIDTH_MIN};
+        let theme = cx.theme().clone();
+        let width = self
+            .diff_drag
+            .unwrap_or(self.config().settings.diff_width as f32);
+        let dragging = self.diff_drag.is_some();
+        let commit = |this: &mut Shell, cx: &mut Context<Shell>| {
+            if let Some(w) = this.diff_drag.take() {
+                this.update(cx, |c| c.settings.diff_width = w as i64);
+            }
+        };
+        div()
+            .id("changes-panel")
+            .relative()
+            .w(px(width))
+            .h_full()
+            .flex_shrink_0()
+            .border_l_1()
+            .border_color(theme.border)
+            .on_drag_move(cx.listener(|this, e: &DragMoveEvent<DiffResize>, _, cx| {
+                let w = f32::from(e.bounds.right() - e.event.position.x);
+                this.diff_drag = Some(
+                    w.clamp(DIFF_WIDTH_MIN as f32, DIFF_WIDTH_MAX as f32)
+                        .round(),
+                );
+                cx.notify();
+            }))
+            .child(panel)
+            .child(
+                div()
+                    .id("changes-resize")
+                    .group("changes-resize")
+                    .role(Role::Splitter)
+                    .aria_label("Resize changes panel")
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left(px(-3.))
+                    .w(px(6.))
+                    .cursor(CursorStyle::ResizeLeftRight)
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .left(px(2.))
+                            .w(px(2.))
+                            .bg(theme.ring)
+                            .opacity(if dragging { 0.6 } else { 0. })
+                            .group_hover("changes-resize", |s| s.opacity(0.6)),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, e: &MouseDownEvent, _, cx| {
+                            if e.click_count == 2 {
+                                this.diff_drag = None;
+                                this.update(cx, |c| c.settings.diff_width = DIFF_WIDTH_DEFAULT);
+                            }
+                        }),
+                    )
+                    .on_drag(DiffResize, |r, _, _, cx| cx.new(|_| r.clone()))
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| commit(this, cx)),
+                    )
+                    .on_mouse_up_out(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| commit(this, cx)),
+                    ),
+            )
+            .into_any_element()
+    }
+}
+
+/// A CLI's mark (`ProviderLogo`), else the name's letter; for views outside the shell.
+pub(crate) fn provider_mark(cli: &str, name: &str, size: f32, cx: &App) -> AnyElement {
+    sidebar::provider_logo(cli, name, size, &sidebar::pal(cx))
 }
 
 fn button(id: impl Into<ElementId>, label: &'static str, cx: &mut Context<Shell>) -> Stateful<Div> {
     let theme = cx.theme();
     div()
         .id(id)
+        .a11y_button(label)
         .px_2()
         .py(px(3.))
         .rounded_md()
@@ -3021,6 +3656,30 @@ fn status_dot(state: Option<&str>, theme: &gpui_kit::component::Theme) -> impl I
     div().size(px(7.)).rounded_full().flex_shrink_0().bg(color)
 }
 
+/// A pane dragged by its header onto another to swap them (dnd-kit's drag in PaneGrid.tsx).
+#[derive(Clone)]
+struct PaneDrag {
+    pane_id: String,
+    title: String,
+}
+
+impl Render for PaneDrag {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        div()
+            .px_3()
+            .py_1()
+            .rounded_md()
+            .border_1()
+            .border_color(theme.ring)
+            .bg(theme.popover)
+            .shadow_lg()
+            .text_xs()
+            .text_color(theme.foreground)
+            .child(self.title.clone())
+    }
+}
+
 enum Modal {
     NewPane(Entity<NewPaneDialog>),
     Palette(Entity<Palette>),
@@ -3028,16 +3687,25 @@ enum Modal {
     NewProject(Entity<NewProjectDialog>),
     Project(Entity<ProjectDialog>),
     Choice(Entity<ChoiceDialog>),
+    Branches(Entity<crate::branch_picker::BranchPicker>),
+    RemoveWorktree(Entity<git_button::RemoveWorktreeDialog>),
+    Shortcuts(Entity<ShortcutsSheet>),
+    Login(Entity<crate::login_dialog::LoginDialog>),
+    Switch(Entity<auto_switch::AutoSwitchDialog>),
 }
 
-/// Where the in-app update is (`update-install.ts` phases).
-enum UpdateState {
+/// Where the in-app update is (`update-install.ts` phases); About shows it.
+#[derive(Clone)]
+pub(crate) enum UpdateState {
     Idle,
     Checking,
+    /// Up to date, checked at this time (ms).
+    Current(i64),
     Available(update::ReleaseInfo),
     Downloading {
         version: String,
         percent: u8,
+        cancel: Arc<std::sync::atomic::AtomicBool>,
     },
     Ready {
         release: update::ReleaseInfo,
@@ -3045,7 +3713,13 @@ enum UpdateState {
         kind: update::PackageKind,
     },
     Installing(String),
+    /// The check failed.
     Error(String),
+    /// Downloading or installing failed; Retry starts over.
+    Failed {
+        release: update::ReleaseInfo,
+        error: String,
+    },
 }
 
 // ---- Scheduled chats (#77) -----------------------------------------------------------------
@@ -3090,6 +3764,7 @@ impl Shell {
     }
 
     fn tick_schedules(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.settle_runs(cx);
         let now = wraithgrid_usage::now_ms();
         let tz = chrono::Local;
         for job in self.config().schedules.clone() {
@@ -3099,6 +3774,7 @@ impl Shell {
                 wraithgrid_schedule::Tick::Update(j) => self.replace_job(j, cx),
                 wraithgrid_schedule::Tick::Run => {
                     let run = self.start_job(&job, now, window, cx);
+                    self.mark_live(&job.id, &run);
                     let change = wraithgrid_schedule::after_tick_run(
                         &tz,
                         job.clone(),
@@ -3118,6 +3794,7 @@ impl Shell {
         };
         let now = wraithgrid_usage::now_ms();
         let run = self.start_job(&job, now, window, cx);
+        self.mark_live(&job.id, &run);
         let change = wraithgrid_schedule::after_run_now(job, run);
         self.apply_job_change(id, change, cx);
     }
@@ -3192,12 +3869,15 @@ impl Shell {
         };
         match wraithgrid_schedule::start_run(job, &ctx) {
             wraithgrid_schedule::RunStart::Record(run) => run,
-            wraithgrid_schedule::RunStart::Chat { pane_id } => match c
-                .workspaces
-                .iter()
-                .flat_map(|w| &w.panes)
-                .find(|p| p.id == pane_id)
-                .cloned()
+            wraithgrid_schedule::RunStart::Chat { pane_id } => match {
+                self.reopen_chat(&job.ws_id, &pane_id, false, cx);
+                self.config().clone()
+            }
+            .workspaces
+            .iter()
+            .flat_map(|w| &w.panes)
+            .find(|p| p.id == pane_id)
+            .cloned()
             {
                 Some(pane) => {
                     let chat = self.chat(&pane, window, cx);
@@ -3211,18 +3891,31 @@ impl Shell {
                 let Some(ws) = c.workspaces.iter().find(|w| w.id == job.ws_id) else {
                     return wraithgrid_schedule::chat_gone(now);
                 };
-                if ws.folder.is_empty() {
+                let Some(folder) = ws.project_folder() else {
                     return wraithgrid_schedule::no_folder(now);
-                }
+                };
                 let id = self.add_pane(
                     Some(ws.id.clone()),
                     Some(account_id),
-                    ws.folder.clone(),
+                    folder,
                     vec![],
                     false,
                     true,
                     cx,
                 );
+                let (model, effort, mode) = (job.model.clone(), job.effort, job.chat_mode);
+                self.update(cx, |c| {
+                    if let Some(p) = c
+                        .workspaces
+                        .iter_mut()
+                        .flat_map(|w| &mut w.panes)
+                        .find(|p| p.id == id)
+                    {
+                        p.model = model;
+                        p.effort = effort;
+                        p.chat_mode = mode;
+                    }
+                });
                 if let Some(pane) = self
                     .config()
                     .workspaces
@@ -3240,26 +3933,81 @@ impl Shell {
         }
     }
 
-    /// A chat's turn ended: a scheduled run in it is done (or failed).
-    fn settle_job_runs(&mut self, pane_id: &str, failed: bool, cx: &mut Context<Self>) {
-        let running = self.config().schedules.iter().any(|j| {
-            j.runs
-                .first()
-                .is_some_and(|r| r.result == "running" && r.pane_id.as_deref() == Some(pane_id))
-        });
-        if !running {
-            return;
+    fn mark_live(&mut self, job_id: &str, run: &wraithgrid_core::config::ScheduleRun) {
+        if run.result == "running" {
+            self.live_runs
+                .insert(wraithgrid_schedule::live_key(job_id, run.at));
         }
-        let pane = pane_id.to_string();
-        self.update(cx, |c| {
-            for j in c.schedules.iter_mut() {
-                if let Some(r) = j.runs.first_mut().filter(|r| {
-                    r.result == "running" && r.pane_id.as_deref() == Some(pane.as_str())
-                }) {
-                    r.result = if failed { "failed" } else { "done" }.into();
+    }
+
+    /// `settleRun` for every job: a running run whose chat went quiet is done; one whose chat
+    /// is gone, exited, or left over from an earlier launch ends as the crate says.
+    fn settle_runs(&mut self, cx: &mut Context<Self>) {
+        let now = wraithgrid_usage::now_ms();
+        let mut ends = vec![];
+        for job in &self.config().schedules {
+            let Some(run) = job.runs.first().filter(|r| r.result == "running") else {
+                continue;
+            };
+            let Some(pane_id) = run.pane_id.as_deref() else {
+                continue;
+            };
+            let c = self.config();
+            let open = c
+                .workspaces
+                .iter()
+                .find_map(|w| w.panes.iter().find(|p| p.id == pane_id).map(|p| (w, p)));
+            let pane = match open {
+                Some(_) => wraithgrid_schedule::PaneWhere::Open,
+                None if c
+                    .workspaces
+                    .iter()
+                    .any(|w| w.history.iter().any(|h| h.pane.id == pane_id)) =>
+                {
+                    wraithgrid_schedule::PaneWhere::History
                 }
+                None => wraithgrid_schedule::PaneWhere::Gone,
+            };
+            let chat = self.chats.get(pane_id).map(|v| v.read(cx));
+            let quiet = open.is_some_and(|(_, p)| p.has_conversation)
+                && chat.is_some_and(|v| !v.is_busy())
+                && self
+                    .chat_states
+                    .get(pane_id)
+                    .is_none_or(|s| *s == wraithgrid_chat::ChatStatus::Idle);
+            let view = wraithgrid_schedule::RunView {
+                live: self
+                    .live_runs
+                    .contains(&wraithgrid_schedule::live_key(&job.id, run.at)),
+                pane,
+                exited: false,
+                quiet,
+                now,
+            };
+            if let Some(end) = wraithgrid_schedule::settle_of(run, &view) {
+                let place = open.map(|(w, _)| w.name.clone());
+                ends.push((job.id.clone(), run.at, end, place, job.prompt.clone()));
             }
-        });
+        }
+        for (id, at, end, place, prompt) in ends {
+            self.live_runs
+                .remove(&wraithgrid_schedule::live_key(&id, at));
+            if let Some(job) = self.config().schedules.iter().find(|j| j.id == id).cloned() {
+                self.replace_job(wraithgrid_schedule::settled(job, &end), cx);
+            }
+            if let (true, Some(place)) = (end.notify, place) {
+                cx.show_system_notification(SystemNotification {
+                    tag: format!("run-{id}").into(),
+                    title: format!("Scheduled run done · {place}")
+                        .chars()
+                        .take(120)
+                        .collect::<String>()
+                        .into(),
+                    body: prompt.chars().take(200).collect::<String>().into(),
+                    actions: vec![],
+                });
+            }
+        }
     }
 }
 

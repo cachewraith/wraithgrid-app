@@ -6,11 +6,21 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+
+use crate::a11y::A11y as _;
 use wraithgrid_core::agent_cli::AgentCli;
 use wraithgrid_core::args::{format_args, parse_args};
 use wraithgrid_core::config::{Config, Settings};
-use wraithgrid_core::shortcuts::{bindings, label as shortcut_label, Binding};
+use wraithgrid_core::shortcuts::{
+    binding_from_press, binding_keys, binding_problem, bindings, default_binding, format_binding,
+    label as shortcut_label, Press,
+};
 use wraithgrid_core::types::*;
+
+use crate::about_view::{AboutEvent, AboutView};
+use crate::machines_row::{MachinesEvent, MachinesRow};
+use crate::theme_editor::{ThemeEditor, ThemeEditorEvent};
+use crate::themes_gallery::{ThemesGallery, ThemesGalleryEvent};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
@@ -20,6 +30,7 @@ enum Tab {
     Agents,
     Advanced,
     Keyboard,
+    About,
 }
 
 const TABS: &[(Tab, &str)] = &[
@@ -29,11 +40,14 @@ const TABS: &[(Tab, &str)] = &[
     (Tab::Agents, "Agents & CLIs"),
     (Tab::Advanced, "Advanced"),
     (Tab::Keyboard, "Keyboard"),
+    (Tab::About, "About"),
 ];
 
 pub enum SettingsEvent {
     /// The new settings, and the claude binary override (Agents & CLIs).
     Changed(Box<Settings>, String),
+    /// Advanced → Machines added or removed one (H5).
+    Machines(MachinesEvent),
     Close,
 }
 
@@ -58,6 +72,15 @@ pub struct SettingsView {
     accounts: Vec<(String, String)>,
     inputs: Vec<(Field, Entity<InputState>)>,
     _subscriptions: Vec<Subscription>,
+    machines: Entity<MachinesRow>,
+    /// Customize… and Browse community… under Theme; the editor's subscription puts the
+    /// chosen theme back if Settings closes while it is open.
+    theme_editor: Option<(Entity<ThemeEditor>, Subscription)>,
+    themes_gallery: Option<Entity<ThemesGallery>>,
+    /// The shortcut whose next chord is being recorded (no key is an app shortcut meanwhile).
+    recording: Option<ShortcutId>,
+    shortcut_error: Option<(ShortcutId, String)>,
+    about: Option<Entity<AboutView>>,
 }
 
 impl SettingsView {
@@ -113,9 +136,17 @@ impl SettingsView {
             ));
             inputs.push((field, input));
         }
+        let machines = cx.new(|cx| MachinesRow::new(config.machines.clone(), window, cx));
+        subs.push(cx.subscribe(&machines, |_, _, e: &MachinesEvent, cx| {
+            cx.emit(SettingsEvent::Machines(match e {
+                MachinesEvent::Add(m) => MachinesEvent::Add(m.clone()),
+                MachinesEvent::Remove(id) => MachinesEvent::Remove(id.clone()),
+            }))
+        }));
         SettingsView {
             focus: cx.focus_handle(),
             tab: Tab::General,
+            machines,
             settings: s,
             claude_path: config.claude_path.clone(),
             accounts: config
@@ -125,7 +156,114 @@ impl SettingsView {
                 .collect(),
             inputs,
             _subscriptions: subs,
+            theme_editor: None,
+            themes_gallery: None,
+            recording: None,
+            shortcut_error: None,
+            about: None,
         }
+    }
+
+    /// The About tab's body; its "check on launch" switch is a setting like any other.
+    pub fn set_about(&mut self, about: Entity<AboutView>, cx: &mut Context<Self>) {
+        let sub = cx.subscribe(&about, |this, _, event: &AboutEvent, cx| match event {
+            AboutEvent::CheckOnLaunch(on) => {
+                let on = *on;
+                this.update(cx, |s| s.check_updates_on_launch = on);
+            }
+        });
+        self._subscriptions.push(sub);
+        self.about = Some(about);
+    }
+
+    /// Opens a tab by its label ("About").
+    pub fn show_tab(&mut self, label: &str, cx: &mut Context<Self>) {
+        if let Some((tab, _)) = TABS.iter().find(|(_, l)| *l == label) {
+            self.tab = *tab;
+            cx.notify();
+        }
+    }
+
+    /// While a chord is being recorded the window must not act on app shortcuts.
+    pub fn recording(&self) -> bool {
+        self.recording.is_some()
+    }
+
+    /// `WRAITHGRID_OPEN=theme-editor|themes`: Appearance with the editor or gallery open.
+    pub fn open_theme_tool(&mut self, editor: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.tab = Tab::Appearance;
+        if editor {
+            self.toggle_theme_editor(window, cx);
+        } else {
+            self.toggle_themes_gallery(window, cx);
+        }
+    }
+
+    /// The editor draws its draft over the whole app until it closes.
+    fn toggle_theme_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.theme_editor.take().is_some() {
+            crate::theme_editor::apply_settings(&self.settings, Some(window), cx);
+            return cx.notify();
+        }
+        let editor = cx.new(|cx| ThemeEditor::new(&self.settings, window, cx));
+        cx.subscribe_in(
+            &editor,
+            window,
+            |this, _, event: &ThemeEditorEvent, window, cx| {
+                if let ThemeEditorEvent::Saved(t) = event {
+                    this.choose_theme(t, window, cx);
+                }
+                this.theme_editor = None;
+                crate::theme_editor::apply_settings(&this.settings, Some(window), cx);
+                cx.notify();
+            },
+        )
+        .detach();
+        let restore =
+            cx.on_release(|this, cx| crate::theme_editor::apply_settings(&this.settings, None, cx));
+        self.theme_editor = Some((editor, restore));
+        cx.notify();
+    }
+
+    fn toggle_themes_gallery(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.themes_gallery.take().is_some() {
+            return cx.notify();
+        }
+        let gallery = cx.new(|cx| ThemesGallery::new(window, cx));
+        cx.subscribe_in(
+            &gallery,
+            window,
+            |this, _, event: &ThemesGalleryEvent, window, cx| {
+                match event {
+                    ThemesGalleryEvent::Use(t) => this.choose_theme(t, window, cx),
+                    ThemesGalleryEvent::Changed => {}
+                    ThemesGalleryEvent::Close => this.themes_gallery = None,
+                }
+                // Theme files may have changed under the same settings.
+                crate::theme_editor::apply_settings(&this.settings, Some(window), cx);
+                cx.notify();
+            },
+        )
+        .detach();
+        self.themes_gallery = Some(gallery);
+        cx.notify();
+    }
+
+    fn choose_theme(
+        &mut self,
+        t: &wraithgrid_themes::AppTheme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let field = if t.mode == wraithgrid_themes::ThemeName::Dark {
+            Field::ThemeDark
+        } else {
+            Field::ThemeLight
+        };
+        let id = t.id.clone();
+        self.input(field)
+            .update(cx, |i, cx| i.set_value(id, window, cx));
+        self.update(cx, |s| crate::theme_editor::choose_theme(s, t));
     }
 
     fn input(&self, field: Field) -> Entity<InputState> {
@@ -343,6 +481,26 @@ impl SettingsView {
                     ),
             )
             .child(hint("Dark theme, then light theme, by id.", cx))
+            .child(chips(vec![
+                chip(
+                    "theme-browse".into(),
+                    "Browse community…",
+                    self.themes_gallery.is_some(),
+                    cx,
+                )
+                .on_click(cx.listener(|this, _, window, cx| this.toggle_themes_gallery(window, cx)))
+                .into_any_element(),
+                chip(
+                    "theme-customize".into(),
+                    "Customize…",
+                    self.theme_editor.is_some(),
+                    cx,
+                )
+                .on_click(cx.listener(|this, _, window, cx| this.toggle_theme_editor(window, cx)))
+                .into_any_element(),
+            ]))
+            .children(self.themes_gallery.clone())
+            .children(self.theme_editor.as_ref().map(|(e, _)| e.clone()))
             .into_any_element(),
             row(
                 "Interface size",
@@ -455,83 +613,162 @@ impl SettingsView {
 
     fn advanced(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let s = self.settings.clone();
+        vec![
+            row(
+                "Command line",
+                "Lets the wraithgrid command, and agents in your panes, list panes, read their screens, type into them, wait for them and open new ones. Only your user can connect; nothing listens on the network.",
+                cx,
+            )
+            .child(toggle("cli", s.cli_access, |s, v| s.cli_access = v, cx))
+            .into_any_element(),
+            row(
+                "Machines",
+                "Run a workspace's panes on another computer over ssh: right-click the workspace, then Run on. Its agents keep running there when you disconnect or quit. The other computer needs Wraithgrid installed (wraithgrid on PATH) and ssh with a key or agent.",
+                cx,
+            )
+            .child(self.machines.clone())
+            .into_any_element(),
+        ]
+    }
+
+    /// The machines after the window applied a change.
+    pub fn set_machines(
+        &mut self,
+        machines: Vec<wraithgrid_core::config::Machine>,
+        cx: &mut Context<Self>,
+    ) {
+        self.machines
+            .update(cx, |m, cx| m.set_machines(machines, cx));
+    }
+
+    /// One rebindable shortcut per line: its keys, Change (records the next chord) and Reset.
+    fn keyboard(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let mac = cfg!(target_os = "macos");
+        let theme = cx.theme().clone();
+        let small = |id: String, label: &'static str, enabled: bool| {
+            div()
+                .id(SharedString::from(id))
+                .a11y_button(label)
+                .px_2()
+                .py(px(2.))
+                .rounded_md()
+                .border_1()
+                .border_color(theme.border)
+                .text_xs()
+                .when(enabled, |d| {
+                    d.cursor_pointer().hover(|d| d.bg(theme.secondary))
+                })
+                .when(!enabled, |d| d.opacity(0.45))
+                .child(label)
+        };
+        let items: Vec<AnyElement> = bindings(&self.settings.shortcuts)
+            .into_iter()
+            .map(|(id, b)| {
+                let recording = self.recording == Some(id);
+                let is_default = !self.settings.shortcuts.iter().any(|(s, _)| *s == id);
+                let error = self
+                    .shortcut_error
+                    .as_ref()
+                    .filter(|(e, _)| *e == id)
+                    .map(|(_, m)| m.clone());
+                let keys = if recording {
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child("Press the new keys… (Esc cancels)")
+                } else {
+                    crate::shortcuts_sheet::key_caps(&binding_keys(&b, mac), cx)
+                };
+                div()
+                    .flex()
+                    .flex_col()
+                    .py_1()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(div().flex_1().text_sm().child(shortcut_label(id)))
+                            .child(keys)
+                            .child(
+                                small(
+                                    format!("sc-change-{}", id.as_str()),
+                                    if recording { "Cancel" } else { "Change" },
+                                    true,
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, window, cx| {
+                                        this.shortcut_error = None;
+                                        this.recording = if recording { None } else { Some(id) };
+                                        window.focus(&this.focus, cx);
+                                        cx.notify();
+                                    },
+                                )),
+                            )
+                            .child(
+                                small(format!("sc-reset-{}", id.as_str()), "Reset", !is_default)
+                                    .when(!is_default, |d| {
+                                        d.on_click(cx.listener(move |this, _, _, cx| {
+                                            this.shortcut_error = None;
+                                            this.store_shortcut(id, None, cx);
+                                        }))
+                                    }),
+                            ),
+                    )
+                    .when_some(error, |d, e| {
+                        d.child(div().pt_1().text_xs().text_color(theme.danger).child(e))
+                    })
+                    .into_any_element()
+            })
+            .collect();
         vec![row(
-            "Command line",
-            "Lets the wraithgrid command, and agents in your panes, list panes, read their screens, type into them, wait for them and open new ones. Only your user can connect; nothing listens on the network.",
+            "Keyboard shortcuts",
+            if mac {
+                "Pick another chord for an app shortcut. It needs Shift or Alt with ⌘, so the terminal keeps its own keys."
+            } else {
+                "Pick another chord for an app shortcut. It needs Shift or Alt with Ctrl, so the terminal keeps its own keys."
+            },
             cx,
         )
-        .child(toggle("cli", s.cli_access, |s, v| s.cli_access = v, cx))
+        .children(items)
         .into_any_element()]
     }
 
-    fn keyboard(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let mac = cfg!(target_os = "macos");
-        let rows = bindings(&self.settings.shortcuts)
-            .into_iter()
-            .map(|(id, b)| {
-                div()
-                    .flex()
-                    .justify_between()
-                    .py_1()
-                    .child(shortcut_label(id))
-                    .child(
-                        div()
-                            .font_family(crate::terminal::mono(cx))
-                            .text_color(cx.theme().muted_foreground)
-                            .child(chord(&b, mac)),
-                    )
-            });
-        let fixed = [
-            (
-                "Move focus between panes",
-                if mac {
-                    "⌘ ⌥ Arrows"
-                } else {
-                    "Ctrl Alt Arrows"
-                },
-            ),
-            (
-                "Switch to project 1–9",
-                if mac {
-                    "⌘ ⇧ 1–9"
-                } else {
-                    "Ctrl Shift 1–9"
-                },
-            ),
-            (
-                "Zoom the app in / out / reset",
-                if mac {
-                    "⌘ = / ⌘ - / ⌘ 0"
-                } else {
-                    "Ctrl = / Ctrl - / Ctrl 0"
-                },
-            ),
-            (
-                "Copy / paste in a terminal",
-                if mac {
-                    "⌘ C / ⌘ V"
-                } else {
-                    "Ctrl Shift C / Ctrl Shift V"
-                },
-            ),
-        ]
-        .into_iter()
-        .map(|(what, keys)| {
-            div().flex().justify_between().py_1().child(what).child(
-                div()
-                    .font_family(crate::terminal::mono(cx))
-                    .text_color(cx.theme().muted_foreground)
-                    .child(keys),
-            )
+    /// While recording, the next chord is the binding; it never reaches the app or a pane.
+    fn record(&mut self, id: ShortcutId, e: &KeyDownEvent, cx: &mut Context<Self>) {
+        if e.keystroke.key == "escape" {
+            self.recording = None;
+            return cx.notify();
+        }
+        let m = e.keystroke.modifiers;
+        let press = Press {
+            key: &e.keystroke.key,
+            ctrl: m.control,
+            shift: m.shift,
+            alt: m.alt,
+            meta: m.platform,
+        };
+        let Some(b) = binding_from_press(press, cfg!(target_os = "macos")) else {
+            return;
+        };
+        self.recording = None;
+        let problem = binding_problem(&b, id, &bindings(&self.settings.shortcuts));
+        self.shortcut_error = problem.clone().map(|p| (id, p));
+        if problem.is_none() {
+            let value = (b != default_binding(id)).then(|| format_binding(&b));
+            self.store_shortcut(id, value, cx);
+        }
+        cx.notify();
+    }
+
+    /// Saves a binding in `settings.shortcuts`, or drops it (None) to use the default.
+    fn store_shortcut(&mut self, id: ShortcutId, value: Option<String>, cx: &mut Context<Self>) {
+        self.update(cx, |s| {
+            s.shortcuts.retain(|(i, _)| *i != id);
+            if let Some(v) = value {
+                s.shortcuts.push((id, v));
+            }
         });
-        vec![row(
-            "Keyboard shortcuts",
-            "App shortcuts always take Shift or Alt, so plain chords stay with the terminal.",
-            cx,
-        )
-        .children(rows)
-        .children(fixed)
-        .into_any_element()]
     }
 }
 
@@ -553,11 +790,19 @@ impl Render for SettingsView {
             Tab::Agents => self.agents(cx),
             Tab::Advanced => self.advanced(cx),
             Tab::Keyboard => self.keyboard(cx),
+            Tab::About => self
+                .about
+                .iter()
+                .map(|a| a.clone().into_any_element())
+                .collect(),
         };
         let tabs = TABS.iter().map(|(tab, label)| {
             let tab = *tab;
             div()
                 .id(SharedString::from(format!("tab-{label}")))
+                .role(Role::Tab)
+                .aria_label(*label)
+                .aria_selected(self.tab == tab)
                 .px_3()
                 .py_1()
                 .rounded_md()
@@ -580,6 +825,12 @@ impl Render for SettingsView {
             .size_full()
             .flex()
             .bg(theme.background)
+            .capture_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
+                if let Some(id) = this.recording {
+                    cx.stop_propagation();
+                    this.record(id, e, cx);
+                }
+            }))
             .on_key_down(cx.listener(|_, e: &KeyDownEvent, _, cx| {
                 if e.keystroke.key == "escape" {
                     cx.emit(SettingsEvent::Close);
@@ -607,6 +858,7 @@ impl Render for SettingsView {
                     .child(
                         div()
                             .id("settings-close")
+                            .a11y_button("Back to panes")
                             .px_3()
                             .py_1()
                             .rounded_md()
@@ -621,13 +873,14 @@ impl Render for SettingsView {
                 div()
                     .id("settings-body")
                     .flex_1()
+                    .min_w(px(0.))
                     .h_full()
                     .overflow_y_scroll()
                     .p_6()
                     .flex()
                     .flex_col()
                     .gap_5()
-                    .max_w(px(820.))
+                    .max_w(px(if self.tab == Tab::About { 1080. } else { 820. }))
                     .child(
                         div()
                             .text_xl()
@@ -641,8 +894,12 @@ impl Render for SettingsView {
 
 // ---- Row building blocks -------------------------------------------------------------------
 
-fn row(title: &'static str, explain: &'static str, cx: &App) -> Div {
+fn row(title: &'static str, explain: &'static str, cx: &App) -> Stateful<Div> {
     div()
+        .id(title)
+        .role(Role::Group)
+        .aria_label(title)
+        .aria_description(explain)
         .flex()
         .flex_col()
         .gap_2()
@@ -671,8 +928,10 @@ fn chips(children: Vec<AnyElement>) -> Div {
 
 fn chip(id: SharedString, label: impl Into<SharedString>, on: bool, cx: &App) -> Stateful<Div> {
     let theme = cx.theme();
+    let label = label.into();
     div()
         .id(id)
+        .a11y_toggle(label.clone(), on)
         .px_3()
         .py_1()
         .rounded_md()
@@ -682,7 +941,7 @@ fn chip(id: SharedString, label: impl Into<SharedString>, on: bool, cx: &App) ->
         .border_color(if on { theme.ring } else { theme.border })
         .when(on, |d| d.bg(theme.secondary))
         .hover(|d| d.bg(theme.secondary))
-        .child(label.into())
+        .child(label)
 }
 
 /// One of several values: a row of chips, the current one marked.
@@ -740,24 +999,6 @@ fn stepper(
             chip(SharedString::from(format!("{key}-up")), "+", false, cx)
                 .on_click(cx.listener(move |this, _, _, cx| this.update(cx, up))),
         )
-}
-
-fn chord(b: &Binding, mac: bool) -> String {
-    let key = match b.code.as_str() {
-        "Slash" => "/".to_string(),
-        code => code
-            .trim_start_matches("Key")
-            .trim_start_matches("Digit")
-            .to_string(),
-    };
-    let mut parts = vec![if mac { "⌘" } else { "Ctrl" }];
-    if b.shift {
-        parts.push(if mac { "⇧" } else { "Shift" });
-    }
-    if b.alt {
-        parts.push(if mac { "⌥" } else { "Alt" });
-    }
-    format!("{} {key}", parts.join(" "))
 }
 
 fn effort_label(e: ChatEffort) -> &'static str {

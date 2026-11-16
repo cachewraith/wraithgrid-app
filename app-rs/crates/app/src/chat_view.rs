@@ -7,8 +7,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::a11y::A11y as _;
 use futures::StreamExt as _;
-use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
+use gpui_kit::component::input::{self, InputEvent, Textarea, TextareaState};
 use gpui_kit::component::text::{TextView, TextViewState};
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -24,6 +25,12 @@ use wraithgrid_chat::{
     ChatSession, ChatStatus, ChatThread, ItemLevel, ToolItem, ToolPreview,
 };
 use wraithgrid_chat::{cycle_modes, ChatImage, ChatImageType, ChatMode, ChatModel};
+
+mod accounts;
+mod extras;
+pub use accounts::AccountChoice;
+
+pub use extras::Queued;
 
 const SAVE_DELAY: Duration = Duration::from_millis(800);
 
@@ -63,6 +70,18 @@ pub enum ChatViewEvent {
     TurnEnded {
         error: Option<String>,
     },
+    /// "Send later" (#77): queue the text for this chat.
+    Queue {
+        text: String,
+        when: wraithgrid_schedule::SendLater,
+    },
+    /// A queued message: cancelled, or sent now (job id).
+    CancelQueued(String),
+    SendQueuedNow(String),
+    /// The account chip: carry the chat on as this account.
+    ContinueAs(String),
+    /// The account chip picked an account that is not signed in.
+    SignIn(String),
 }
 
 /// The `/` or `@` menu over the composer: its items and where the word it completes starts.
@@ -112,11 +131,21 @@ pub struct ChatView {
     markdown: HashMap<String, Entity<TextViewState>>,
     views_dir: PathBuf,
     scroll: ScrollHandle,
+    /// Under the box: the folder and branch.
+    meta: Vec<String>,
+    /// Redraws every second while a turn or background work runs (the elapsed times).
+    _tick: Option<Task<()>>,
     error: Option<String>,
     menu: Option<Menu>,
     picker: Option<Picker>,
+    /// The account chip's picker (#160), and what it offers.
+    account_picker: Option<accounts::AccountPicker>,
+    account_choices: Vec<AccountChoice>,
+    current_account: Option<String>,
     /// Pasted images waiting to be sent, and their thumbnails.
     images: Vec<(ChatImage, Arc<Image>)>,
+    /// Quotes, history, questions, image viewer and send-later state (`extras`).
+    x: extras::Extras,
     _events: Option<Task<()>>,
     _save: Option<Task<()>>,
     _subscription: Subscription,
@@ -137,21 +166,7 @@ impl ChatView {
                 .submit_on_enter(true)
                 .auto_grow(1, 10)
         });
-        let sub = cx.subscribe_in(
-            &composer,
-            window,
-            |this, _, e: &InputEvent, window, cx| match e {
-                InputEvent::PressEnter { shift: false, .. } => {
-                    if this.menu.is_some() {
-                        this.accept_menu(window, cx);
-                    } else {
-                        this.send(window, cx);
-                    }
-                }
-                InputEvent::Change => this.update_menu(cx),
-                _ => {}
-            },
-        );
+        let sub = Self::composer_events(&composer, window, cx);
         let scroll = ScrollHandle::new();
         scroll.scroll_to_bottom();
         ChatView {
@@ -164,14 +179,48 @@ impl ChatView {
             markdown: HashMap::new(),
             views_dir,
             scroll,
+            _tick: None,
+            meta: Vec::new(),
             error: None,
             menu: None,
             picker: None,
+            account_picker: None,
+            account_choices: Vec::new(),
+            current_account: None,
             images: Vec::new(),
+            x: extras::Extras::default(),
             _events: None,
             _save: None,
             _subscription: sub,
         }
+    }
+
+    /// The composer's Enter and edits, handled in this window.
+    fn composer_events(
+        composer: &Entity<TextareaState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Subscription {
+        cx.subscribe_in(
+            composer,
+            window,
+            |this, _, e: &InputEvent, window, cx| match e {
+                InputEvent::PressEnter { shift: false, .. } => {
+                    if this.menu.is_some() {
+                        this.accept_menu(window, cx);
+                    } else {
+                        this.send(window, cx);
+                    }
+                }
+                InputEvent::Change => this.update_menu(cx),
+                _ => {}
+            },
+        )
+    }
+
+    /// The window reopened from the tray: the composer listens in the new one.
+    pub fn attach_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self._subscription = Self::composer_events(&self.composer.clone(), window, cx);
     }
 
     pub fn status(&self) -> ChatStatus {
@@ -196,6 +245,10 @@ impl ChatView {
             )
         })?;
         let mut launch = ChatLaunch::new(program, s.cwd.clone());
+        // Codex reads the project's CLAUDE.md when it has no AGENTS.md, as its terminals do.
+        if let Some(cli) = wraithgrid_core::agent_cli::AgentCli::parse(&s.cli) {
+            launch.args = wraithgrid_core::agent_cli::with_project_doc_args(cli, &[]);
+        }
         launch.env = s.env.clone();
         launch.config_dir = s.config_dir.clone();
         launch.options = ArgsOptions {
@@ -255,6 +308,8 @@ impl ChatView {
             _ => {}
         }
         let before = (self.thread.session_id.clone(), self.thread.status());
+        // Follow the answer only from the bottom: reading earlier output must stay possible.
+        let follow = self.at_bottom();
         self.thread.update(e, now_ms());
         if self.thread.session_id != before.0 {
             if let Some(id) = self.thread.session_id.clone() {
@@ -264,9 +319,42 @@ impl ChatView {
         if self.thread.status() != before.1 {
             cx.emit(ChatViewEvent::Status(self.thread.status()));
         }
-        self.scroll.scroll_to_bottom();
+        if follow {
+            self.scroll.scroll_to_bottom();
+        }
+        self.ensure_tick(cx);
         self.schedule_save(cx);
         cx.notify();
+    }
+
+    pub fn set_meta(&mut self, meta: Vec<String>, cx: &mut Context<Self>) {
+        if self.meta != meta {
+            self.meta = meta;
+            cx.notify();
+        }
+    }
+
+    fn ensure_tick(&mut self, cx: &mut Context<Self>) {
+        let live = |this: &Self| this.thread.busy || !this.thread.background.is_empty();
+        if !live(self) || self._tick.is_some() {
+            return;
+        }
+        self._tick = Some(cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(1))
+                .await;
+            let go = this.update(cx, |this, cx| {
+                cx.notify();
+                let on = live(this);
+                if !on {
+                    this._tick = None;
+                }
+                on
+            });
+            if !matches!(go, Ok(true)) {
+                break;
+            }
+        }));
     }
 
     /// Debug builds only: types `text` into the composer and sends it, for tests.
@@ -335,50 +423,68 @@ impl ChatView {
         cx.notify();
     }
 
-    /// Keys the composer's menus and modes take before the text box does.
+    /// Keys that reach the composer as keys (not bound by the text box): Ctrl+Shift+R.
     fn composer_key(&mut self, e: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let k = &e.keystroke;
-        let m = k.modifiers;
+        if self.extras_key(e, window, cx) {
+            cx.stop_propagation();
+        }
+    }
+
+    /// ↑ / ↓ / Tab / Esc as the text box's actions: the `/` and `@` menu takes them first, then
+    /// ↑ / ↓ walk earlier prompts. True when taken (the box doesn't move its caret).
+    fn composer_nav(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if let Some(menu) = &mut self.menu {
             let n = menu.items.len().max(1);
-            match k.key.as_str() {
+            match key {
                 "down" => menu.selected = (menu.selected + 1) % n,
                 "up" => menu.selected = (menu.selected + n - 1) % n,
                 "tab" => self.accept_menu(window, cx),
                 "escape" => self.menu = None,
-                _ => return,
+                _ => return false,
             }
-            cx.stop_propagation();
-            return cx.notify();
+            cx.notify();
+            return true;
         }
-        // Shift+Tab steps through the modes, as in Claude Code.
-        if k.key == "tab" && m.shift {
-            let auto = self.current_model().is_some_and(|m| m.auto_mode);
-            let modes = cycle_modes(auto);
-            let now = self
-                .thread
-                .mode
-                .or(self.setup.mode)
-                .unwrap_or(ChatMode::Default);
-            let next = modes
-                .iter()
-                .position(|x| *x == now)
-                .map_or(modes[0], |i| modes[(i + 1) % modes.len()]);
-            self.choose_mode(next, cx);
-            return cx.stop_propagation();
+        match key {
+            "up" | "down" if self.picker.is_none() => self.history_key(key == "up", window, cx),
+            _ => false,
         }
-        // An image on the clipboard is attached rather than pasted as text.
-        let paste = (m.control && !m.shift && k.key == "v" && !cfg!(target_os = "macos"))
-            || (m.platform && k.key == "v");
-        if paste {
-            if let Some(item) = cx.read_from_clipboard() {
-                for entry in item.entries() {
-                    if let ClipboardEntry::Image(image) = entry {
-                        self.attach_image(image.clone(), cx);
-                        return cx.stop_propagation();
-                    }
-                }
+    }
+
+    /// Shift+Tab steps through the modes, as in Claude Code.
+    fn cycle_mode(&mut self, cx: &mut Context<Self>) {
+        let auto = self.current_model().is_some_and(|m| m.auto_mode);
+        let modes = cycle_modes(auto);
+        let now = self
+            .thread
+            .mode
+            .or(self.setup.mode)
+            .unwrap_or(ChatMode::Default);
+        let next = modes
+            .iter()
+            .position(|x| *x == now)
+            .map_or(modes[0], |i| modes[(i + 1) % modes.len()]);
+        self.choose_mode(next, cx);
+    }
+
+    /// An image on the clipboard is attached rather than pasted as text.
+    fn paste_image(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(item) = cx.read_from_clipboard() else {
+            return false;
+        };
+        for entry in item.entries() {
+            if let ClipboardEntry::Image(image) = entry {
+                self.attach_image(image.clone(), cx);
+                return true;
             }
+        }
+        false
+    }
+
+    /// Debug builds only: attaches files as if dropped, for tests.
+    pub fn attach_dropped(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
+        if cfg!(debug_assertions) {
+            self.attach_paths(paths, cx);
         }
     }
 
@@ -493,6 +599,54 @@ impl ChatView {
         true
     }
 
+    pub fn items(&self) -> &[ChatItem] {
+        &self.thread.items
+    }
+
+    /// A chat continued from another CLI (#78): the handoff shows (collapsed) and goes to the
+    /// new CLI as its first message.
+    pub fn start_handoff(
+        &mut self,
+        text: &str,
+        messages: u64,
+        from_cli: &str,
+        to_cli: &str,
+        divider: &str,
+        cx: &mut Context<Self>,
+    ) {
+        self.thread
+            .add_handoff(text, messages, from_cli, to_cli, divider);
+        if let Err(e) = self.start(cx) {
+            self.error = Some(e);
+        } else if let Some(session) = &self.session {
+            session.send(text, &[], &[]);
+            self.thread.busy = true;
+            self.thread.turn_started_at = Some(now_ms());
+        }
+        self.schedule_save(cx);
+        cx.notify();
+    }
+
+    /// "New conversation" from the pane's menu: as `/new`.
+    pub fn new_conversation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.app_command("new", window, cx);
+    }
+
+    /// Puts `text` into the box after what is there, unsent ("Attach to chat" from a preview).
+    pub fn add_to_draft(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let cur = self.composer.read(cx).value().trim_end().to_string();
+        let next = if cur.is_empty() {
+            text.to_string()
+        } else {
+            format!("{cur}\n\n{text}")
+        };
+        self.composer.update(cx, |c, cx| {
+            c.set_value(next, window, cx);
+            c.focus(window, cx);
+        });
+        cx.notify();
+    }
+
     /// Debug builds only: types `text` without sending, so the menus can be looked at.
     pub fn type_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         if cfg!(debug_assertions) {
@@ -503,10 +657,20 @@ impl ChatView {
     }
 
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let text = self.composer.read(cx).value().trim().to_string();
-        if text.is_empty() && self.images.is_empty() {
+        let typed = self.composer.read(cx).value().trim().to_string();
+        if typed.is_empty()
+            && self.images.is_empty()
+            && self.x.quotes.is_empty()
+            && self.x.files.is_empty()
+        {
             return;
         }
+        // Reply quotes go first, as markdown blockquotes (#164).
+        let text = wraithgrid_chat::compose::with_quotes(&self.x.quotes, &typed)
+            .trim()
+            .to_string();
+        self.x.quotes.clear();
+        self.x.history = Default::default();
         if let Some(cmd) = leading_command(&text).filter(|c| c.rest.trim().is_empty()) {
             if self.app_command(&cmd.name, window, cx) {
                 return;
@@ -520,12 +684,16 @@ impl ChatView {
         }
         self.error = None;
         let images: Vec<ChatImage> = self.images.drain(..).map(|(i, _)| i).collect();
-        // `@path` mentions go to the CLI as files, as the Electron chat sends them.
-        let files: Vec<String> = split_mentions(&text)
-            .into_iter()
-            .filter(|p| p.mention)
-            .map(|p| p.text.trim_start_matches('@').to_string())
-            .collect();
+        // Attached files, then `@path` mentions, go to the CLI as files, as the Electron chat
+        // sends them.
+        let mut files: Vec<String> = std::mem::take(&mut self.x.files);
+        for m in split_mentions(&text).into_iter().filter(|p| p.mention) {
+            let path = m.text.trim_start_matches('@').to_string();
+            if !files.contains(&path) {
+                files.push(path);
+            }
+        }
+        files.truncate(wraithgrid_chat::CHAT_FILES_MAX);
         self.thread.add_user_message(&text, images.len(), now_ms());
         if let Some(session) = &self.session {
             if !session.send(&text, &images, &files) {
@@ -623,6 +791,34 @@ impl ChatView {
     fn tool_card(&self, t: &ToolItem, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let mono = crate::terminal::mono(cx);
+        // Claude's questions (#127): one quiet line; the questions are in the card below.
+        if let Some((asked, a)) = t
+            .approval
+            .as_ref()
+            .and_then(|a| a.questions.as_ref().map(|q| (q.len(), a)))
+            .filter(|(n, _)| *n > 0)
+        {
+            let waiting = a.decided.is_none();
+            let word = match a.decided {
+                None => "waiting for you",
+                Some(ApprovalDecision::Deny) => "skipped",
+                Some(_) => "answered",
+            };
+            return div()
+                .px_2()
+                .py_1()
+                .flex()
+                .gap_2()
+                .text_sm()
+                .text_color(theme.muted_foreground)
+                .child(div().flex_1().child(format!(
+                    "Claude {} {asked} {}",
+                    if waiting { "asks" } else { "asked" },
+                    if asked == 1 { "question" } else { "questions" }
+                )))
+                .child(div().text_xs().child(word))
+                .into_any_element();
+        }
         let preview: Option<AnyElement> = t.preview.as_ref().map(|p| match p {
             ToolPreview::Code { text } => div()
                 .p_2()
@@ -701,6 +897,7 @@ impl ChatView {
                 let button = |id: String, label: &'static str, primary: bool| {
                     div()
                         .id(SharedString::from(id))
+                        .a11y_button(label)
                         .px_3()
                         .py_1()
                         .rounded_md()
@@ -812,45 +1009,58 @@ impl Focusable for ChatView {
 }
 
 impl Render for ChatView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
+        let question = self.question_card(window, cx);
+        let viewer = self.image_viewer(window, cx);
         let items = self.thread.items.clone();
         let mut rows: Vec<AnyElement> = Vec::with_capacity(items.len());
         for item in &items {
             let row = match item {
-                ChatItem::User { text, images, .. } => div()
-                    .flex()
-                    .justify_end()
-                    .child(
-                        div()
-                            .max_w(relative(0.8))
-                            .px_3()
-                            .py_2()
-                            .rounded_lg()
-                            .bg(theme.secondary)
-                            .child(text.clone())
-                            .when(*images > 0, |d| {
-                                d.child(
+                ChatItem::User { text, images, .. } => {
+                    // Leading reply quotes are drawn as quotes (#164).
+                    let (quotes, body) = wraithgrid_chat::compose::split_quotes(text);
+                    div()
+                        .flex()
+                        .justify_end()
+                        .child(
+                            div()
+                                .max_w(relative(0.8))
+                                .px_3()
+                                .py_2()
+                                .rounded_lg()
+                                .bg(theme.secondary)
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .children(quotes.into_iter().map(|q| {
                                     div()
-                                        .text_xs()
+                                        .pl_2()
+                                        .border_l_2()
+                                        .border_color(theme.border)
+                                        .text_sm()
                                         .text_color(theme.muted_foreground)
-                                        .child(format!("{images} image(s)")),
-                                )
-                            }),
-                    )
-                    .into_any_element(),
+                                        .child(q)
+                                }))
+                                .when(!body.is_empty(), |d| d.child(body))
+                                .when(*images > 0, |d| {
+                                    d.child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground)
+                                            .child(format!("{images} image(s)")),
+                                    )
+                                }),
+                        )
+                        .into_any_element()
+                }
                 ChatItem::Assistant { id, text } => {
                     let state = self.markdown(id, text, cx);
                     div()
                         .child(TextView::new(&state).selectable(true))
                         .into_any_element()
                 }
-                ChatItem::Thinking { text, .. } => div()
-                    .text_sm()
-                    .italic()
-                    .text_color(theme.muted_foreground)
-                    .child(text.lines().take(4).collect::<Vec<_>>().join("\n"))
-                    .into_any_element(),
+                ChatItem::Thinking { id, text } => self.thinking(id, text, cx),
                 ChatItem::Tool(t) => self.tool_card(t, cx),
                 ChatItem::Notice { level, text, .. } => match level {
                     ItemLevel::Divider => div()
@@ -898,59 +1108,84 @@ impl Render for ChatView {
                         .into_any_element()
                 }
                 ChatItem::Handoff {
+                    id,
+                    text,
+                    messages,
                     from_cli,
                     to_cli,
-                    messages,
-                    ..
-                } => div()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(format!(
-                        "Continued from {from_cli} to {to_cli} ({messages} messages)"
-                    ))
-                    .into_any_element(),
+                    divider,
+                } => self.handoff(id, text, *messages, from_cli, to_cli, divider, cx),
             };
             rows.push(row);
         }
         let busy = self.thread.busy;
         let elapsed = self.thread.turn_started_at.map(|t| (now_ms() - t) / 1000);
+        let jump = self.jump_button(cx);
         div()
             .track_focus(&self.focus)
+            .on_key_down(cx.listener(Self::viewer_key))
             .size_full()
             .flex()
             .flex_col()
             .bg(theme.background)
             .child(
                 div()
-                    .id(SharedString::from(format!("thread-{}", self.pane_id)))
+                    .relative()
                     .flex_1()
                     .min_h(px(0.))
-                    .overflow_y_scroll()
-                    .track_scroll(&self.scroll)
-                    .p_3()
                     .flex()
                     .flex_col()
-                    .gap_3()
-                    .when(rows.is_empty(), |d| {
-                        d.child(
-                            div()
-                                .text_sm()
-                                .text_color(theme.muted_foreground)
-                                .child("Start the conversation below."),
-                        )
-                    })
-                    .children(rows),
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("thread-{}", self.pane_id)))
+                            .on_mouse_up(MouseButton::Left, cx.listener(Self::thread_mouse_up))
+                            // The jump button shows once the reader leaves the bottom.
+                            .on_scroll(cx.listener(|_, _, _, cx| cx.notify()))
+                            .flex_1()
+                            .min_h(px(0.))
+                            .overflow_y_scroll()
+                            .track_scroll(&self.scroll)
+                            .p_3()
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .when(rows.is_empty(), |d| {
+                                d.child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(theme.muted_foreground)
+                                        .child("Start the conversation below."),
+                                )
+                            })
+                            .children(rows),
+                    )
+                    .children(jump),
             )
             .when_some(self.error.clone(), |d, e| {
                 d.child(div().px_3().text_sm().text_color(theme.danger).child(e))
             })
+            .children(self.background_tasks(cx))
+            .children(self.queued_rows(cx))
+            .children(question)
             .children(self.menu_list(cx))
             .children(self.picker_list(cx))
+            .children(self.account_list(cx))
+            .children(self.later_panel(cx))
+            .children(self.quote_cards(cx))
             .when(!self.images.is_empty(), |d| d.child(self.image_row(cx)))
+            .children(self.file_chips(cx))
             .child(self.choices_row(cx))
             .child(
                 div()
+                    .id(SharedString::from(format!("composer-{}", self.pane_id)))
                     .p_2()
+                    .border_1()
+                    .border_color(gpui_kit::transparent_black())
+                    // Files dropped here are attached (#: like a paste for images).
+                    .drag_over::<ExternalPaths>(|d, _, _, cx| d.border_color(cx.theme().ring))
+                    .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
+                        this.attach_paths(paths.paths(), cx)
+                    }))
                     .flex()
                     .items_end()
                     .gap_2()
@@ -960,8 +1195,43 @@ impl Render for ChatView {
                         div()
                             .flex_1()
                             .capture_key_down(cx.listener(Self::composer_key))
+                            // The box binds these keys as actions; the menus, history, modes
+                            // and image paste take them first.
+                            .capture_action(cx.listener(|this, _: &input::MoveUp, window, cx| {
+                                if this.composer_nav("up", window, cx) {
+                                    cx.stop_propagation();
+                                }
+                            }))
+                            .capture_action(cx.listener(|this, _: &input::MoveDown, window, cx| {
+                                if this.composer_nav("down", window, cx) {
+                                    cx.stop_propagation();
+                                }
+                            }))
+                            .capture_action(cx.listener(
+                                |this, _: &input::IndentInline, window, cx| {
+                                    if this.composer_nav("tab", window, cx) {
+                                        cx.stop_propagation();
+                                    }
+                                },
+                            ))
+                            .capture_action(cx.listener(|this, _: &input::Escape, window, cx| {
+                                if this.composer_nav("escape", window, cx) {
+                                    cx.stop_propagation();
+                                }
+                            }))
+                            .capture_action(cx.listener(|this, _: &input::OutdentInline, _, cx| {
+                                this.cycle_mode(cx);
+                                cx.stop_propagation();
+                            }))
+                            .capture_action(cx.listener(|this, _: &input::Paste, _, cx| {
+                                if this.paste_image(cx) {
+                                    cx.stop_propagation();
+                                }
+                            }))
                             .child(Textarea::new(&self.composer)),
                     )
+                    .child(self.attach_button(cx))
+                    .child(self.later_button(cx))
                     .when(busy, |d| {
                         d.child(
                             div()
@@ -972,6 +1242,7 @@ impl Render for ChatView {
                         .child(
                             div()
                                 .id(SharedString::from(format!("stop-{}", self.pane_id)))
+                                .a11y_button("Stop")
                                 .px_3()
                                 .py_1()
                                 .rounded_md()
@@ -986,6 +1257,7 @@ impl Render for ChatView {
                         d.child(
                             div()
                                 .id(SharedString::from(format!("send-{}", self.pane_id)))
+                                .a11y_button("Send")
                                 .px_3()
                                 .py_1()
                                 .rounded_md()
@@ -997,6 +1269,19 @@ impl Render for ChatView {
                         )
                     }),
             )
+            .when(!self.meta.is_empty(), |d| {
+                d.child(
+                    div()
+                        .px_3()
+                        .pb_1()
+                        .truncate()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(self.meta.join(" · ")),
+                )
+            })
+            .children(self.reply_button(cx))
+            .children(viewer)
     }
 }
 
@@ -1007,6 +1292,10 @@ impl ChatView {
         let rows = menu.items.iter().enumerate().map(|(i, item)| {
             div()
                 .id(SharedString::from(format!("menu-{i}")))
+                .role(Role::ListItem)
+                .aria_label(format!("{}{}", item.sigil, item.name))
+                .aria_selected(i == menu.selected)
+                .when(i == menu.selected, |d| d.aria_active_descendant())
                 .px_2()
                 .py_1()
                 .flex()
@@ -1055,6 +1344,9 @@ impl ChatView {
         let row = |id: String, label: String, detail: String, on: bool| {
             div()
                 .id(SharedString::from(id))
+                .role(Role::ListItem)
+                .aria_label(label.clone())
+                .aria_selected(on)
                 .px_2()
                 .py_1()
                 .flex()
@@ -1161,16 +1453,22 @@ impl ChatView {
         let theme = cx.theme().clone();
         let thumbs = self.images.iter().enumerate().map(|(i, (_, image))| {
             div()
+                .id(SharedString::from(format!("thumb-{i}")))
+                .a11y_button(format!("Preview image {} of {}", i + 1, self.images.len()))
                 .relative()
                 .size(px(56.))
                 .rounded_md()
                 .overflow_hidden()
                 .border_1()
                 .border_color(theme.border)
+                .cursor_pointer()
+                // A click previews it (#163); × only removes.
+                .on_click(cx.listener(move |this, _, window, cx| this.open_viewer(i, window, cx)))
                 .child(img(image.clone()).size_full())
                 .child(
                     div()
                         .id(SharedString::from(format!("unattach-{i}")))
+                        .a11y_button(format!("Remove image {}", i + 1))
                         .absolute()
                         .top_0()
                         .right_0()
@@ -1180,6 +1478,7 @@ impl ChatView {
                         .cursor_pointer()
                         .child("×")
                         .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
                             if i < this.images.len() {
                                 this.images.remove(i);
                             }
@@ -1198,10 +1497,16 @@ impl ChatView {
 
     /// Model, effort and mode chips under the thread; each opens its picker.
     fn choices_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let account = self.account_chip(cx);
         let theme = cx.theme().clone();
         let chip = |id: &'static str, label: String, which: Picker| {
             div()
                 .id(id)
+                .a11y_button(match which {
+                    Picker::Model => format!("Model: {label}"),
+                    Picker::Mode => format!("Mode: {label}"),
+                    _ => label.clone(),
+                })
                 .px_2()
                 .py(px(1.))
                 .rounded_md()
@@ -1212,6 +1517,7 @@ impl ChatView {
                 .when(self.picker == Some(which), |d| d.bg(theme.secondary))
                 .child(label)
                 .on_click(cx.listener(move |this, _, _, cx| {
+                    this.account_picker = None;
                     this.picker = if this.picker == Some(which) {
                         None
                     } else {
@@ -1240,6 +1546,7 @@ impl ChatView {
             .pt_1()
             .flex()
             .gap_1()
+            .children(account)
             .child(chip("pick-model", model, Picker::Model))
             .child(chip("pick-effort", effort, Picker::Effort))
             .child(chip("pick-mode", mode, Picker::Mode))

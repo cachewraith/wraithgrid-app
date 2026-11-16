@@ -6,9 +6,14 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+
+use crate::a11y::A11y as _;
 use wraithgrid_core::agent_cli::AgentCli;
 use wraithgrid_core::config::Config;
 use wraithgrid_core::types::ACCOUNT_COLORS;
+
+mod folders;
+pub use folders::FolderOp;
 
 pub enum AccountsEvent {
     Add {
@@ -22,6 +27,12 @@ pub enum AccountsEvent {
     },
     Remove {
         id: String,
+        /// "Also delete its config dir".
+        delete_dir: bool,
+    },
+    /// An existing claude config dir as an account, where it is.
+    Import {
+        dir: String,
     },
     Login {
         id: String,
@@ -29,6 +40,8 @@ pub enum AccountsEvent {
     MarkSignedIn {
         id: String,
     },
+    /// Account folders (`accountFolders`) and which folder an account is in.
+    Folder(FolderOp),
     Close,
 }
 
@@ -39,6 +52,7 @@ struct Row {
     config_dir: String,
     color: Hsla,
     signed_in: bool,
+    imported: bool,
     rename: Entity<InputState>,
 }
 
@@ -49,7 +63,12 @@ pub struct AccountsView {
     cli: AgentCli,
     color: String,
     confirm_remove: Option<String>,
+    /// The remove confirm's "Also delete its config dir".
+    delete_dir: bool,
+    /// The import form's folder, while it is open.
+    import: Option<Entity<InputState>>,
     pub error: Option<String>,
+    folders: folders::Folders,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -86,6 +105,7 @@ impl AccountsView {
                 config_dir: a.config_dir.clone(),
                 color: crate::shell::parse_hex(&a.color).unwrap_or(rgb(0x7c5cff).into()),
                 signed_in: a.signed_in,
+                imported: a.imported,
                 rename,
             });
         }
@@ -96,9 +116,132 @@ impl AccountsView {
             cli: AgentCli::Claude,
             color: wraithgrid_core::accounts::next_free_color(&config.accounts),
             confirm_remove: None,
+            delete_dir: false,
+            import: None,
             error: None,
+            folders: folders::Folders::new(config),
             _subscriptions: subs,
         }
+    }
+
+    fn open_import(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let input = cx.new(|cx| InputState::new(window, cx).default_value("~/.claude"));
+        let sub = cx.subscribe_in(&input, window, |this, _, e: &InputEvent, _, cx| {
+            if let InputEvent::PressEnter { .. } = e {
+                this.import(cx);
+            }
+        });
+        self._subscriptions.push(sub);
+        window.focus(&input.focus_handle(cx), cx);
+        self.import = Some(input);
+        cx.notify();
+    }
+
+    fn import(&mut self, cx: &mut Context<Self>) {
+        if let Some(input) = &self.import {
+            let dir = input.read(cx).value().trim().to_string();
+            cx.emit(AccountsEvent::Import { dir });
+        }
+    }
+
+    fn browse_import(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let pick = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: None,
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = pick.await else {
+                return;
+            };
+            let Some(dir) = paths.into_iter().next() else {
+                return;
+            };
+            let home = wraithgrid_core::paths::home_dir()
+                .to_string_lossy()
+                .into_owned();
+            let dir = wraithgrid_core::paths::contract_home(&dir.to_string_lossy(), &home);
+            let _ = this.update_in(cx, |this, window, cx| {
+                if let Some(input) = &this.import {
+                    input.update(cx, |i, cx| i.set_value(dir, window, cx));
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn import_form(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let input = self.import.as_ref()?;
+        let theme = cx.theme().clone();
+        let button = |id: &'static str, label: &'static str, primary: bool| {
+            div()
+                .id(id)
+                .a11y_button(label)
+                .px_3()
+                .py_1()
+                .rounded_md()
+                .border_1()
+                .text_sm()
+                .cursor_pointer()
+                .border_color(if primary { theme.primary } else { theme.border })
+                .when(primary, |d| {
+                    d.bg(theme.primary).text_color(theme.primary_foreground)
+                })
+                .when(!primary, |d| d.hover(|d| d.bg(theme.secondary)))
+                .child(label)
+        };
+        Some(
+            div()
+                .id("import-form")
+                .role(Role::Group)
+                .aria_label("Import existing config dir")
+                .max_w(px(760.))
+                .p_4()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .rounded_lg()
+                .border_1()
+                .border_color(theme.border)
+                .child(
+                    div()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child("Import an existing config dir"),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(div().flex_1().child(Input::new(input)))
+                        .child(button("import-browse", "Browse…", false).on_click(
+                            cx.listener(|this, _, window, cx| this.browse_import(window, cx)),
+                        )),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child("The folder stays where it is. Wraithgrid points CLAUDE_CONFIG_DIR at it; nothing is copied."),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .justify_end()
+                        .gap_2()
+                        .child(button("import-cancel", "Cancel", false).on_click(cx.listener(
+                            |this, _, _, cx| {
+                                this.import = None;
+                                cx.notify();
+                            },
+                        )))
+                        .child(
+                            button("import-ok", "Import as account", true)
+                                .on_click(cx.listener(|this, _, _, cx| this.import(cx))),
+                        ),
+                )
+                .into_any_element(),
+        )
     }
 
     fn add(&mut self, cx: &mut Context<Self>) {
@@ -120,11 +263,12 @@ impl Focusable for AccountsView {
 }
 
 impl Render for AccountsView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let small = |id: SharedString, label: &'static str| {
             div()
                 .id(id)
+                .a11y_button(label)
                 .px_2()
                 .py(px(2.))
                 .rounded_md()
@@ -135,6 +279,8 @@ impl Render for AccountsView {
                 .hover(|d| d.bg(theme.secondary))
                 .child(label)
         };
+        let folders = (!self.rows.is_empty()).then(|| self.folders_section(window, cx));
+        let import = self.import_form(cx);
         let rows = self.rows.iter().map(|r| {
             let (login, mark, remove, really) =
                 (r.id.clone(), r.id.clone(), r.id.clone(), r.id.clone());
@@ -181,7 +327,11 @@ impl Render for AccountsView {
                         .text_xs()
                         .font_family(crate::terminal::mono(cx))
                         .text_color(theme.muted_foreground)
-                        .child(r.config_dir.clone()),
+                        .child(if r.imported {
+                            format!("{}  · imported existing config dir", r.config_dir)
+                        } else {
+                            r.config_dir.clone()
+                        }),
                 )
                 .child(
                     div()
@@ -213,20 +363,53 @@ impl Render for AccountsView {
                                 small(SharedString::from(format!("remove-{}", r.id)), "Remove")
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.confirm_remove = Some(remove.clone());
+                                        this.delete_dir = false;
                                         cx.notify();
                                     })),
                             )
                         })
                         .when(confirming, |d| {
                             d.child(div().text_xs().text_color(theme.danger).child(format!(
-                                "Remove {}? Its panes close; its folder stays.",
+                                "Remove {}? Its panes close.",
                                 r.name
                             )))
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("deldir-{}", r.id)))
+                                    .role(Role::Switch)
+                                    .aria_label("Also delete config dir")
+                                    .aria_toggled(if self.delete_dir {
+                                        Toggled::True
+                                    } else {
+                                        Toggled::False
+                                    })
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .text_xs()
+                                    .cursor_pointer()
+                                    .child(if self.delete_dir { "☑" } else { "☐" })
+                                    .child("Also delete its config dir")
+                                    .tooltip(|window, cx| {
+                                        gpui_kit::component::tooltip::Tooltip::new(
+                                            "Deletes the login, settings and history. This cannot be undone.",
+                                        )
+                                        .build(window, cx)
+                                    })
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.delete_dir = !this.delete_dir;
+                                        cx.notify();
+                                    })),
+                            )
                             .child(
                                 small(SharedString::from(format!("really-{}", r.id)), "Remove")
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.confirm_remove = None;
-                                        cx.emit(AccountsEvent::Remove { id: really.clone() });
+                                        let delete_dir = std::mem::take(&mut this.delete_dir);
+                                        cx.emit(AccountsEvent::Remove {
+                                            id: really.clone(),
+                                            delete_dir,
+                                        });
                                     })),
                             )
                             .child(
@@ -244,6 +427,7 @@ impl Render for AccountsView {
             let on = self.cli == cli;
             div()
                 .id(SharedString::from(format!("cli-{cli}")))
+                .a11y_toggle(cli.spec().provider_label, on)
                 .px_2()
                 .py_1()
                 .rounded_md()
@@ -263,6 +447,7 @@ impl Render for AccountsView {
             let on = self.color.eq_ignore_ascii_case(&value);
             div()
                 .id(SharedString::from(format!("color-{name}")))
+                .a11y_toggle(format!("Color {name}"), on)
                 .size(px(22.))
                 .rounded_full()
                 .cursor_pointer()
@@ -306,7 +491,24 @@ impl Render for AccountsView {
                     )
                     .child(
                         div()
+                            .id("accounts-import")
+                            .a11y_button("Import ~/.claude")
+                            .px_3()
+                            .py_1()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(theme.border)
+                            .cursor_pointer()
+                            .hover(|d| d.bg(theme.secondary))
+                            .child("Import ~/.claude")
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.open_import(window, cx)),
+                            ),
+                    )
+                    .child(
+                        div()
                             .id("accounts-close")
+                            .a11y_button("Back to panes")
                             .px_3()
                             .py_1()
                             .rounded_md()
@@ -317,6 +519,8 @@ impl Render for AccountsView {
                             .on_click(cx.listener(|_, _, _, cx| cx.emit(AccountsEvent::Close))),
                     ),
             )
+            .children(import)
+            .children(folders)
             .child(
                 div()
                     .max_w(px(760.))
@@ -356,6 +560,7 @@ impl Render for AccountsView {
                         div().flex().justify_end().child(
                             div()
                                 .id("add-account")
+                                .a11y_button("Add account")
                                 .px_3()
                                 .py_1()
                                 .rounded_md()

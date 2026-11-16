@@ -1,5 +1,5 @@
 //! The window's overlays: New pane (`NewPaneDialog.tsx`: Account → Folder → Start, launch args
-//! under More options) and the command palette (`CommandPalette.tsx`: search panes, projects and
+//! and a branch of its own (a git worktree, #162) under More options) and the command palette (`CommandPalette.tsx`: search panes, projects and
 //! commands). Each emits what was chosen; the window carries it out.
 
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -9,7 +9,12 @@ use gpui_kit::*;
 use wraithgrid_core::agent_cli::AgentCli;
 use wraithgrid_core::args::{format_args, parse_args};
 use wraithgrid_core::config::Config;
-use wraithgrid_core::paths::{contract_home, home_dir, resolve_user_path};
+use wraithgrid_core::config::Pane;
+use wraithgrid_core::paths::{contract_home, home_dir, resolve_user_path, worktrees_root};
+use wraithgrid_git::{add_worktree, GitCli, WorktreeFrom};
+
+use crate::a11y::A11y as _;
+use crate::folder_picker::Picking;
 
 // ---- New pane ------------------------------------------------------------------------------
 
@@ -18,7 +23,11 @@ pub enum NewPaneEvent {
         account: Option<String>,
         cwd: String,
         args: Vec<String>,
+        /// The project's "Work on a new branch" to remember (#162); None from the Git menu.
+        worktree_panes: Option<bool>,
     },
+    /// The folder picker's pins changed: save them (`settings.pinnedFolders`).
+    PinFolders(Vec<String>),
     Cancel,
 }
 
@@ -41,7 +50,22 @@ pub struct NewPaneDialog {
     more: bool,
     error: Option<String>,
     shell_name: String,
+    /// "Work on a new branch (git worktree)", and that branch's name.
+    worktree: bool,
+    branch: Entity<InputState>,
+    /// Opened from the Git menu for a pane (`branchFrom`): not remembered for the project.
+    branch_from: bool,
+    busy: bool,
+    picking: Picking,
     _subscriptions: Vec<Subscription>,
+}
+
+/// A branch name to start from, free in practice: `task-1105-0942` (month, day, time).
+pub fn suggest_branch<Tz: chrono::TimeZone>(now: chrono::DateTime<Tz>) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    now.format("task-%m%d-%H%M").to_string()
 }
 
 impl NewPaneDialog {
@@ -75,7 +99,17 @@ impl NewPaneDialog {
         });
         let args_state =
             cx.new(|cx| InputState::new(window, cx).placeholder("e.g. --model sonnet"));
-        let subs = [&folder_state, &args_state]
+        let worktree = project.worktree_panes;
+        let branch_state = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("feat/rate-limit")
+                .default_value(if worktree {
+                    suggest_branch(chrono::Local::now())
+                } else {
+                    String::new()
+                })
+        });
+        let subs = [&folder_state, &args_state, &branch_state]
             .into_iter()
             .map(|input| {
                 cx.subscribe_in(
@@ -136,11 +170,57 @@ impl NewPaneDialog {
             more: config.accounts.is_empty(),
             error: None,
             shell_name,
+            worktree,
+            branch: branch_state,
+            branch_from: false,
+            busy: false,
+            picking: Picking::new(config),
             _subscriptions: subs,
         }
     }
 
+    /// Set up from the Git menu (#162): that pane's folder and account, a new branch suggested,
+    /// so Enter starts it.
+    pub fn branch_from(
+        &mut self,
+        pane: &Pane,
+        config: &Config,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if pane.shell {
+            self.account = None;
+        } else if let Some(id) = pane
+            .account_id
+            .as_ref()
+            .filter(|id| config.account(id).is_some())
+        {
+            self.account = Some(id.clone());
+        }
+        let home = home_dir().to_string_lossy().into_owned();
+        let folder = contract_home(&pane.cwd, &home);
+        self.folder
+            .update(cx, |s, cx| s.set_value(folder, window, cx));
+        self.branch.update(cx, |s, cx| {
+            s.set_value(suggest_branch(chrono::Local::now()), window, cx)
+        });
+        self.worktree = true;
+        self.branch_from = true;
+        self.more = true;
+        window.focus(&self.branch.focus_handle(cx), cx);
+        cx.notify();
+    }
+
+    fn can_start(&self, cx: &App) -> bool {
+        !self.busy
+            && !self.folder.read(cx).value().trim().is_empty()
+            && (!self.worktree || !self.branch.read(cx).value().trim().is_empty())
+    }
+
     fn start(&mut self, cx: &mut Context<Self>) {
+        if !self.can_start(cx) {
+            return;
+        }
         let folder = self.folder.read(cx).value().trim().to_string();
         if folder.is_empty() {
             self.error = Some("Pick a folder.".into());
@@ -153,11 +233,50 @@ impl NewPaneDialog {
             Err(_) => return self.fail(format!("Folder not found: {folder}"), cx),
         }
         let args = parse_args(&self.args.read(cx).value());
-        cx.emit(NewPaneEvent::Start {
-            account: self.account.clone(),
-            cwd: folder,
-            args,
-        });
+        let account = self.account.clone();
+        let worktree_panes = (!self.branch_from).then_some(self.worktree);
+        if !self.worktree {
+            return cx.emit(NewPaneEvent::Start {
+                account,
+                cwd: folder,
+                args,
+                worktree_panes,
+            });
+        }
+        // The worktree first: the pane starts in it, or the dialog stays with git's error.
+        let branch = self.branch.read(cx).value().trim().to_string();
+        self.busy = true;
+        self.error = None;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let made = cx
+                .background_spawn(async move {
+                    let home = home_dir();
+                    add_worktree(
+                        &GitCli::default(),
+                        &resolve_user_path(&folder, &home),
+                        &branch,
+                        &worktrees_root(&home),
+                        false,
+                        WorktreeFrom::New,
+                    )
+                    .map(|dir| contract_home(&dir.to_string_lossy(), &home.to_string_lossy()))
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.busy = false;
+                match made {
+                    Ok(cwd) => cx.emit(NewPaneEvent::Start {
+                        account,
+                        cwd,
+                        args,
+                        worktree_panes,
+                    }),
+                    Err(e) => this.fail(e, cx),
+                }
+            });
+        })
+        .detach();
     }
 
     fn fail(&mut self, error: String, cx: &mut Context<Self>) {
@@ -172,6 +291,12 @@ impl NewPaneDialog {
             "<folder>".to_string()
         } else {
             folder
+        };
+        let branch = self.branch.read(cx).value().trim().to_string();
+        let run_in = if self.worktree && !branch.is_empty() {
+            format!("~/.wraithgrid/worktrees/…/{branch}")
+        } else {
+            folder.clone()
         };
         match self
             .account
@@ -191,7 +316,7 @@ impl NewPaneDialog {
                 } else {
                     format!(" {}", format_args(&args))
                 };
-                format!("{env}{}{args}   (in {folder})", spec.bin)
+                format!("{env}{}{args}   (in {run_in})", spec.bin)
             }
         }
     }
@@ -207,6 +332,9 @@ impl Focusable for NewPaneDialog {
 
 impl Render for NewPaneDialog {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(picker) = self.picking.picker.clone() {
+            return picker.into_any_element();
+        }
         let theme = cx.theme().clone();
         let option = |id: SharedString, selected: bool, cx: &mut Context<Self>| {
             div()
@@ -232,6 +360,10 @@ impl Render for NewPaneDialog {
                     self.account.as_ref() == Some(&a.id),
                     cx,
                 )
+                .a11y_toggle(
+                    format!("{} {}", a.name, a.cli.spec().provider_label),
+                    self.account.as_ref() == Some(&a.id),
+                )
                 .child(div().size(px(8.)).rounded_full().bg(a.color))
                 .child(a.name.clone())
                 .child(
@@ -248,6 +380,7 @@ impl Render for NewPaneDialog {
         }
         accounts = accounts.child(
             option("acct-shell".into(), self.account.is_none(), cx)
+                .a11y_toggle(format!("Shell {}", self.shell_name), self.account.is_none())
                 .child("Shell")
                 .child(
                     div()
@@ -264,6 +397,7 @@ impl Render for NewPaneDialog {
             let folder = f.clone();
             div()
                 .id(SharedString::from(format!("recent-{i}")))
+                .a11y_button(f.clone())
                 .px_2()
                 .py(px(2.))
                 .rounded_md()
@@ -284,12 +418,25 @@ impl Render for NewPaneDialog {
                 .text_color(theme.muted_foreground)
                 .child(text)
         };
-        let title = if self.account.is_some() {
+        let title = if self.branch_from {
+            "New pane on a new branch"
+        } else if self.account.is_some() {
             "New chat"
         } else {
             "New pane"
         };
+        let can_start = self.can_start(cx);
+        let more_on = [
+            (!self.args.read(cx).value().trim().is_empty()).then_some("args"),
+            self.worktree.then_some("worktree"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" · ");
         div()
+            .id("new-pane-dialog")
+            .a11y_dialog(title)
             .track_focus(&self.focus)
             .w(px(560.))
             .p_4()
@@ -315,13 +462,30 @@ impl Render for NewPaneDialog {
             .child(label("Account"))
             .child(accounts)
             .child(label("Folder"))
-            .child(Input::new(&self.folder))
+            .child(folder_row(
+                &self.folder,
+                cx.listener(|this, _, window, cx| {
+                    let folder = this.folder.clone();
+                    Picking::open(
+                        &folder,
+                        |d: &mut Self| &mut d.picking,
+                        |pins, cx| cx.emit(NewPaneEvent::PinFolders(pins)),
+                        this,
+                        window,
+                        cx,
+                    )
+                }),
+                cx,
+            ))
             .when(!self.recent.is_empty(), |d| {
                 d.child(div().flex().flex_wrap().gap_1().children(recent))
             })
             .child(
                 div()
                     .id("more")
+                    .role(Role::Button)
+                    .aria_label("More options")
+                    .aria_expanded(self.more)
                     .text_xs()
                     .text_color(theme.muted_foreground)
                     .cursor_pointer()
@@ -329,6 +493,9 @@ impl Render for NewPaneDialog {
                         "▾ More options"
                     } else {
                         "▸ More options"
+                    })
+                    .when(!self.more && !more_on.is_empty(), |d| {
+                        d.flex().gap_2().child(more_on)
                     })
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.more = !this.more;
@@ -338,6 +505,7 @@ impl Render for NewPaneDialog {
             .when(self.more && self.account.is_some(), |d| {
                 d.child(label("Launch args")).child(Input::new(&self.args))
             })
+            .when(self.more, |d| self.worktree_option(d, cx))
             .child(
                 div()
                     .text_xs()
@@ -356,6 +524,7 @@ impl Render for NewPaneDialog {
                     .child(
                         div()
                             .id("cancel")
+                            .a11y_button("Cancel")
                             .px_3()
                             .py_1()
                             .rounded_md()
@@ -368,25 +537,117 @@ impl Render for NewPaneDialog {
                     .child(
                         div()
                             .id("start")
+                            .a11y_button("Start")
                             .px_3()
                             .py_1()
                             .rounded_md()
                             .bg(theme.primary)
                             .text_color(theme.primary_foreground)
                             .cursor_pointer()
-                            .child("Start")
+                            .when(!can_start, |d| d.opacity(0.5))
+                            .child(if self.busy {
+                                "Creating worktree…"
+                            } else {
+                                "Start"
+                            })
                             .on_click(cx.listener(|this, _, _, cx| this.start(cx))),
                     ),
             )
+            .into_any_element()
     }
+}
+
+impl NewPaneDialog {
+    /// "Work on a new branch (git worktree)" and the branch's name (#162).
+    fn worktree_option(&self, d: Stateful<Div>, cx: &mut Context<Self>) -> Stateful<Div> {
+        let theme = cx.theme().clone();
+        let hint = |text: String| {
+            div()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child(text)
+        };
+        let toggle = div()
+            .id("np-worktree")
+            .a11y_toggle("Work on a new branch (git worktree)", self.worktree)
+            .flex()
+            .items_center()
+            .gap_3()
+            .cursor_pointer()
+            .child(
+                div()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child("Work on a new branch (git worktree)"),
+                    )
+                    .child(hint(
+                        "A separate checkout, so edits don't collide with other panes in the repo."
+                            .into(),
+                    )),
+            )
+            .child(switch(self.worktree, &theme))
+            .on_click(cx.listener(|this, _, window, cx| {
+                if !this.worktree && this.branch.read(cx).value().trim().is_empty() {
+                    this.branch.update(cx, |s, cx| {
+                        s.set_value(suggest_branch(chrono::Local::now()), window, cx)
+                    });
+                }
+                this.worktree = !this.worktree;
+                this.error = None;
+                // Shown now: its name is next, and Enter there starts.
+                if this.worktree {
+                    window.focus(&this.branch.focus_handle(cx), cx);
+                }
+                cx.notify();
+            }));
+        d.child(toggle).when(self.worktree, |d| {
+            d.child(hint("New branch".into()))
+                .child(Input::new(&self.branch))
+                .child(hint(format!(
+                    "Branches off the folder's current commit, in ~/.wraithgrid/worktrees.{}",
+                    if self.branch_from {
+                        ""
+                    } else {
+                        " New panes in this project start this way until you turn it off."
+                    }
+                )))
+        })
+    }
+}
+
+/// An on/off switch drawn like the Electron app's `.sw`.
+fn switch(on: bool, theme: &gpui_kit::component::Theme) -> impl IntoElement {
+    div()
+        .w(px(30.))
+        .h(px(18.))
+        .flex_shrink_0()
+        .p(px(2.))
+        .rounded_full()
+        .flex()
+        .when(on, |d| d.justify_end())
+        .bg(if on { theme.primary } else { theme.border })
+        .child(div().size(px(14.)).rounded_full().bg(if on {
+            theme.primary_foreground
+        } else {
+            theme.muted_foreground
+        }))
 }
 
 // ---- Command palette -----------------------------------------------------------------------
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum PaletteAction {
-    FocusPane { workspace: String, pane: String },
+    FocusPane {
+        workspace: String,
+        pane: String,
+    },
     Project(String),
+    /// "Preview: open for <project>".
+    Preview(String),
     NewPane,
     NewTerminal,
     ToggleZoom,
@@ -397,6 +658,11 @@ pub enum PaletteAction {
     Usage,
     Mods,
     Scheduled,
+    /// The focused pane's branch (#162).
+    SwitchBranch,
+    BranchPane,
+    OpenBranch,
+    Shortcuts,
 }
 
 pub enum PaletteEvent {
@@ -417,14 +683,13 @@ pub struct Palette {
     _subscription: Subscription,
 }
 
-/// True when every character of `query` appears in `text` in order (case-insensitive).
+/// `matches` (lib/search.ts): every word of `query` appears in `text` (case-insensitive).
 pub fn fuzzy_match(text: &str, query: &str) -> bool {
-    let mut chars = text.chars().flat_map(char::to_lowercase);
+    let hay = text.to_lowercase();
     query
-        .chars()
-        .flat_map(char::to_lowercase)
-        .filter(|c| !c.is_whitespace())
-        .all(|q| chars.any(|c| c == q))
+        .to_lowercase()
+        .split_whitespace()
+        .all(|w| hay.contains(w))
 }
 
 impl Palette {
@@ -462,6 +727,13 @@ impl Palette {
                 action: PaletteAction::Project(w.id.clone()),
             });
         }
+        for w in config.workspaces.iter().filter(|w| w.machine_id.is_none()) {
+            items.push(Item {
+                label: format!("Preview: open for {}", w.name),
+                detail: "Preview".into(),
+                action: PaletteAction::Preview(w.id.clone()),
+            });
+        }
         for (label, action) in [
             ("New chat…", PaletteAction::NewPane),
             ("New terminal", PaletteAction::NewTerminal),
@@ -473,6 +745,7 @@ impl Palette {
             ("Usage", PaletteAction::Usage),
             ("Mods", PaletteAction::Mods),
             ("Scheduled chats", PaletteAction::Scheduled),
+            ("Keyboard shortcuts", PaletteAction::Shortcuts),
         ] {
             items.push(Item {
                 label: label.into(),
@@ -501,6 +774,43 @@ impl Palette {
             items,
             selected: 0,
             _subscription: sub,
+        }
+    }
+
+    /// The focused pane's git commands, after Show changes (#162). `local`: worktrees are made
+    /// on this computer only.
+    pub fn add_git_commands(&mut self, branch: Option<String>, local: bool) {
+        let at = self
+            .items
+            .iter()
+            .position(|i| i.action == PaletteAction::Changes)
+            .map_or(self.items.len(), |i| i + 1);
+        let mut add = vec![(
+            "Switch branch…",
+            branch.unwrap_or_else(|| "Command".into()),
+            PaletteAction::SwitchBranch,
+        )];
+        if local {
+            add.push((
+                "New pane on a new branch…",
+                "its own folder (git worktree)".into(),
+                PaletteAction::BranchPane,
+            ));
+            add.push((
+                "Open a branch in a new pane…",
+                "Command".into(),
+                PaletteAction::OpenBranch,
+            ));
+        }
+        for (n, (label, detail, action)) in add.into_iter().enumerate() {
+            self.items.insert(
+                at + n,
+                Item {
+                    label: label.into(),
+                    detail,
+                    action,
+                },
+            );
         }
     }
 
@@ -535,6 +845,10 @@ impl Render for Palette {
             let action = item.action.clone();
             div()
                 .id(SharedString::from(format!("palette-{i}")))
+                .role(Role::ListItem)
+                .aria_label(format!("{} {}", item.label, item.detail))
+                .aria_selected(n == self.selected)
+                .when(n == self.selected, |d| d.aria_active_descendant())
                 .px_3()
                 .py_1()
                 .rounded_md()
@@ -556,6 +870,8 @@ impl Render for Palette {
         });
         let count = matches.len();
         div()
+            .id("palette")
+            .a11y_dialog("Command palette")
             .w(px(600.))
             .max_h(px(440.))
             .p_2()
@@ -595,6 +911,35 @@ impl Render for Palette {
     }
 }
 
+/// The folder field and its "Choose…" button (the in-app picker).
+fn folder_row(
+    folder: &Entity<InputState>,
+    on_choose: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    cx: &App,
+) -> Div {
+    let theme = cx.theme();
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .child(div().flex_1().child(Input::new(folder)))
+        .child(
+            div()
+                .id("choose-folder")
+                .a11y_button("Choose a folder")
+                .px_3()
+                .py_1()
+                .rounded_md()
+                .border_1()
+                .border_color(theme.border)
+                .text_sm()
+                .cursor_pointer()
+                .hover(|d| d.bg(theme.secondary))
+                .child("Choose…")
+                .on_click(on_choose),
+        )
+}
+
 // ---- Quit with agents running --------------------------------------------------------------
 
 pub enum QuitEvent {
@@ -629,6 +974,7 @@ impl Render for QuitDialog {
         let button = |id: &'static str, label: &'static str, primary: bool| {
             div()
                 .id(id)
+                .a11y_button(label)
                 .px_3()
                 .py_1()
                 .rounded_md()
@@ -645,6 +991,8 @@ impl Render for QuitDialog {
             if self.live == 1 { " is" } else { "s are" }
         );
         div()
+            .id("quit-dialog")
+            .a11y_dialog(message.clone())
             .w(px(460.))
             .p_4()
             .flex()
@@ -662,6 +1010,10 @@ impl Render for QuitDialog {
             .child(
                 div()
                     .id("remember")
+                    .a11y_toggle(
+                        "Remember my choice (Settings → When the window closes)",
+                        self.remember,
+                    )
                     .flex()
                     .items_center()
                     .gap_2()
@@ -701,6 +1053,8 @@ pub enum NewProjectEvent {
         account: Option<String>,
         start_chat: bool,
     },
+    /// The folder picker's pins changed: save them (`settings.pinnedFolders`).
+    PinFolders(Vec<String>),
     Cancel,
 }
 
@@ -713,6 +1067,7 @@ pub struct NewProjectDialog {
     account: Option<String>,
     start_chat: bool,
     pub error: Option<String>,
+    picking: Picking,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -760,6 +1115,7 @@ impl NewProjectDialog {
                 .collect(),
             account,
             start_chat: true,
+            picking: Picking::new(config),
             error: None,
             _subscriptions: subs,
         }
@@ -808,6 +1164,9 @@ impl EventEmitter<NewProjectEvent> for NewProjectDialog {}
 
 impl Render for NewProjectDialog {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(picker) = self.picking.picker.clone() {
+            return picker.into_any_element();
+        }
         let theme = cx.theme().clone();
         let chip = |id: SharedString, on: bool| {
             div()
@@ -829,6 +1188,7 @@ impl Render for NewProjectDialog {
                 SharedString::from(format!("np-acct-{id}")),
                 self.account.as_ref() == Some(id),
             )
+            .a11y_toggle(name.clone(), self.account.as_ref() == Some(id))
             .child(div().size(px(8.)).rounded_full().bg(*color))
             .child(name.clone())
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -840,6 +1200,8 @@ impl Render for NewProjectDialog {
         let suggested = self.suggested(cx);
         let can_start = self.account.is_some() && !self.folder.read(cx).value().trim().is_empty();
         div()
+            .id("new-project-dialog")
+            .a11y_dialog("New project")
             .w(px(520.))
             .p_4()
             .flex()
@@ -862,7 +1224,21 @@ impl Render for NewProjectDialog {
                     .child("New project"),
             )
             .child(label("Folder"))
-            .child(Input::new(&self.folder))
+            .child(folder_row(
+                &self.folder,
+                cx.listener(|this, _, window, cx| {
+                    let folder = this.folder.clone();
+                    Picking::open(
+                        &folder,
+                        |d: &mut Self| &mut d.picking,
+                        |pins, cx| cx.emit(NewProjectEvent::PinFolders(pins)),
+                        this,
+                        window,
+                        cx,
+                    )
+                }),
+                cx,
+            ))
             .child(label("Name"))
             .child(Input::new(&self.name))
             .when(!suggested.is_empty(), |d| {
@@ -890,6 +1266,7 @@ impl Render for NewProjectDialog {
                     .gap_2()
                     .child(
                         chip("np-start".into(), self.start_chat && can_start)
+                            .a11y_toggle("Start a chat", self.start_chat && can_start)
                             .child("Start a chat")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.start_chat = true;
@@ -898,6 +1275,7 @@ impl Render for NewProjectDialog {
                     )
                     .child(
                         chip("np-empty".into(), !self.start_chat || !can_start)
+                            .a11y_toggle("Empty project", !self.start_chat || !can_start)
                             .child("Empty project")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.start_chat = false;
@@ -916,6 +1294,7 @@ impl Render for NewProjectDialog {
                     .child(
                         div()
                             .id("np-cancel")
+                            .a11y_button("Cancel")
                             .px_3()
                             .py_1()
                             .rounded_md()
@@ -928,6 +1307,7 @@ impl Render for NewProjectDialog {
                     .child(
                         div()
                             .id("np-create")
+                            .a11y_button("Create")
                             .px_3()
                             .py_1()
                             .rounded_md()
@@ -938,6 +1318,7 @@ impl Render for NewProjectDialog {
                             .on_click(cx.listener(|this, _, _, cx| this.create(cx))),
                     ),
             )
+            .into_any_element()
     }
 }
 
@@ -1029,6 +1410,7 @@ impl Render for ProjectDialog {
         let chip = |id: SharedString, label: String, on: bool| {
             div()
                 .id(id)
+                .a11y_toggle(label.clone(), on)
                 .px_2()
                 .py_1()
                 .rounded_md()
@@ -1068,6 +1450,7 @@ impl Render for ProjectDialog {
         let button = |id: &'static str, text: &'static str| {
             div()
                 .id(id)
+                .a11y_button(text)
                 .px_3()
                 .py_1()
                 .rounded_md()
@@ -1082,6 +1465,8 @@ impl Render for ProjectDialog {
             if self.panes == 1 { "" } else { "s" }
         );
         div()
+            .id("project-dialog")
+            .a11y_dialog("Project")
             .w(px(480.))
             .p_4()
             .flex()
@@ -1143,6 +1528,7 @@ impl Render for ProjectDialog {
                     .child(
                         div()
                             .id("pj-save")
+                            .a11y_button("Save")
                             .px_3()
                             .py_1()
                             .rounded_md()
@@ -1197,6 +1583,7 @@ impl Render for ChoiceDialog {
             let pick = id.clone();
             div()
                 .id(SharedString::from(format!("choice-{id}")))
+                .a11y_button(format!("{label} {detail}"))
                 .px_3()
                 .py_2()
                 .rounded_md()
@@ -1217,6 +1604,8 @@ impl Render for ChoiceDialog {
                 .on_click(cx.listener(move |_, _, _, cx| cx.emit(ChoiceEvent::Pick(pick.clone()))))
         });
         div()
+            .id("choice-dialog")
+            .a11y_dialog(self.title.clone())
             .w(px(460.))
             .p_4()
             .flex()
@@ -1251,6 +1640,7 @@ impl Render for ChoiceDialog {
                 div().flex().justify_end().child(
                     div()
                         .id("choice-cancel")
+                        .a11y_button(self.cancel.clone())
                         .px_3()
                         .py_1()
                         .rounded_md()
@@ -1268,9 +1658,29 @@ impl Render for ChoiceDialog {
 mod tests {
     #[test]
     fn fuzzy() {
-        assert!(super::fuzzy_match("WraithGrid · org-info", "wgo"));
+        assert!(super::fuzzy_match("WraithGrid · org-info", "grid org"));
+        assert!(!super::fuzzy_match("WraithGrid · org-info", "wgo"));
         assert!(super::fuzzy_match("Close pane", "close p"));
+        // Words, not scattered letters: "site" isn't in "Wraithgrid Website" as a word part.
+        assert!(super::fuzzy_match(
+            "Preview: open for Site test",
+            "open for site"
+        ));
+        assert!(!super::fuzzy_match(
+            "Preview: open for Wraithgrid Website",
+            "for site test"
+        ));
         assert!(!super::fuzzy_match("shell", "zsh"));
         assert!(super::fuzzy_match("anything", ""));
+    }
+
+    #[test]
+    fn suggests_a_task_branch_from_the_date_and_time() {
+        use chrono::TimeZone;
+        let at = chrono::Utc.with_ymd_and_hms(2026, 11, 5, 9, 42, 0).unwrap();
+        assert_eq!(super::suggest_branch(at), "task-1105-0942");
+        assert!(wraithgrid_git::valid_branch_name(&super::suggest_branch(
+            chrono::Local::now()
+        )));
     }
 }

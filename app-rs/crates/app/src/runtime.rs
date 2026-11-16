@@ -35,7 +35,34 @@ pub fn spawn_env() -> BTreeMap<String, String> {
     let path = PROCESS_PATH.wait().clone();
     let mut env: BTreeMap<String, String> = std::env::vars().collect();
     env.insert(if cfg!(windows) { "Path" } else { "PATH" }.into(), path);
+    restore_gdk_backend(&mut env);
     env
+}
+
+/// The session's `GDK_BACKEND` before the app forced X11 for the preview's webview (Linux);
+/// what the app starts gets it back.
+pub static USER_GDK_BACKEND: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+/// WebKitGTK embeds only through X11, and a `GDK_BACKEND=wayland` in the session would break
+/// it (ADR 0005): the app runs GTK on X11 and keeps the session's value for its children.
+pub fn force_gdk_x11() {
+    if cfg!(target_os = "linux") {
+        USER_GDK_BACKEND.get_or_init(|| std::env::var("GDK_BACKEND").ok());
+        // SAFETY: called first thing in main, before any thread starts.
+        unsafe { std::env::set_var("GDK_BACKEND", "x11") };
+    }
+}
+
+fn restore_gdk_backend(env: &mut BTreeMap<String, String>) {
+    match USER_GDK_BACKEND.get() {
+        Some(Some(v)) => {
+            env.insert("GDK_BACKEND".into(), v.clone());
+        }
+        Some(None) => {
+            env.remove("GDK_BACKEND");
+        }
+        None => {}
+    }
 }
 
 /// The same, without waiting for the login shell's answer: the inherited PATH until it came.
@@ -47,6 +74,7 @@ pub fn spawn_env_now() -> BTreeMap<String, String> {
             path.clone(),
         );
     }
+    restore_gdk_backend(&mut env);
     env
 }
 
@@ -176,4 +204,50 @@ pub fn electron_running(user_data: &Path) -> Option<u32> {
     }
     #[cfg(not(unix))]
     Some(pid)
+}
+
+/// Who this launch is (`requestSingleInstanceLock`): the app for this user-data dir, or a
+/// second launch that asked the running one to show its window and should exit.
+pub enum Instance {
+    First(Option<std::sync::mpsc::Receiver<()>>),
+    /// Only unix has the socket so far; elsewhere every launch is the first.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    Second,
+}
+
+/// One app per user-data dir: a second launch connects to the first one's socket and asks it
+/// to show its window (`second-instance`); the first gets a message per such launch.
+#[cfg(unix)]
+pub fn single_instance(user_data: &Path) -> Instance {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::{UnixListener, UnixStream};
+    let path = user_data.join("wraithgrid-window.sock");
+    if let Ok(mut s) = UnixStream::connect(&path) {
+        if s.write_all(b"open\n").is_ok() {
+            return Instance::Second;
+        }
+    }
+    // Left by an app that ended without cleaning up.
+    let _ = std::fs::remove_file(&path);
+    let Ok(listener) = UnixListener::bind(&path) else {
+        return Instance::First(None);
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut line = String::new();
+            if BufReader::new(stream).read_line(&mut line).is_ok()
+                && line.trim() == "open"
+                && tx.send(()).is_err()
+            {
+                break;
+            }
+        }
+    });
+    Instance::First(Some(rx))
+}
+
+#[cfg(not(unix))]
+pub fn single_instance(_user_data: &Path) -> Instance {
+    Instance::First(None)
 }

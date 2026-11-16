@@ -266,6 +266,27 @@ impl ChatThread {
     }
 
     /// A line of the app's own (a restart, an account switch). Returns its id.
+    /// The first message of a chat continued from another CLI (#78), shown collapsed.
+    pub fn add_handoff(
+        &mut self,
+        text: &str,
+        messages: u64,
+        from_cli: &str,
+        to_cli: &str,
+        divider: &str,
+    ) -> String {
+        let id = self.next_id("h");
+        self.items.push(ChatItem::Handoff {
+            id: id.clone(),
+            text: text.to_string(),
+            messages,
+            from_cli: from_cli.to_string(),
+            to_cli: to_cli.to_string(),
+            divider: divider.to_string(),
+        });
+        id
+    }
+
     pub fn add_notice(&mut self, level: ItemLevel, text: &str) -> String {
         let id = self.next_id("n");
         self.items.push(ChatItem::Notice {
