@@ -14,6 +14,10 @@ on:
         description: Upload the packages to this (draft) GitHub release instead of artifacts
         required: false
         default: ''
+      update_feeds:
+        description: Also upload latest*.yml, so installed copies update to this release
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -130,9 +134,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.release_tag }}
-        # Never the latest*.yml update feeds: Electron installs must not update to a pre-release.
+          FEEDS: ${{ inputs.update_feeds }}
+        # The latest*.yml update feeds only when asked (a pre-release must not reach installed
+        # copies); never this OS's SHA256SUMS.txt, as the release needs one for every OS.
         run: |
-          files=$(ls app-rs/target/dist/* | grep -Ev '/latest[^/]*\.yml$')
+          files=$(ls app-rs/target/dist/* | grep -v '/SHA256SUMS.txt$')
+          if [ "$FEEDS" != true ]; then files=$(echo "$files" | grep -Ev '/latest[^/]*\.yml$'); fi
           gh release upload "$TAG" $files --clobber
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: inputs.release_tag == ''
@@ -170,9 +177,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.release_tag }}
-        # Never the latest*.yml update feeds: Electron installs must not update to a pre-release.
+          FEEDS: ${{ inputs.update_feeds }}
+        # The latest*.yml update feeds only when asked (a pre-release must not reach installed
+        # copies); never this OS's SHA256SUMS.txt, as the release needs one for every OS.
         run: |
-          files=$(ls app-rs/target/dist/* | grep -Ev '/latest[^/]*\.yml$')
+          files=$(ls app-rs/target/dist/* | grep -v '/SHA256SUMS.txt$')
+          if [ "$FEEDS" != true ]; then files=$(echo "$files" | grep -Ev '/latest[^/]*\.yml$'); fi
           gh release upload "$TAG" $files --clobber
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: inputs.release_tag == ''
@@ -207,9 +217,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.release_tag }}
-        # Never the latest*.yml update feeds: Electron installs must not update to a pre-release.
+          FEEDS: ${{ inputs.update_feeds }}
+        # The latest*.yml update feeds only when asked (a pre-release must not reach installed
+        # copies); never this OS's SHA256SUMS.txt, as the release needs one for every OS.
         run: |
-          files=$(ls app-rs/target/dist/* | grep -Ev '/latest[^/]*\.yml$')
+          files=$(ls app-rs/target/dist/* | grep -v '/SHA256SUMS.txt$')
+          if [ "$FEEDS" != true ]; then files=$(echo "$files" | grep -Ev '/latest[^/]*\.yml$'); fi
           gh release upload "$TAG" $files --clobber
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: inputs.release_tag == ''

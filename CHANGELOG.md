@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-11-16
+
+- [release] v2.0.0: the Rust + GPUI app replaces the Electron app (#166); published to the public cachewraith/wraithgrid with its update feeds, so installed copies update into it. gpui.yml `update_feeds` input, one SHA256SUMS.txt for all OSes (files: app-rs/crates/app/Cargo.toml, app-rs/Cargo.lock, .github/workflows/gpui.yml)
+
 ## 2026-11-13
 
 - [gpui] Under a chat's message box: its folder (cut in the middle) and git branch (`cc-folder`), refreshed with the git poll (files: app-rs/crates/app/src/chat_view.rs, shell/later.rs, shell.rs)
