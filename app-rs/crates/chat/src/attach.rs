@@ -109,3 +109,54 @@ fn write_private(file: &Path, bytes: &[u8]) -> io::Result<()> {
     std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
     io::Write::write_all(&mut opts.open(file)?, bytes)
 }
+
+/// Longest side of a sent image's thumbnail, in pixels.
+const THUMB_SIDE: u32 = 320;
+
+/// A sent image's thumbnail as a data URL for the saved view (#50): scaled to fit
+/// [`THUMB_SIDE`], as PNG; None when it doesn't decode or comes out too big to keep.
+pub fn thumb_data_url(img: &ChatImage) -> Option<String> {
+    let bytes = STANDARD.decode(&img.data).ok()?;
+    let decoded = image::load_from_memory(&bytes).ok()?;
+    let small = if decoded.width() > THUMB_SIDE || decoded.height() > THUMB_SIDE {
+        decoded.thumbnail(THUMB_SIDE, THUMB_SIDE)
+    } else {
+        decoded
+    };
+    let mut out = io::Cursor::new(Vec::new());
+    small.write_to(&mut out, image::ImageFormat::Png).ok()?;
+    let url = format!(
+        "data:image/png;base64,{}",
+        STANDARD.encode(out.into_inner())
+    );
+    crate::thread::valid_thumbs(&serde_json::json!([url.clone()])).map(|_| url)
+}
+
+#[cfg(test)]
+mod thumb_tests {
+    use super::*;
+
+    #[test]
+    fn thumbnails_fit_and_are_kept() {
+        let big = image::RgbImage::from_pixel(800, 400, image::Rgb([200, 30, 30]));
+        let mut png = io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(big)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        let img = ChatImage {
+            media_type: ChatImageType::Png,
+            data: STANDARD.encode(png.into_inner()),
+        };
+        let url = thumb_data_url(&img).expect("a thumbnail");
+        let data = STANDARD
+            .decode(url.trim_start_matches("data:image/png;base64,"))
+            .unwrap();
+        let small = image::load_from_memory(&data).unwrap();
+        assert_eq!((small.width(), small.height()), (320, 160));
+        assert!(thumb_data_url(&ChatImage {
+            media_type: ChatImageType::Png,
+            data: "bm90IGFuIGltYWdl".into()
+        })
+        .is_none());
+    }
+}

@@ -17,6 +17,7 @@ pub mod codex;
 pub mod compose;
 pub mod files;
 mod json;
+pub mod present;
 pub mod session;
 pub mod slash;
 mod text;

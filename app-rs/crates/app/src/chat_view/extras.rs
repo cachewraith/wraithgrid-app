@@ -13,6 +13,7 @@ use wraithgrid_chat::compose::{
     answer_of, at_edge, history_step, next_question, prompt_history, quote_of, split_recommended,
     HistoryNav, QuestionPick, Quote, QUOTES_MAX,
 };
+use wraithgrid_chat::present::format_duration;
 use wraithgrid_chat::{ApprovalDecision, ChatAnswers, ChatItem, ChatQuestion};
 use wraithgrid_schedule::SendLater;
 
@@ -36,19 +37,71 @@ pub(super) struct Extras {
     pub history: HistoryNav,
     /// Where the Reply button shows (where the selection in the chat was let go), and the
     /// text it quotes: taken then, as pressing the button ends the selection.
-    reply_at: Option<(Point<Pixels>, String)>,
-    /// The pasted image the viewer shows.
-    viewer: Option<usize>,
+    pub reply_at: Option<(Point<Pixels>, String)>,
+    /// The images the viewer steps through (pasted ones, or a sent message's), and which.
+    viewer: Option<(Vec<std::sync::Arc<Image>>, usize)>,
     later_menu: bool,
     later_at: Option<Entity<InputState>>,
-    queued: Vec<Queued>,
+    /// Why the "At a time…" field's time can't be used.
+    later_error: Option<String>,
+    pub queued: Vec<Queued>,
     /// ("When home's limit resets", "in 2h"), when the account's reset is known.
     reset: Option<(String, String)>,
     question: Option<Questions>,
     /// Attached files (paperclip or drop) other than images: sent as paths after the message.
     pub files: Vec<String>,
-    /// Thinking blocks and handoff texts opened, by item id.
-    opened: std::collections::HashSet<String>,
+    /// Thinking blocks, handoff texts and tool cards opened, by item id.
+    pub opened: std::collections::HashSet<String>,
+    /// Reports handed in (a preview's, #74): label and text, sent after the message.
+    pub notes: Vec<(String, String)>,
+    /// The text the `/` menu was closed on with Esc (or a recalled prompt): no menu until
+    /// it changes.
+    pub dismissed: Option<String>,
+    /// The pane folder's files for the `@` menu, as last listed.
+    pub paths: std::sync::Arc<Vec<String>>,
+    /// The reader scrolled up: new output no longer scrolls the thread.
+    pub unstuck: bool,
+    /// When answer text last grew (ms), for the working line.
+    pub text_at: i64,
+    /// The box's placeholder as last set.
+    pub placeholder: String,
+    /// Full access was clicked once; a second click switches.
+    pub bypass_confirm: bool,
+    /// Images sent from this view, full size, by message id; and saved thumbnails, decoded.
+    pub sent: std::collections::HashMap<String, Vec<std::sync::Arc<Image>>>,
+    pub thumbs: std::collections::HashMap<String, Vec<std::sync::Arc<Image>>>,
+    /// The answer whose Copy shows a tick.
+    pub copied: Option<String>,
+}
+
+impl Extras {
+    /// Send later's menu or time field is open.
+    pub fn later_open(&self) -> bool {
+        self.later_menu || self.later_at.is_some()
+    }
+
+    pub fn close_later(&mut self) {
+        self.later_menu = false;
+        self.later_at = None;
+        self.later_error = None;
+    }
+
+    /// The message to send or queue: quotes first (#164), then the text, then handed-in
+    /// reports; quotes and reports are taken.
+    pub fn take_message(&mut self, typed: &str) -> String {
+        let body = std::iter::once(typed.to_string())
+            .chain(self.notes.drain(..).map(|(_, t)| t))
+            .filter(|t| !t.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let text = wraithgrid_chat::compose::with_quotes(&self.quotes, &body)
+            .trim()
+            .to_string();
+        self.quotes.clear();
+        self.quote_open = None;
+        self.history = Default::default();
+        text
+    }
 }
 
 /// Claude's questions being answered (`QuestionCard`): which one, and what was picked.
@@ -123,8 +176,10 @@ impl ChatView {
             return false;
         };
         self.x.history = nav;
-        self.composer
-            .update(cx, |c, cx| c.set_value(next, window, cx));
+        // A recalled `/command` doesn't open the menu: ↑/↓ keep going through history.
+        self.x.dismissed = Some(next.clone());
+        self.menu = None;
+        self.set_box(next, None, window, cx);
         cx.notify();
         true
     }
@@ -258,8 +313,9 @@ impl ChatView {
         });
         Some(
             div()
-                .px_2()
-                .pt_2()
+                .id(SharedString::from(format!("quotes-{}", self.pane_id)))
+                .max_h(px(160.))
+                .overflow_y_scroll()
                 .flex()
                 .flex_col()
                 .gap_1()
@@ -268,8 +324,66 @@ impl ChatView {
         )
     }
 
-    pub(super) fn open_viewer(&mut self, i: usize, window: &mut Window, cx: &mut Context<Self>) {
-        self.x.viewer = Some(i);
+    /// Reports handed in, as chips with ×.
+    pub(super) fn note_chips(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.x.notes.is_empty() {
+            return None;
+        }
+        let theme = cx.theme().clone();
+        let chips = self.x.notes.iter().enumerate().map(|(i, (label, _))| {
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .px_2()
+                .py(px(2.))
+                .rounded_md()
+                .border_1()
+                .border_color(theme.border)
+                .text_xs()
+                .child(div().text_color(theme.muted_foreground).child("◎"))
+                .child(label.clone())
+                .child(
+                    div()
+                        .id(SharedString::from(format!("unnote-{i}")))
+                        .a11y_button(format!("Remove {label}"))
+                        .px_1()
+                        .rounded_sm()
+                        .cursor_pointer()
+                        .text_color(theme.muted_foreground)
+                        .hover(|d| d.bg(theme.secondary))
+                        .child("×")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if i < this.x.notes.len() {
+                                this.x.notes.remove(i);
+                            }
+                            cx.notify();
+                        })),
+                )
+        });
+        Some(
+            div()
+                .id(SharedString::from(format!("notes-{}", self.pane_id)))
+                .role(Role::Group)
+                .aria_label("Attached reports")
+                .flex()
+                .flex_wrap()
+                .gap_1()
+                .children(chips)
+                .into_any_element(),
+        )
+    }
+
+    pub(super) fn open_viewer(
+        &mut self,
+        images: Vec<std::sync::Arc<Image>>,
+        i: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if i < images.len() {
+            self.x.viewer = Some((images, i));
+        }
         window.focus(&self.focus, cx);
         cx.notify();
     }
@@ -281,11 +395,13 @@ impl ChatView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(at) = self.x.viewer else { return };
-        let n = self.images.len().max(1);
+        let Some((images, at)) = &mut self.x.viewer else {
+            return;
+        };
+        let n = images.len().max(1);
         match e.keystroke.key.as_str() {
-            "left" => self.x.viewer = Some((at + n - 1) % n),
-            "right" => self.x.viewer = Some((at + 1) % n),
+            "left" => *at = (*at + n - 1) % n,
+            "right" => *at = (*at + 1) % n,
             "escape" => {
                 self.x.viewer = None;
                 self.composer.update(cx, |c, cx| c.focus(window, cx));
@@ -296,16 +412,16 @@ impl ChatView {
         cx.notify();
     }
 
-    /// The full-window viewer over the pasted images (`ImageViewer`).
+    /// The full-window viewer over pasted or sent images (`ImageViewer`).
     pub(super) fn image_viewer(
         &self,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let at = self.x.viewer.filter(|i| *i < self.images.len())?;
-        let image = self.images[at].1.clone();
+        let (images, at) = self.x.viewer.as_ref().filter(|(l, i)| *i < l.len())?;
+        let (at, n) = (*at, images.len());
+        let image = images[at].clone();
         let size = window.viewport_size();
-        let n = self.images.len();
         let theme = cx.theme().clone();
         Some(
             deferred(
@@ -346,8 +462,12 @@ impl ChatView {
         )
     }
 
-    /// The pending question set, when Claude asked one (an approval with questions).
+    /// The pending question set, when Claude asked one (an approval with questions); only
+    /// while its turn runs, as nothing can answer it after.
     fn asked(&self) -> Option<(String, Vec<ChatQuestion>)> {
+        if !self.thread.busy {
+            return None;
+        }
         self.thread.items.iter().rev().find_map(|i| match i {
             ChatItem::Tool(t) => t.approval.as_ref().and_then(|a| {
                 (a.decided.is_none())
@@ -599,6 +719,8 @@ impl ChatView {
                 .id(SharedString::from(format!("cq-{}", self.pane_id)))
                 .mx_2()
                 .mt_2()
+                .max_h(px(360.))
+                .overflow_y_scroll()
                 .p_3()
                 .rounded_lg()
                 .border_1()
@@ -752,103 +874,143 @@ impl ChatView {
     /// The text to queue: the box, with its quotes first; the box and quotes clear.
     fn take_for_later(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<String> {
         let typed = self.composer.read(cx).value().trim().to_string();
-        let text = wraithgrid_chat::compose::with_quotes(&self.x.quotes, &typed)
-            .trim()
-            .to_string();
-        if text.is_empty() {
+        if typed.is_empty() {
             return None;
         }
-        self.x.quotes.clear();
-        self.composer
-            .update(cx, |c, cx| c.set_value("", window, cx));
+        let text = self.x.take_message(&typed);
+        self.set_box(String::new(), None, window, cx);
         Some(text)
     }
 
     fn queue(&mut self, when: SendLater, window: &mut Window, cx: &mut Context<Self>) {
-        self.x.later_menu = false;
-        self.x.later_at = None;
+        self.x.close_later();
         if let Some(text) = self.take_for_later(window, cx) {
             cx.emit(ChatViewEvent::Queue { text, when });
         }
         cx.notify();
     }
 
-    /// The clock beside Send: "Send later".
+    /// The clock beside Send: "Send later", with its list above it. Nothing to queue while
+    /// the box is empty.
     pub(super) fn later_button(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        let on = self.x.later_menu || self.x.later_at.is_some();
+        let on = self.x.later_open();
+        let enabled = on || !self.composer.read(cx).value().trim().is_empty();
+        let list = self.later_panel(cx);
         div()
             .id(SharedString::from(format!("later-{}", self.pane_id)))
+            .relative()
             .a11y_button("Send later")
+            .aria_expanded(on)
             .px_2()
             .py_1()
             .rounded_md()
             .border_1()
             .border_color(theme.border)
             .when(on, |d| d.bg(theme.secondary))
-            .cursor_pointer()
+            .when(enabled, |d| {
+                d.cursor_pointer().hover(|d| d.bg(theme.secondary))
+            })
+            .when(!enabled, |d| d.opacity(0.5))
             .tooltip(|window, cx| {
                 gpui_kit::component::tooltip::Tooltip::new("Send later").build(window, cx)
             })
             .child("◷")
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.x.later_menu = !this.x.later_menu;
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if !enabled {
+                    return;
+                }
+                let was = this.x.later_open();
+                this.close_popovers(cx);
+                this.x.later_menu = !was;
                 cx.notify();
             }))
+            .children(list.map(|l| super::pickers::above(l, true)))
             .into_any_element()
     }
 
-    /// The menu of times, above the box, and the "At a time…" row.
-    pub(super) fn later_panel(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// Queues the box for the time in the "At a time…" field, or says why it can't.
+    fn queue_at(
+        &mut self,
+        input: &Entity<InputState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let at = input.read(cx).value().trim().to_string();
+        match wraithgrid_schedule::parse_local(&chrono::Local, &at) {
+            None => self.x.later_error = Some("Use a time like 2026-11-13T09:00.".into()),
+            Some(t) if t <= wraithgrid_usage::now_ms() => {
+                self.x.later_error = Some("Pick a time in the future.".into())
+            }
+            Some(_) if self.composer.read(cx).value().trim().is_empty() => {
+                self.x.later_error = Some("Type the message first.".into())
+            }
+            Some(t) => self.queue(SendLater::At(t), window, cx),
+        }
+        cx.notify();
+    }
+
+    /// The menu of times, and the "At a time…" field in its place.
+    fn later_panel(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let theme = cx.theme().clone();
         if let Some(input) = &self.x.later_at {
             let input = input.clone();
             let ok = !self.composer.read(cx).value().trim().is_empty();
             return Some(
-                div()
-                    .px_2()
-                    .pt_2()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .text_sm()
-                    .child("Send at")
-                    .child(div().w(px(200.)).child(Input::new(&input)))
+                super::pickers::pop_frame("later-at-pop", 320., cx)
+                    .role(Role::Dialog)
+                    .aria_label("Send at")
+                    .gap_1()
                     .child(
                         div()
-                            .id("later-cancel")
-                            .a11y_button("Cancel")
-                            .px_2()
-                            .py_1()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .hover(|d| d.bg(theme.secondary))
-                            .child("Cancel")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.x.later_at = None;
-                                cx.notify();
-                            })),
+                            .px_1()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child("Send at")
+                            .child(div().flex_1().child(Input::new(&input))),
                     )
+                    .when_some(self.x.later_error.clone(), |d, e| {
+                        d.child(div().px_1().text_xs().text_color(theme.danger).child(e))
+                    })
                     .child(
                         div()
-                            .id("later-queue")
-                            .a11y_button("Queue")
-                            .px_2()
-                            .py_1()
-                            .rounded_md()
-                            .border_1()
-                            .border_color(theme.border)
-                            .when(ok, |d| d.cursor_pointer())
-                            .when(!ok, |d| d.opacity(0.5))
-                            .child("Queue")
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                let at = input.read(cx).value().trim().to_string();
-                                if let Some(t) =
-                                    wraithgrid_schedule::parse_local(&chrono::Local, &at)
-                                {
-                                    this.queue(SendLater::At(t), window, cx);
-                                }
-                            })),
+                            .flex()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .id("later-cancel")
+                                    .a11y_button("Cancel")
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .hover(|d| d.bg(theme.secondary))
+                                    .child("Cancel")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.x.close_later();
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .id("later-queue")
+                                    .a11y_button("Queue")
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_md()
+                                    .border_1()
+                                    .border_color(theme.border)
+                                    .when(ok, |d| {
+                                        d.cursor_pointer().hover(|d| d.bg(theme.secondary))
+                                    })
+                                    .when(!ok, |d| d.opacity(0.5))
+                                    .child("Queue")
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.queue_at(&input, window, cx)
+                                    })),
+                            ),
                     )
                     .into_any_element(),
             );
@@ -883,18 +1045,9 @@ impl ChatView {
                 )
         };
         Some(
-            div()
-                .mx_2()
-                .mt_2()
-                .w(px(280.))
-                .p_1()
-                .rounded_lg()
-                .border_1()
-                .border_color(theme.border)
-                .bg(theme.popover)
-                .text_sm()
-                .flex()
-                .flex_col()
+            super::pickers::pop_frame("later-pop", 280., cx)
+                .role(Role::Menu)
+                .aria_label("Send later")
                 .when_some(self.x.reset.clone(), |d, (label, hint)| {
                     d.child(row("later-reset", label, hint).on_click(
                         cx.listener(|this, _, window, cx| this.queue(SendLater::Reset, window, cx)),
@@ -918,13 +1071,27 @@ impl ChatView {
                     row("later-at", "At a time…".into(), String::new()).on_click(cx.listener(
                         move |this, _, window, cx| {
                             this.x.later_menu = false;
+                            this.x.later_error = None;
                             let value =
                                 wraithgrid_schedule::to_local(&chrono::Local, now + 3_600_000);
-                            this.x.later_at = Some(cx.new(|cx| {
+                            let input = cx.new(|cx| {
                                 InputState::new(window, cx)
                                     .placeholder("2026-11-13T09:00")
                                     .default_value(value)
-                            }));
+                            });
+                            // Enter in the field queues.
+                            cx.subscribe_in(
+                                &input,
+                                window,
+                                |this, input, e: &InputEvent, window, cx| {
+                                    if let InputEvent::PressEnter { .. } = e {
+                                        this.queue_at(input, window, cx);
+                                    }
+                                },
+                            )
+                            .detach();
+                            window.focus(&input.focus_handle(cx), cx);
+                            this.x.later_at = Some(input);
                             cx.notify();
                         },
                     )),
@@ -1106,7 +1273,6 @@ impl ChatView {
                 .id(SharedString::from(format!("files-{}", self.pane_id)))
                 .role(Role::Group)
                 .aria_label("Attached files")
-                .px_2()
                 .flex()
                 .flex_wrap()
                 .gap_1()
@@ -1117,15 +1283,10 @@ impl ChatView {
 }
 
 impl ChatView {
-    /// The thread is scrolled to (near) its end.
-    pub(super) fn at_bottom(&self) -> bool {
-        let max = self.scroll.max_offset().y;
-        max <= px(0.) || -self.scroll.offset().y >= max - px(24.)
-    }
-
-    /// "Scroll to the latest message", over the thread's bottom edge when it isn't there.
+    /// "Scroll to the latest message", over the thread's bottom edge once the reader has
+    /// scrolled up.
     pub(super) fn jump_button(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.at_bottom() {
+        if !self.x.unstuck {
             return None;
         }
         let theme = cx.theme();
@@ -1151,6 +1312,7 @@ impl ChatView {
                         .hover(|d| d.bg(theme.secondary))
                         .child("↓")
                         .on_click(cx.listener(|this, _, _, cx| {
+                            this.x.unstuck = false;
                             this.scroll.scroll_to_bottom();
                             cx.notify();
                         })),
@@ -1202,7 +1364,7 @@ impl ChatView {
 }
 
 impl ChatView {
-    fn toggle_opened(&mut self, id: &str, cx: &mut Context<Self>) {
+    pub(super) fn toggle_opened(&mut self, id: &str, cx: &mut Context<Self>) {
         if !self.x.opened.remove(id) {
             self.x.opened.insert(id.to_string());
         }
@@ -1252,52 +1414,37 @@ impl ChatView {
             .flex_col()
             .gap_1()
             .child(line)
-            .when(
-                !text.trim().is_empty() && !from_cli.is_empty() && from_cli != to_cli,
-                |d| {
+            .when(!text.trim().is_empty(), |d| {
+                d.child(
+                    div()
+                        .id(SharedString::from(format!("handoff-{id}")))
+                        .role(Role::Button)
+                        .aria_label(format!("Handoff from {from}"))
+                        .aria_expanded(open)
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .cursor_pointer()
+                        .child(format!(
+                            "{} Handoff from {from} · {messages} messages · {}",
+                            if open { "▾" } else { "▸" },
+                            if open { "hide" } else { "show" }
+                        ))
+                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_opened(&key, cx))),
+                )
+                .when(open, |d| {
                     d.child(
                         div()
-                            .id(SharedString::from(format!("handoff-{id}")))
-                            .role(Role::Button)
-                            .aria_label(format!("Handoff from {from}"))
-                            .aria_expanded(open)
+                            .p_2()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(theme.border)
                             .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .cursor_pointer()
-                            .child(format!(
-                                "{} Handoff from {from} · {messages} messages · {}",
-                                if open { "▾" } else { "▸" },
-                                if open { "hide" } else { "show" }
-                            ))
-                            .on_click(
-                                cx.listener(move |this, _, _, cx| this.toggle_opened(&key, cx)),
-                            ),
+                            .font_family(crate::terminal::mono(cx))
+                            .child(text.to_string()),
                     )
-                    .when(open, |d| {
-                        d.child(
-                            div()
-                                .p_2()
-                                .rounded_md()
-                                .border_1()
-                                .border_color(theme.border)
-                                .text_xs()
-                                .font_family(crate::terminal::mono(cx))
-                                .child(text.to_string()),
-                        )
-                    })
-                },
-            )
+                })
+            })
             .into_any_element()
-    }
-}
-
-/// `1m 05s`-style elapsed time (`formatDuration`).
-fn format_duration(ms: i64) -> String {
-    let s = (ms.max(0) as f64 / 1000.0).round() as i64;
-    if s < 60 {
-        format!("{s}s")
-    } else {
-        format!("{}m {}s", s / 60, s % 60)
     }
 }
 
@@ -1319,7 +1466,6 @@ impl ChatView {
                 } else {
                     format!("{} running in background", tasks.len())
                 })
-                .mx_3()
                 .p_2()
                 .rounded_md()
                 .border_1()
@@ -1359,22 +1505,10 @@ impl ChatView {
                         .child(
                             div()
                                 .text_color(theme.muted_foreground)
-                                .child(format_duration(now - t.since)),
+                                .child(format_duration((now - t.since) as f64)),
                         )
                 }))
                 .into_any_element(),
         )
-    }
-}
-
-#[cfg(test)]
-mod duration_tests {
-    use super::format_duration;
-    use core::prelude::v1::test;
-
-    #[test]
-    fn formats_like_electron() {
-        assert_eq!(format_duration(1_400), "1s");
-        assert_eq!(format_duration(65_000), "1m 5s");
     }
 }
