@@ -21,6 +21,8 @@ pub struct AccountChoice {
     /// Five-hour limit used, in %, when the provider has reported one.
     pub session_pct: Option<i64>,
     pub signed_in: bool,
+    /// The plan a status check reported ("Pro", "Max"), if any.
+    pub plan: Option<String>,
 }
 
 pub(super) struct AccountPicker {
@@ -312,9 +314,9 @@ impl ChatView {
                             if !a.signed_in {
                                 Some("Not signed in".to_string())
                             } else if on {
-                                plan.clone()
+                                plan.clone().or_else(|| a.plan.clone())
                             } else {
-                                None
+                                a.plan.clone()
                             },
                             |d, sub| {
                                 d.child(

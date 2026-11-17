@@ -119,6 +119,7 @@ impl Shell {
                         .and_then(|l| live_window(l.five_hour, now))
                         .map(|w| (w.utilization * 100.0).round() as i64),
                     signed_in: a.signed_in,
+                    plan: self.plans.get(&a.id).cloned(),
                 })
                 .collect();
             let current = account.map(|a| a.id.clone());
