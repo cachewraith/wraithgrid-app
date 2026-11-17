@@ -10,24 +10,28 @@ use std::time::Duration;
 use crate::a11y::A11y as _;
 use futures::StreamExt as _;
 use gpui_kit::component::input::{self, InputEvent, Textarea, TextareaState};
-use gpui_kit::component::text::{TextView, TextViewState};
+use gpui_kit::component::text::{TextViewMotion, TextViewState};
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wraithgrid_chat::files::{rank_paths, system_git, FileLister};
 use wraithgrid_chat::slash::{
-    build_slash_items, file_item, file_query, leading_command, rank_slash, slash_query,
-    split_mentions, SlashItem,
+    build_slash_items, file_item, file_query, leading_command, mention_query, rank_slash,
+    slash_query, split_mentions, SlashGroup, SlashItem, SLASH_LIMIT,
 };
 use wraithgrid_chat::views::{load_view, save_view};
 use wraithgrid_chat::{
     chat_adapter_for, now_ms, ApprovalDecision, ArgsOptions, ChatEvent, ChatItem, ChatLaunch,
-    ChatSession, ChatStatus, ChatThread, ItemLevel, ToolItem, ToolPreview,
+    ChatSession, ChatStatus, ChatThread, ItemLevel,
 };
-use wraithgrid_chat::{cycle_modes, ChatImage, ChatImageType, ChatMode, ChatModel};
+use wraithgrid_chat::{
+    ChatImage, ChatImageType, ChatMode, ChatModel, CHAT_IMAGES_MAX, CHAT_IMAGE_MAX,
+};
 
 mod accounts;
 mod extras;
+mod pickers;
+mod transcript;
 pub use accounts::AccountChoice;
 
 pub use extras::Queued;
@@ -84,10 +88,13 @@ pub enum ChatViewEvent {
     SignIn(String),
 }
 
-/// The `/` or `@` menu over the composer: its items and where the word it completes starts.
+/// The `/`, `$` or `@` menu over the composer (`SlashMenu`): its items, the sigil that opened
+/// it, what was typed after it, and where the word it completes starts.
 struct Menu {
     items: Vec<SlashItem>,
     selected: usize,
+    sigil: char,
+    query: String,
     start: usize,
 }
 
@@ -98,8 +105,18 @@ enum Picker {
     Mode,
 }
 
-/// claude's own aliases, offered before the CLI has listed its models.
-fn fallback_models() -> Vec<ChatModel> {
+/// Why the CLI isn't running (`chat-bar err`): it could not start, or it stopped.
+struct Stopped {
+    message: Option<String>,
+    spawn_error: bool,
+}
+
+/// claude's own aliases, offered before the CLI has listed its models. Other CLIs list theirs
+/// once started; until then the picker says so.
+fn fallback_models(cli: &str) -> Vec<ChatModel> {
+    if cli != "claude" {
+        return Vec::new();
+    }
     [("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku")]
         .iter()
         .map(|(v, l)| ChatModel {
@@ -127,10 +144,14 @@ pub struct ChatView {
     thread: ChatThread,
     setup: ChatSetup,
     session: Option<ChatSession>,
+    /// Set while the CLI is not running because it failed to start or stopped.
+    exit: Option<Stopped>,
     composer: Entity<TextareaState>,
     markdown: HashMap<String, Entity<TextViewState>>,
     views_dir: PathBuf,
     scroll: ScrollHandle,
+    /// The `/` menu's list, kept so the highlighted row stays in view.
+    menu_scroll: ScrollHandle,
     /// Under the box: the folder and branch.
     meta: Vec<String>,
     /// Redraws every second while a turn or background work runs (the elapsed times).
@@ -148,6 +169,7 @@ pub struct ChatView {
     x: extras::Extras,
     _events: Option<Task<()>>,
     _save: Option<Task<()>>,
+    _files: Option<Task<()>>,
     _subscription: Subscription,
 }
 
@@ -162,23 +184,32 @@ impl ChatView {
         let thread = ChatThread::parse(load_view(&views_dir, &pane_id).as_deref());
         let composer = cx.new(|cx| {
             TextareaState::new(window, cx)
-                .placeholder("Message the agent (Enter sends, Shift+Enter for a new line)")
+                .placeholder("Starting…")
                 .submit_on_enter(true)
                 .auto_grow(1, 10)
         });
         let sub = Self::composer_events(&composer, window, cx);
         let scroll = ScrollHandle::new();
         scroll.scroll_to_bottom();
+        // The CLI starts as the view opens (`requestStart`), so its models and commands are
+        // there before the first message. After this update: a handoff made with the view
+        // starts it itself.
+        cx.spawn(async move |this, cx| {
+            let _ = this.update(cx, |this, cx| this.start_on_open(cx));
+        })
+        .detach();
         ChatView {
             pane_id,
             focus: cx.focus_handle(),
             thread,
             setup,
             session: None,
+            exit: None,
             composer,
             markdown: HashMap::new(),
             views_dir,
             scroll,
+            menu_scroll: ScrollHandle::new(),
             _tick: None,
             meta: Vec::new(),
             error: None,
@@ -191,6 +222,7 @@ impl ChatView {
             x: extras::Extras::default(),
             _events: None,
             _save: None,
+            _files: None,
             _subscription: sub,
         }
     }
@@ -206,13 +238,17 @@ impl ChatView {
             window,
             |this, _, e: &InputEvent, window, cx| match e {
                 InputEvent::PressEnter { shift: false, .. } => {
-                    if this.menu.is_some() {
+                    if this.menu.as_ref().is_some_and(|m| !m.items.is_empty()) {
                         this.accept_menu(window, cx);
                     } else {
                         this.send(window, cx);
                     }
                 }
-                InputEvent::Change => this.update_menu(cx),
+                InputEvent::Change => {
+                    // Typing ends walking through earlier prompts.
+                    this.x.history = Default::default();
+                    this.update_menu(cx);
+                }
                 _ => {}
             },
         )
@@ -231,8 +267,64 @@ impl ChatView {
         self.composer.focus_handle(cx)
     }
 
+    /// The CLI's name for the box's placeholder and the first screen.
+    fn cli_label(&self) -> &'static str {
+        wraithgrid_core::agent_cli::AgentCli::parse(&self.setup.cli)
+            .map_or("the agent", |c| c.spec().label)
+    }
+
+    /// The process is up and nothing stopped it: messages go straight to it.
+    fn ready(&self) -> bool {
+        self.exit.is_none() && self.session.as_ref().is_some_and(|s| s.is_running())
+    }
+
+    /// Starts the CLI when the view opens, unless something (a handoff) already did. A CLI
+    /// that can't start says why in the bar above the box.
+    fn start_on_open(&mut self, cx: &mut Context<Self>) {
+        if self.session.as_ref().is_some_and(|s| s.is_running()) || self.exit.is_some() {
+            return;
+        }
+        self.start_or_report(cx);
+    }
+
+    /// [`Self::start`], with a failure kept for the stopped bar.
+    fn start_or_report(&mut self, cx: &mut Context<Self>) -> bool {
+        match self.start(cx) {
+            Ok(()) => {
+                self.exit = None;
+                true
+            }
+            Err(e) => {
+                self.exit = Some(Stopped {
+                    message: Some(e),
+                    spawn_error: true,
+                });
+                cx.notify();
+                false
+            }
+        }
+    }
+
+    /// The stopped bar's Restart: the CLI again, resuming the conversation.
+    fn restart(&mut self, cx: &mut Context<Self>) {
+        if let Some(s) = self.session.take() {
+            s.stop();
+        }
+        self.exit = None;
+        self.error = None;
+        self.start_or_report(cx);
+        cx.notify();
+    }
+
     /// Starts the CLI, resuming the pane's conversation when it has one.
     fn start(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
+        // Checked first: a CLI without a chat adapter says so whether or not it is installed.
+        let adapter = chat_adapter_for(&self.setup.cli).ok_or_else(|| {
+            format!(
+                "The chat view for {} isn't ported yet. Open its CLI in a terminal.",
+                self.setup.cli
+            )
+        })?;
         // Not found when the view was made (the login-shell PATH may not have been in yet):
         // look again with the PATH as it is now.
         if self.setup.program.is_none() {
@@ -250,12 +342,6 @@ impl ChatView {
             .program
             .clone()
             .ok_or_else(|| format!("{} was not found on PATH. Set its path in Settings.", s.cli))?;
-        let adapter = chat_adapter_for(&s.cli).ok_or_else(|| {
-            format!(
-                "The chat view for {} isn't ported yet. Open its CLI in a terminal.",
-                s.cli
-            )
-        })?;
         let mut launch = ChatLaunch::new(program, s.cwd.clone());
         // Codex reads the project's CLAUDE.md when it has no AGENTS.md, as its terminals do.
         if let Some(cli) = wraithgrid_core::agent_cli::AgentCli::parse(&s.cli) {
@@ -292,6 +378,7 @@ impl ChatView {
             }
         }));
         self.session = Some(session);
+        cx.notify();
         Ok(())
     }
 
@@ -317,11 +404,26 @@ impl ChatView {
                     error: error.clone(),
                 });
             }
+            // A new turn: the last one's error line has had its say.
+            ChatEvent::Busy { busy: true } => self.error = None,
+            ChatEvent::Text { .. } => self.x.text_at = now_ms(),
+            ChatEvent::Exit {
+                code,
+                signal,
+                error,
+            } => {
+                self.exit = Some(Stopped {
+                    message: error.clone().or_else(|| match (code, signal) {
+                        (Some(c), _) if *c != 0 => Some(format!("Exit code {c}.")),
+                        (_, Some(s)) => Some(format!("Signal {s}.")),
+                        _ => None,
+                    }),
+                    spawn_error: false,
+                });
+            }
             _ => {}
         }
         let before = (self.thread.session_id.clone(), self.thread.status());
-        // Follow the answer only from the bottom: reading earlier output must stay possible.
-        let follow = self.at_bottom();
         self.thread.update(e, now_ms());
         if self.thread.session_id != before.0 {
             if let Some(id) = self.thread.session_id.clone() {
@@ -330,9 +432,6 @@ impl ChatView {
         }
         if self.thread.status() != before.1 {
             cx.emit(ChatViewEvent::Status(self.thread.status()));
-        }
-        if follow {
-            self.scroll.scroll_to_bottom();
         }
         self.ensure_tick(cx);
         self.schedule_save(cx);
@@ -372,66 +471,150 @@ impl ChatView {
     /// Debug builds only: types `text` into the composer and sends it, for tests.
     pub fn send_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         if cfg!(debug_assertions) {
-            self.composer
-                .update(cx, |c, cx| c.set_value(text.to_string(), window, cx));
+            self.set_box(text.to_string(), None, window, cx);
             self.send(window, cx);
         }
     }
 
-    /// Recomputes the `/` or `@` menu for the word the caret is in.
-    fn update_menu(&mut self, cx: &mut Context<Self>) {
+    /// Puts `text` in the box with the caret at `caret` (the end when None). Setting a value
+    /// leaves a multi-line box's caret at 0, and sends no change event.
+    fn set_box(
+        &mut self,
+        text: String,
+        caret: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let at = caret.unwrap_or(text.len()).min(text.len());
+        self.composer.update(cx, |c, cx| {
+            c.set_value(text, window, cx);
+            c.set_selected_range(at..at, cx);
+        });
+    }
+
+    /// The box's text and caret.
+    fn box_state(&self, cx: &App) -> (String, usize) {
         let state = self.composer.read(cx);
         let text = state.value().to_string();
-        // A caret still at 0 with text in the box is one that was set, not typed: the end.
-        let caret = match state.cursor().min(text.len()) {
-            0 => text.len(),
-            c => c,
-        };
-        self.menu = if let Some(q) = slash_query(&text, caret) {
-            let items = rank_slash(
-                &build_slash_items(&self.thread.commands, &self.thread.terminal_only),
-                q,
-                12,
-            );
-            (!items.is_empty()).then_some(Menu {
-                items,
-                selected: 0,
-                start: 0,
-            })
+        let caret = state.cursor().min(text.len());
+        (text, caret)
+    }
+
+    /// Recomputes the `/`, `$` or `@` menu for the word the caret is in. A menu closed with
+    /// Esc stays closed until the text changes.
+    fn update_menu(&mut self, cx: &mut Context<Self>) {
+        let (text, caret) = self.box_state(cx);
+        if self.x.dismissed.as_deref() == Some(text.as_str()) {
+            self.menu = None;
+            return cx.notify();
+        }
+        self.x.dismissed = None;
+        let all = build_slash_items(&self.thread.commands, &self.thread.terminal_only);
+        let mentions: Vec<SlashItem> = all.iter().filter(|c| c.sigil == '$').cloned().collect();
+        let next = if let Some(q) = slash_query(&text, caret) {
+            // Shown even when nothing matches: "No command matches".
+            Some(('/', q.to_string(), 0, rank_slash(&all, q, SLASH_LIMIT)))
+        } else if let Some(w) = (!mentions.is_empty())
+            .then(|| mention_query(&text, caret))
+            .flatten()
+        {
+            let items = rank_slash(&mentions, &w.query, SLASH_LIMIT);
+            (!items.is_empty()).then_some(('$', w.query, w.start, items))
         } else if let Some(w) = file_query(&text, caret) {
-            let paths = file_lister().list(&self.setup.cwd);
-            let items: Vec<SlashItem> = rank_paths(&paths, &w.query, 12)
+            self.list_files(cx);
+            let items: Vec<SlashItem> = rank_paths(&self.x.paths, &w.query, 12)
                 .iter()
                 .map(|p| file_item(p))
                 .collect();
-            (!items.is_empty()).then_some(Menu {
-                items,
-                selected: 0,
-                start: w.start,
-            })
+            (!items.is_empty()).then_some(('@', w.query, w.start, items))
         } else {
             None
         };
+        self.menu = next.map(|(sigil, query, start, items)| {
+            // The highlight stays while the same word is typed at; a new word starts at the top.
+            let selected = self
+                .menu
+                .as_ref()
+                .filter(|m| m.sigil == sigil && m.query == query)
+                .map_or(0, |m| m.selected.min(items.len().saturating_sub(1)));
+            Menu {
+                items,
+                selected,
+                sigil,
+                query,
+                start,
+            }
+        });
         cx.notify();
     }
 
-    /// Puts the picked item in place of the word being typed.
+    /// The pane's file list for the `@` menu, read off the UI thread (`git ls-files`); the
+    /// menu is ranked again when it comes. Until then the last list is used.
+    fn list_files(&mut self, cx: &mut Context<Self>) {
+        if self._files.is_some() {
+            return;
+        }
+        let cwd = self.setup.cwd.clone();
+        self._files = Some(cx.spawn(async move |this, cx| {
+            let paths = cx
+                .background_executor()
+                .spawn(async move { file_lister().list(&cwd) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this._files = None;
+                if this.x.paths != paths {
+                    this.x.paths = paths;
+                    if this.menu.as_ref().is_none_or(|m| m.sigil == '@') {
+                        this.update_menu(cx);
+                    }
+                }
+            });
+        }));
+    }
+
+    /// Puts the picked item in place of the word being typed (`pick` of Composer.tsx). One of
+    /// Wraithgrid's own commands runs at once.
     fn accept_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(menu) = self.menu.take() else { return };
-        let Some(item) = menu.items.get(menu.selected) else {
+        let Some(item) = menu.items.get(menu.selected).cloned() else {
             return;
         };
-        let text = self.composer.read(cx).value().to_string();
-        let caret = self.composer.read(cx).cursor().min(text.len());
-        let next = format!(
-            "{}{}{} {}",
-            &text[..menu.start],
-            item.sigil,
-            item.name,
-            text[caret..].trim_start()
-        );
-        self.composer
-            .update(cx, |c, cx| c.set_value(next, window, cx));
+        let (text, caret) = self.box_state(cx);
+        if item.group == SlashGroup::App {
+            self.set_box(String::new(), None, window, cx);
+            self.app_command(&item.name, window, cx);
+            return;
+        }
+        let start = menu.start.min(caret);
+        let rest = &text[caret..];
+        let (next, at) = match item.sigil {
+            '@' => {
+                // A file replaces the `@word`; a folder stays open (`@src/`) to go on into it.
+                let dir = item.name.ends_with('/');
+                let head = format!(
+                    "{}@{}{}",
+                    &text[..start],
+                    item.name,
+                    if dir { "" } else { " " }
+                );
+                let tail = if dir { rest } else { rest.trim_start() };
+                (format!("{head}{tail}"), head.len())
+            }
+            '$' => {
+                let head = format!("{}${} ", &text[..start], item.name);
+                (format!("{head}{}", rest.trim_start()), head.len())
+            }
+            // A `/` command is the text.
+            _ => {
+                let head = format!("/{} ", item.name);
+                (head.clone(), head.len())
+            }
+        };
+        self.set_box(next, Some(at), window, cx);
+        self.composer.update(cx, |c, cx| c.focus(window, cx));
+        if item.sigil == '@' && item.name.ends_with('/') {
+            self.update_menu(cx);
+        }
         cx.notify();
     }
 
@@ -442,55 +625,74 @@ impl ChatView {
         }
     }
 
+    /// Any of the chips' lists is open.
+    fn popover_open(&self) -> bool {
+        self.picker.is_some() || self.account_picker.is_some() || self.x.later_open()
+    }
+
+    /// Closes the chips' lists (a click outside, Esc).
+    fn close_popovers(&mut self, cx: &mut Context<Self>) {
+        self.picker = None;
+        self.account_picker = None;
+        self.x.close_later();
+        self.x.bypass_confirm = false;
+        cx.notify();
+    }
+
     /// ↑ / ↓ / Tab / Esc as the text box's actions: the `/` and `@` menu takes them first, then
-    /// ↑ / ↓ walk earlier prompts. True when taken (the box doesn't move its caret).
+    /// ↑ / ↓ walk earlier prompts; Esc closes a list, else stops a running turn. True when
+    /// taken (the box doesn't move its caret).
     fn composer_nav(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if let Some(menu) = &mut self.menu {
-            let n = menu.items.len().max(1);
+            let n = menu.items.len();
             match key {
-                "down" => menu.selected = (menu.selected + 1) % n,
-                "up" => menu.selected = (menu.selected + n - 1) % n,
-                "tab" => self.accept_menu(window, cx),
-                "escape" => self.menu = None,
+                "down" if n > 0 => menu.selected = (menu.selected + 1) % n,
+                "up" if n > 0 => menu.selected = (menu.selected + n - 1) % n,
+                "tab" if n > 0 => self.accept_menu(window, cx),
+                "escape" => {
+                    self.x.dismissed = Some(self.box_state(cx).0);
+                    self.menu = None;
+                }
                 _ => return false,
             }
             cx.notify();
             return true;
         }
         match key {
-            "up" | "down" if self.picker.is_none() => self.history_key(key == "up", window, cx),
+            "escape" if self.popover_open() => {
+                self.close_popovers(cx);
+                true
+            }
+            "escape" if self.thread.busy => {
+                self.stop(cx);
+                true
+            }
+            "up" | "down" if !self.popover_open() => self.history_key(key == "up", window, cx),
             _ => false,
         }
     }
 
-    /// Shift+Tab steps through the modes, as in Claude Code.
-    fn cycle_mode(&mut self, cx: &mut Context<Self>) {
-        let auto = self.current_model().is_some_and(|m| m.auto_mode);
-        let modes = cycle_modes(auto);
-        let now = self
-            .thread
-            .mode
-            .or(self.setup.mode)
-            .unwrap_or(ChatMode::Default);
-        let next = modes
-            .iter()
-            .position(|x| *x == now)
-            .map_or(modes[0], |i| modes[(i + 1) % modes.len()]);
-        self.choose_mode(next, cx);
-    }
-
-    /// An image on the clipboard is attached rather than pasted as text.
+    /// An image on the clipboard is attached rather than pasted as text: all of them, up to
+    /// the limits.
     fn paste_image(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(item) = cx.read_from_clipboard() else {
             return false;
         };
-        for entry in item.entries() {
-            if let ClipboardEntry::Image(image) = entry {
-                self.attach_image(image.clone(), cx);
-                return true;
-            }
+        let images: Vec<Image> = item
+            .entries()
+            .iter()
+            .filter_map(|e| match e {
+                ClipboardEntry::Image(image) => Some(image.clone()),
+                _ => None,
+            })
+            .collect();
+        if images.is_empty() {
+            return false;
         }
-        false
+        for image in images {
+            self.attach_image(image, cx);
+        }
+        true
     }
 
     /// Debug builds only: attaches files as if dropped, for tests.
@@ -512,37 +714,71 @@ impl ChatView {
                 return cx.notify();
             }
         };
+        if self.images.len() >= CHAT_IMAGES_MAX {
+            self.error = Some(format!("A message takes {CHAT_IMAGES_MAX} images at most."));
+            return cx.notify();
+        }
         let data = base64::engine::general_purpose::STANDARD.encode(&image.bytes);
+        if data.len() > CHAT_IMAGE_MAX {
+            self.error = Some("That image is too big to send (about 5 MB at most).".into());
+            return cx.notify();
+        }
         self.images
             .push((ChatImage { media_type, data }, Arc::new(image)));
         cx.notify();
     }
 
-    fn current_model(&self) -> Option<ChatModel> {
-        let models = if self.thread.models.is_empty() {
-            fallback_models()
+    /// The models to pick from: the CLI's list, or claude's aliases before it has said.
+    fn models(&self) -> Vec<ChatModel> {
+        if self.thread.models.is_empty() {
+            fallback_models(&self.setup.cli)
         } else {
             self.thread.models.clone()
-        };
-        let want = self.thread.model.clone().or(self.setup.model.clone());
-        match want {
-            // A full model id the list doesn't name (claude-opus-…): shown as it is.
-            Some(w) => models
-                .iter()
-                .find(|m| m.value == w || w.contains(&m.value))
-                .cloned()
-                .or(Some(ChatModel {
-                    value: w.clone(),
-                    label: w,
-                    description: String::new(),
-                    efforts: models
-                        .first()
-                        .map(|m| m.efforts.clone())
-                        .unwrap_or_default(),
-                    auto_mode: false,
-                })),
-            None => models.first().cloned(),
         }
+    }
+
+    /// The chosen model as the list names it: the pick, else the CLI's `default` entry, else
+    /// the first (what effort and auto mode go by).
+    fn current_model(&self) -> Option<ChatModel> {
+        let models = self.models();
+        let want = self.setup.model.as_deref().unwrap_or("default");
+        models
+            .iter()
+            .find(|m| m.value == want)
+            .or_else(|| models.first())
+            .cloned()
+    }
+
+    /// The model chip's label: the pick shows at once, else what the CLI runs.
+    fn model_label(&self) -> String {
+        let models = self.models();
+        let want = self.setup.model.as_deref().unwrap_or("default");
+        match models.iter().find(|m| m.value == want) {
+            // claude's "Default (recommended)" names the model in its description.
+            Some(m) if m.value == "default" => m
+                .description
+                .split('·')
+                .next()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("Default")
+                .to_string(),
+            Some(m) => m.label.clone(),
+            None => self
+                .setup
+                .model
+                .clone()
+                .or_else(|| self.thread.model.clone())
+                .unwrap_or_else(|| "Model".into()),
+        }
+    }
+
+    /// The permission mode as picked (the CLI's report follows it, and puts back a refusal).
+    fn current_mode(&self) -> ChatMode {
+        self.thread
+            .mode
+            .or(self.setup.mode)
+            .unwrap_or(ChatMode::Default)
     }
 
     fn emit_choices(&mut self, cx: &mut Context<Self>) {
@@ -553,42 +789,70 @@ impl ChatView {
         });
     }
 
-    fn choose_model(&mut self, value: String, cx: &mut Context<Self>) {
-        if let Some(session) = self.session.as_ref().filter(|s| s.is_running()) {
-            session.set_model(&value);
+    /// The CLI couldn't switch over its pipe (agy, #41): an idle chat restarts with the new
+    /// choice and resumes its conversation.
+    fn restart_if_idle(&mut self, cx: &mut Context<Self>) {
+        if self
+            .session
+            .as_ref()
+            .is_some_and(|s| s.is_running() && !s.is_busy())
+        {
+            if let Some(s) = self.session.take() {
+                s.stop();
+            }
+            self.start_or_report(cx);
         }
-        self.setup.model = Some(value);
+    }
+
+    /// `default` is the CLI's own "Default (recommended)" entry: picking it clears the choice.
+    fn choose_model(&mut self, value: String, cx: &mut Context<Self>) {
+        let live = self
+            .session
+            .as_ref()
+            .filter(|s| s.is_running())
+            .map(|s| s.set_model(&value));
+        self.setup.model = (value != "default").then_some(value);
         self.picker = None;
+        if live == Some(false) {
+            self.restart_if_idle(cx);
+        }
         self.emit_choices(cx);
         cx.notify();
     }
 
-    /// Effort is a start option: an idle chat restarts with it on the next message.
+    /// Effort is a start option: an idle chat restarts with it and carries on.
     fn choose_effort(&mut self, effort: Option<String>, cx: &mut Context<Self>) {
-        self.setup.effort = effort;
-        if self.session.as_ref().is_some_and(|s| !s.is_busy()) {
-            if let Some(s) = self.session.take() {
-                s.stop();
-            }
+        if self.thread.busy {
+            return;
         }
+        self.setup.effort = effort;
         self.picker = None;
+        self.restart_if_idle(cx);
         self.emit_choices(cx);
         cx.notify();
     }
 
     fn choose_mode(&mut self, mode: ChatMode, cx: &mut Context<Self>) {
-        if let Some(session) = self.session.as_ref().filter(|s| s.is_running()) {
-            session.set_mode(mode);
-        }
+        let live = self
+            .session
+            .as_ref()
+            .filter(|s| s.is_running())
+            .map(|s| s.set_mode(mode));
         self.setup.mode = Some(mode);
         self.thread.mode = Some(mode);
         self.picker = None;
+        self.x.bypass_confirm = false;
+        if live == Some(false) {
+            self.restart_if_idle(cx);
+        }
         self.emit_choices(cx);
         cx.notify();
     }
 
     /// `/new`, `/model`, `/effort`, `/mode`, `/usage`: Wraithgrid's own commands.
     fn app_command(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.account_picker = None;
+        self.x.close_later();
         match name {
             "new" | "clear" => {
                 if let Some(s) = self.session.take() {
@@ -597,16 +861,29 @@ impl ChatView {
                 self.thread = ChatThread::new();
                 self.setup.session_id = None;
                 self.markdown.clear();
+                // Ids start over with the new thread: nothing kept by id may carry over.
+                self.x.sent.clear();
+                self.x.thumbs.clear();
+                self.x.opened.clear();
+                self.exit = None;
+                self.error = None;
                 self.schedule_save(cx);
+                self.start_or_report(cx);
             }
             "model" => self.picker = Some(Picker::Model),
-            "effort" => self.picker = Some(Picker::Effort),
+            "effort" => {
+                if self.efforts().is_empty() {
+                    self.error = Some("This model has no effort setting.".into());
+                } else {
+                    self.picker = Some(Picker::Effort);
+                }
+            }
             "mode" | "permissions" => self.picker = Some(Picker::Mode),
             "usage" => cx.emit(ChatViewEvent::OpenUsage),
             _ => return false,
         }
-        self.composer
-            .update(cx, |c, cx| c.set_value("", window, cx));
+        self.set_box(String::new(), None, window, cx);
+        self.menu = None;
         cx.notify();
         true
     }
@@ -628,12 +905,13 @@ impl ChatView {
     ) {
         self.thread
             .add_handoff(text, messages, from_cli, to_cli, divider);
-        if let Err(e) = self.start(cx) {
-            self.error = Some(e);
-        } else if let Some(session) = &self.session {
-            session.send(text, &[], &[]);
-            self.thread.busy = true;
-            self.thread.turn_started_at = Some(now_ms());
+        let running = self.session.as_ref().is_some_and(|s| s.is_running());
+        if running || self.start_or_report(cx) {
+            if let Some(session) = &self.session {
+                session.send(text, &[], &[]);
+                self.thread.busy = true;
+                self.thread.turn_started_at = Some(now_ms());
+            }
         }
         self.schedule_save(cx);
         cx.notify();
@@ -644,58 +922,66 @@ impl ChatView {
         self.app_command("new", window, cx);
     }
 
-    /// Puts `text` into the box after what is there, unsent ("Attach to chat" from a preview).
+    /// A report handed to the chat ("Attach to chat" from a preview, #74): a removable chip
+    /// over the box, sent after the message.
     pub fn add_to_draft(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let cur = self.composer.read(cx).value().trim_end().to_string();
-        let next = if cur.is_empty() {
-            text.to_string()
+        let first = text
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .unwrap_or("Report");
+        let label = first.trim_start_matches(['#', ' ']);
+        let label = if label.chars().count() > 60 {
+            format!("{}…", wraithgrid_chat::take_chars(label, 60))
         } else {
-            format!("{cur}\n\n{text}")
+            label.to_string()
         };
-        self.composer.update(cx, |c, cx| {
-            c.set_value(next, window, cx);
-            c.focus(window, cx);
-        });
+        self.x.notes.push((label, text.to_string()));
+        self.composer.update(cx, |c, cx| c.focus(window, cx));
         cx.notify();
     }
 
     /// Debug builds only: types `text` without sending, so the menus can be looked at.
     pub fn type_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         if cfg!(debug_assertions) {
-            self.composer
-                .update(cx, |c, cx| c.set_value(text.to_string(), window, cx));
+            self.set_box(text.to_string(), None, window, cx);
             self.update_menu(cx);
         }
     }
 
+    /// Something to send: text, images, files, reports or quotes.
+    fn can_send(&self, cx: &App) -> bool {
+        !self.composer.read(cx).value().trim().is_empty()
+            || !self.images.is_empty()
+            || !self.x.quotes.is_empty()
+            || !self.x.files.is_empty()
+            || !self.x.notes.is_empty()
+    }
+
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let typed = self.composer.read(cx).value().trim().to_string();
-        if typed.is_empty()
-            && self.images.is_empty()
-            && self.x.quotes.is_empty()
-            && self.x.files.is_empty()
-        {
+        if !self.can_send(cx) {
             return;
         }
-        // Reply quotes go first, as markdown blockquotes (#164).
-        let text = wraithgrid_chat::compose::with_quotes(&self.x.quotes, &typed)
-            .trim()
-            .to_string();
-        self.x.quotes.clear();
-        self.x.history = Default::default();
-        if let Some(cmd) = leading_command(&text).filter(|c| c.rest.trim().is_empty()) {
-            if self.app_command(&cmd.name, window, cx) {
-                return;
+        let typed = self.composer.read(cx).value().trim().to_string();
+        if self.x.quotes.is_empty() && self.x.notes.is_empty() {
+            if let Some(cmd) = leading_command(&typed).filter(|c| c.rest.trim().is_empty()) {
+                if self.app_command(&cmd.name, window, cx) {
+                    return;
+                }
             }
         }
-        if self.session.as_ref().is_none_or(|s| !s.is_running()) {
-            if let Err(e) = self.start(cx) {
-                self.error = Some(e);
+        // Reply quotes go first, as markdown blockquotes (#164); handed-in reports after.
+        let text = self.x.take_message(&typed);
+        if !self.ready() {
+            if let Some(s) = self.session.take() {
+                s.stop();
+            }
+            if !self.start_or_report(cx) {
                 return cx.notify();
             }
         }
         self.error = None;
-        let images: Vec<ChatImage> = self.images.drain(..).map(|(i, _)| i).collect();
+        let (images, shown): (Vec<ChatImage>, Vec<Arc<Image>>) = self.images.drain(..).unzip();
         // Attached files, then `@path` mentions, go to the CLI as files, as the Electron chat
         // sends them.
         let mut files: Vec<String> = std::mem::take(&mut self.x.files);
@@ -706,24 +992,52 @@ impl ChatView {
             }
         }
         files.truncate(wraithgrid_chat::CHAT_FILES_MAX);
-        self.thread.add_user_message(&text, images.len(), now_ms());
+        let id = self.thread.add_user_message(&text, images.len(), now_ms());
+        if !shown.is_empty() {
+            self.x.sent.insert(id.clone(), shown);
+            self.make_thumbs(id, images.clone(), cx);
+        }
         if let Some(session) = &self.session {
             if !session.send(&text, &images, &files) {
                 self.error = Some("The message is too long to send.".into());
             }
         }
-        self.composer
-            .update(cx, |c, cx| c.set_value("", window, cx));
+        self.set_box(String::new(), None, window, cx);
+        self.menu = None;
         cx.emit(ChatViewEvent::Submitted { text });
-        self.scroll.scroll_to_bottom();
+        self.x.unstuck = false;
+        self.ensure_tick(cx);
         self.schedule_save(cx);
         cx.notify();
     }
 
+    /// The sent images' thumbnails for the saved view (#50), made off the UI thread.
+    fn make_thumbs(&mut self, id: String, images: Vec<ChatImage>, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let thumbs: Vec<String> = cx
+                .background_executor()
+                .spawn(async move {
+                    images
+                        .iter()
+                        .filter_map(wraithgrid_chat::attach::thumb_data_url)
+                        .collect()
+                })
+                .await;
+            if thumbs.is_empty() {
+                return;
+            }
+            let _ = this.update(cx, |this, cx| {
+                if this.thread.set_user_thumbs(&id, thumbs) {
+                    this.schedule_save(cx);
+                }
+            });
+        })
+        .detach();
+    }
+
     /// Sends `text` again (a message the limit refused, after a switch).
     pub fn resend(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.composer
-            .update(cx, |c, cx| c.set_value(text.to_string(), window, cx));
+        self.set_box(text.to_string(), None, window, cx);
         self.send(window, cx);
     }
 
@@ -795,220 +1109,48 @@ impl ChatView {
             state.update(cx, |s, cx| s.set_text(text, cx));
             return state;
         }
-        let state = cx.new(|cx| TextViewState::markdown(text, cx));
+        // Streamed words fade in as they come (#62); text already there shows at once.
+        let state = cx.new(|cx| {
+            TextViewState::markdown(text, cx).motion(
+                TextViewMotion::default()
+                    .with_stream_fade(Duration::from_millis(240))
+                    .with_stream_fade_stagger(Duration::from_millis(16)),
+            )
+        });
         self.markdown.insert(id.to_string(), state.clone());
         state
     }
 
-    fn tool_card(&self, t: &ToolItem, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
-        let mono = crate::terminal::mono(cx);
-        // Claude's questions (#127): one quiet line; the questions are in the card below.
-        if let Some((asked, a)) = t
-            .approval
-            .as_ref()
-            .and_then(|a| a.questions.as_ref().map(|q| (q.len(), a)))
-            .filter(|(n, _)| *n > 0)
-        {
-            let waiting = a.decided.is_none();
-            let word = match a.decided {
-                None => "waiting for you",
-                Some(ApprovalDecision::Deny) => "skipped",
-                Some(_) => "answered",
-            };
-            return div()
-                .px_2()
-                .py_1()
-                .flex()
-                .gap_2()
-                .text_sm()
-                .text_color(theme.muted_foreground)
-                .child(div().flex_1().child(format!(
-                    "Claude {} {asked} {}",
-                    if waiting { "asks" } else { "asked" },
-                    if asked == 1 { "question" } else { "questions" }
-                )))
-                .child(div().text_xs().child(word))
-                .into_any_element();
+    /// The box's placeholder for the chat's state (`Message Claude Code…`, `Starting…`).
+    fn sync_placeholder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let want = if self.asking() {
+            "Answer the questions above, or Skip to type instead…".to_string()
+        } else if self.exit.is_none() && !self.ready() {
+            "Starting…".to_string()
+        } else {
+            format!("Message {}…", self.cli_label())
+        };
+        if self.x.placeholder != want {
+            self.x.placeholder = want.clone();
+            self.composer
+                .update(cx, |c, cx| c.set_placeholder(want, window, cx));
         }
-        let preview: Option<AnyElement> = t.preview.as_ref().map(|p| match p {
-            ToolPreview::Code { text } => div()
-                .p_2()
-                .rounded_md()
-                .bg(theme.secondary)
-                .font_family(mono.clone())
-                .text_xs()
-                .child(text.lines().take(30).collect::<Vec<_>>().join("\n"))
-                .into_any_element(),
-            ToolPreview::Diff {
-                path,
-                before,
-                after,
-            } => {
-                let lines = before
-                    .lines()
-                    .take(40)
-                    .map(|l| (false, l.to_string()))
-                    .chain(after.lines().take(40).map(|l| (true, l.to_string())))
-                    .map(|(add, l)| {
-                        div()
-                            .px_2()
-                            .whitespace_nowrap()
-                            .bg(if add {
-                                theme.success.opacity(0.12)
-                            } else {
-                                theme.danger.opacity(0.12)
-                            })
-                            .child(format!("{}{l}", if add { "+" } else { "-" }))
-                    });
-                div()
-                    .rounded_md()
-                    .overflow_hidden()
-                    .font_family(mono.clone())
-                    .text_xs()
-                    .child(
-                        div()
-                            .px_2()
-                            .py_1()
-                            .text_color(theme.muted_foreground)
-                            .child(path.clone()),
-                    )
-                    .children(lines)
-                    .into_any_element()
+    }
+
+    /// The thread's scroll: an upward wheel stops following the answer; reaching the bottom
+    /// again follows it. A selection's Reply button goes away (it would point elsewhere).
+    fn thread_scrolled(&mut self, e: &ScrollEvent, cx: &mut Context<Self>) {
+        let dy = e.delta.pixel_delta(px(16.)).y;
+        if dy > px(0.) && self.scroll.max_offset().y > px(0.) {
+            self.x.unstuck = true;
+        } else if dy < px(0.) {
+            let off = -self.scroll.offset().y;
+            if off - dy >= self.scroll.max_offset().y - px(24.) {
+                self.x.unstuck = false;
             }
-            ToolPreview::Todos { items } => div()
-                .flex()
-                .flex_col()
-                .text_sm()
-                .children(items.iter().map(|i| {
-                    let mark = match i.status {
-                        wraithgrid_chat::TodoStatus::Done => "☑",
-                        wraithgrid_chat::TodoStatus::Active => "▸",
-                        wraithgrid_chat::TodoStatus::Pending => "☐",
-                    };
-                    div().child(format!("{mark} {}", i.text))
-                }))
-                .into_any_element(),
-        });
-        let output = t.output.as_ref().filter(|o| !o.trim().is_empty()).map(|o| {
-            let shown: String = o.lines().take(12).collect::<Vec<_>>().join("\n");
-            div()
-                .p_2()
-                .rounded_md()
-                .bg(theme.secondary)
-                .font_family(mono.clone())
-                .text_xs()
-                .when(t.is_error, |d| d.text_color(theme.danger))
-                .child(shown)
-        });
-        let approval = t
-            .approval
-            .as_ref()
-            .filter(|a| a.decided.is_none() && a.questions.is_none())
-            .map(|a| {
-                let button = |id: String, label: &'static str, primary: bool| {
-                    div()
-                        .id(SharedString::from(id))
-                        .a11y_button(label)
-                        .px_3()
-                        .py_1()
-                        .rounded_md()
-                        .text_sm()
-                        .cursor_pointer()
-                        .when(primary, |d| {
-                            d.bg(theme.primary).text_color(theme.primary_foreground)
-                        })
-                        .when(!primary, |d| d.border_1().border_color(theme.border))
-                        .child(label)
-                };
-                let (allow, always, deny) = (a.req_id.clone(), a.req_id.clone(), a.req_id.clone());
-                div()
-                    .flex()
-                    .gap_2()
-                    .child(
-                        button(format!("allow-{}", a.req_id), "Allow", true).on_click(cx.listener(
-                            move |this, _, _, cx| {
-                                this.approve(allow.clone(), ApprovalDecision::Allow, cx)
-                            },
-                        )),
-                    )
-                    .when(a.can_always, |d| {
-                        d.child(
-                            button(format!("always-{}", a.req_id), "Always allow", false).on_click(
-                                cx.listener(move |this, _, _, cx| {
-                                    this.approve(always.clone(), ApprovalDecision::Always, cx)
-                                }),
-                            ),
-                        )
-                    })
-                    .child(
-                        button(format!("deny-{}", a.req_id), "Deny", false).on_click(cx.listener(
-                            move |this, _, _, cx| {
-                                this.approve(deny.clone(), ApprovalDecision::Deny, cx)
-                            },
-                        )),
-                    )
-            });
-        let decided = t
-            .approval
-            .as_ref()
-            .and_then(|a| a.decided)
-            .map(|d| match d {
-                ApprovalDecision::Allow => "allowed",
-                ApprovalDecision::Always => "always allowed",
-                ApprovalDecision::Deny => "denied",
-            });
-        div()
-            .p_2()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .rounded_lg()
-            .border_1()
-            .border_color(if approval.is_some() {
-                theme.warning
-            } else {
-                theme.border
-            })
-            .child(
-                div()
-                    .flex()
-                    .gap_2()
-                    .text_sm()
-                    .child(div().font_weight(FontWeight::MEDIUM).child(t.name.clone()))
-                    .child(
-                        div()
-                            .flex_1()
-                            .truncate()
-                            .text_color(theme.muted_foreground)
-                            .child(t.subtitle.clone()),
-                    )
-                    .when_some(decided, |d, s| {
-                        d.child(div().text_xs().text_color(theme.muted_foreground).child(s))
-                    })
-                    .when(
-                        t.output.is_none()
-                            && t.approval.as_ref().is_none_or(|a| a.decided.is_some()),
-                        |d| {
-                            d.child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child("running…"),
-                            )
-                        },
-                    ),
-            )
-            .children(preview)
-            .children(output)
-            .children(t.result.as_ref().map(|r| {
-                div()
-                    .text_sm()
-                    .when(!r.ok, |d| d.text_color(theme.danger))
-                    .child(r.text.clone())
-            }))
-            .children(approval)
-            .into_any_element()
+        }
+        self.x.reply_at = None;
+        cx.notify();
     }
 }
 
@@ -1023,116 +1165,41 @@ impl Focusable for ChatView {
 impl Render for ChatView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
+        self.sync_placeholder(window, cx);
+        // Following the answer: the end stays in view as it grows, and as the box, a question
+        // or an approval takes room under it.
+        if self.x.unstuck && self.scroll.max_offset().y <= px(0.) {
+            self.x.unstuck = false;
+        }
+        if !self.x.unstuck {
+            self.scroll.scroll_to_bottom();
+        }
         let question = self.question_card(window, cx);
         let viewer = self.image_viewer(window, cx);
-        let items = self.thread.items.clone();
-        let mut rows: Vec<AnyElement> = Vec::with_capacity(items.len());
-        for item in &items {
-            let row = match item {
-                ChatItem::User { text, images, .. } => {
-                    // Leading reply quotes are drawn as quotes (#164).
-                    let (quotes, body) = wraithgrid_chat::compose::split_quotes(text);
-                    div()
-                        .flex()
-                        .justify_end()
-                        .child(
-                            div()
-                                .max_w(relative(0.8))
-                                .px_3()
-                                .py_2()
-                                .rounded_lg()
-                                .bg(theme.secondary)
-                                .flex()
-                                .flex_col()
-                                .gap_1()
-                                .children(quotes.into_iter().map(|q| {
-                                    div()
-                                        .pl_2()
-                                        .border_l_2()
-                                        .border_color(theme.border)
-                                        .text_sm()
-                                        .text_color(theme.muted_foreground)
-                                        .child(q)
-                                }))
-                                .when(!body.is_empty(), |d| d.child(body))
-                                .when(*images > 0, |d| {
-                                    d.child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(theme.muted_foreground)
-                                            .child(format!("{images} image(s)")),
-                                    )
-                                }),
-                        )
-                        .into_any_element()
-                }
-                ChatItem::Assistant { id, text } => {
-                    let state = self.markdown(id, text, cx);
-                    div()
-                        .child(TextView::new(&state).selectable(true))
-                        .into_any_element()
-                }
-                ChatItem::Thinking { id, text } => self.thinking(id, text, cx),
-                ChatItem::Tool(t) => self.tool_card(t, cx),
-                ChatItem::Notice { level, text, .. } => match level {
-                    ItemLevel::Divider => div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(div().flex_1().h(px(1.)).bg(theme.border))
-                        .child(text.clone())
-                        .child(div().flex_1().h(px(1.)).bg(theme.border))
-                        .into_any_element(),
-                    ItemLevel::Error => div()
-                        .text_sm()
-                        .text_color(theme.danger)
-                        .child(text.clone())
-                        .into_any_element(),
-                    ItemLevel::Info => div()
-                        .text_sm()
-                        .text_color(theme.muted_foreground)
-                        .child(text.clone())
-                        .into_any_element(),
-                },
-                ChatItem::Turn {
-                    cost_usd,
-                    duration_ms,
-                    error,
-                    ..
-                } => {
-                    let mut parts = Vec::new();
-                    if let Some(c) = cost_usd {
-                        parts.push(format!("${c:.2}"));
-                    }
-                    if let Some(d) = duration_ms {
-                        parts.push(format!("{:.1}s", d / 1000.0));
-                    }
-                    div()
-                        .text_xs()
-                        .text_color(if error.is_some() {
-                            theme.danger
-                        } else {
-                            theme.muted_foreground
-                        })
-                        .child(error.clone().unwrap_or_else(|| parts.join(" · ")))
-                        .into_any_element()
-                }
-                ChatItem::Handoff {
-                    id,
-                    text,
-                    messages,
-                    from_cli,
-                    to_cli,
-                    divider,
-                } => self.handoff(id, text, *messages, from_cli, to_cli, divider, cx),
-            };
-            rows.push(row);
-        }
-        let busy = self.thread.busy;
-        let elapsed = self.thread.turn_started_at.map(|t| (now_ms() - t) / 1000);
+        let rows = self.transcript_rows(cx);
+        let empty = rows.is_empty();
+        let hello = empty.then(|| self.hello(cx));
+        let working = self.working_line(cx);
         let jump = self.jump_button(cx);
+        let footer = div()
+            .flex_shrink_0()
+            .flex()
+            .flex_col()
+            .children(self.error_bar(cx))
+            .when(!self.x.queued.is_empty(), |d| {
+                d.child(
+                    div()
+                        .id(SharedString::from(format!("queued-{}", self.pane_id)))
+                        .max_h(px(120.))
+                        .overflow_y_scroll()
+                        .children(self.queued_rows(cx)),
+                )
+            })
+            .children(question)
+            .children(self.approval_bar(cx))
+            .children(self.stopped_bar(cx))
+            .child(self.composer_box(cx))
+            .children(self.folder_line(cx));
         div()
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::viewer_key))
@@ -1151,8 +1218,9 @@ impl Render for ChatView {
                         div()
                             .id(SharedString::from(format!("thread-{}", self.pane_id)))
                             .on_mouse_up(MouseButton::Left, cx.listener(Self::thread_mouse_up))
-                            // The jump button shows once the reader leaves the bottom.
-                            .on_scroll(cx.listener(|_, _, _, cx| cx.notify()))
+                            .on_scroll(cx.listener(|this, e: &ScrollEvent, _, cx| {
+                                this.thread_scrolled(e, cx)
+                            }))
                             .flex_1()
                             .min_h(px(0.))
                             .overflow_y_scroll()
@@ -1161,51 +1229,197 @@ impl Render for ChatView {
                             .flex()
                             .flex_col()
                             .gap_3()
-                            .when(rows.is_empty(), |d| {
-                                d.child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(theme.muted_foreground)
-                                        .child("Start the conversation below."),
-                                )
-                            })
-                            .children(rows),
+                            .children(hello)
+                            .children(rows)
+                            .children(working)
+                            .children(self.background_tasks(cx)),
                     )
                     .children(jump),
             )
-            .when_some(self.error.clone(), |d, e| {
-                d.child(div().px_3().text_sm().text_color(theme.danger).child(e))
-            })
-            .children(self.background_tasks(cx))
-            .children(self.queued_rows(cx))
-            .children(question)
-            .children(self.menu_list(cx))
-            .children(self.picker_list(cx))
-            .children(self.account_list(cx))
-            .children(self.later_panel(cx))
-            .children(self.quote_cards(cx))
-            .when(!self.images.is_empty(), |d| d.child(self.image_row(cx)))
-            .children(self.file_chips(cx))
-            .child(self.choices_row(cx))
+            .child(footer)
+            .children(self.popover_scrim(window, cx))
+            .children(self.reply_button(cx))
+            .children(viewer)
+    }
+}
+
+impl ChatView {
+    /// The error line over the box, with ×; it clears on the next turn or a restart.
+    fn error_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let e = self.error.clone()?;
+        let theme = cx.theme();
+        Some(
+            div()
+                .id(SharedString::from(format!("error-{}", self.pane_id)))
+                .role(Role::Alert)
+                .aria_label(e.clone())
+                .mx_2()
+                .mt_2()
+                .px_3()
+                .py_1()
+                .flex()
+                .items_center()
+                .gap_2()
+                .rounded_md()
+                .border_1()
+                .border_color(theme.danger.opacity(0.5))
+                .bg(theme.danger.opacity(0.08))
+                .text_sm()
+                .text_color(theme.danger)
+                .child(div().flex_1().min_w_0().child(e))
+                .child(
+                    div()
+                        .id(SharedString::from(format!("error-x-{}", self.pane_id)))
+                        .a11y_button("Dismiss")
+                        .px_1()
+                        .rounded_sm()
+                        .cursor_pointer()
+                        .hover(|d| d.bg(theme.secondary))
+                        .child("×")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.error = None;
+                            cx.notify();
+                        })),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// "The agent stopped." with Restart, or "… is not signed in" with Sign in
+    /// (`chat-bar`).
+    fn stopped_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let theme = cx.theme().clone();
+        let bar = |id: &str, err: bool| {
+            div()
+                .id(SharedString::from(format!("{id}-{}", self.pane_id)))
+                .role(Role::Status)
+                .mx_2()
+                .mt_2()
+                .px_3()
+                .py_2()
+                .flex()
+                .items_center()
+                .gap_2()
+                .rounded_md()
+                .border_1()
+                .border_color(if err {
+                    theme.danger.opacity(0.5)
+                } else {
+                    theme.border
+                })
+                .bg(if err {
+                    theme.danger.opacity(0.08)
+                } else {
+                    theme.secondary
+                })
+                .text_sm()
+        };
+        let button = |id: &str, label: &'static str| {
+            div()
+                .id(SharedString::from(format!("{id}-{}", self.pane_id)))
+                .a11y_button(label)
+                .flex_none()
+                .px_3()
+                .py_1()
+                .rounded_md()
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.background)
+                .cursor_pointer()
+                .hover(|d| d.bg(theme.secondary))
+                .child(label)
+        };
+        if let Some(stop) = &self.exit {
+            let ported = chat_adapter_for(&self.setup.cli).is_some();
+            let text = if stop.spawn_error {
+                stop.message
+                    .clone()
+                    .unwrap_or_else(|| "The agent could not start.".into())
+            } else {
+                "The agent stopped.".into()
+            };
+            let detail = (!stop.spawn_error).then(|| stop.message.clone()).flatten();
+            return Some(
+                bar("stopped", true)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_wrap()
+                            .gap_1()
+                            .child(text)
+                            .when_some(detail, |d, m| {
+                                d.child(
+                                    div()
+                                        .font_family(crate::terminal::mono(cx))
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .child(m),
+                                )
+                            }),
+                    )
+                    .when(ported, |d| {
+                        d.child(
+                            button("restart", "↻ Restart")
+                                .on_click(cx.listener(|this, _, _, cx| this.restart(cx))),
+                        )
+                    })
+                    .into_any_element(),
+            );
+        }
+        let account = self.current_choice().filter(|a| !a.signed_in)?.clone();
+        Some(
+            bar("signin", false)
+                .child(div().flex_1().min_w_0().child(format!(
+                    "{} is not signed in. Sign in once, then come back.",
+                    account.name
+                )))
+                .child(
+                    button("signin-btn", "Sign in").on_click(cx.listener(move |_, _, _, cx| {
+                        cx.emit(ChatViewEvent::SignIn(account.id.clone()))
+                    })),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// The box (`cc`): the `/` menu over it; quotes, reports, files and images; the text;
+    /// then the chips, attach, send later, stop and send.
+    fn composer_box(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let busy = self.thread.busy;
+        let can_send = self.can_send(cx);
+        let menu = self.menu_list(cx);
+        let images = (!self.images.is_empty()).then(|| self.image_row(cx));
+        div()
+            .relative()
+            .px_2()
+            .pt_2()
             .child(
                 div()
                     .id(SharedString::from(format!("composer-{}", self.pane_id)))
                     .p_2()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .rounded_lg()
                     .border_1()
-                    .border_color(gpui_kit::transparent_black())
-                    // Files dropped here are attached (#: like a paste for images).
+                    .border_color(theme.border)
+                    .bg(theme.background)
+                    // Claude's questions are open above: the box dims; it still works.
+                    .when(self.asking(), |d| d.opacity(0.6))
+                    // Files dropped here are attached (like a paste for images).
                     .drag_over::<ExternalPaths>(|d, _, _, cx| d.border_color(cx.theme().ring))
                     .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
                         this.attach_paths(paths.paths(), cx)
                     }))
-                    .flex()
-                    .items_end()
-                    .gap_2()
-                    .border_t_1()
-                    .border_color(theme.border)
+                    .children(self.quote_cards(cx))
+                    .children(self.note_chips(cx))
+                    .children(self.file_chips(cx))
+                    .children(images)
                     .child(
                         div()
-                            .flex_1()
                             .capture_key_down(cx.listener(Self::composer_key))
                             // The box binds these keys as actions; the menus, history, modes
                             // and image paste take them first.
@@ -1232,7 +1446,9 @@ impl Render for ChatView {
                                 }
                             }))
                             .capture_action(cx.listener(|this, _: &input::OutdentInline, _, cx| {
-                                this.cycle_mode(cx);
+                                if this.menu.is_none() {
+                                    this.cycle_mode(cx);
+                                }
                                 cx.stop_propagation();
                             }))
                             .capture_action(cx.listener(|this, _: &input::Paste, _, cx| {
@@ -1242,221 +1458,234 @@ impl Render for ChatView {
                             }))
                             .child(Textarea::new(&self.composer)),
                     )
-                    .child(self.attach_button(cx))
-                    .child(self.later_button(cx))
-                    .when(busy, |d| {
-                        d.child(
-                            div()
-                                .text_xs()
-                                .text_color(theme.muted_foreground)
-                                .child(format!("working… {}s", elapsed.unwrap_or(0))),
-                        )
-                        .child(
-                            div()
-                                .id(SharedString::from(format!("stop-{}", self.pane_id)))
-                                .a11y_button("Stop")
-                                .px_3()
-                                .py_1()
-                                .rounded_md()
-                                .border_1()
-                                .border_color(theme.border)
-                                .cursor_pointer()
-                                .child("Stop")
-                                .on_click(cx.listener(|this, _, _, cx| this.stop(cx))),
-                        )
-                    })
-                    .when(!busy, |d| {
-                        d.child(
-                            div()
-                                .id(SharedString::from(format!("send-{}", self.pane_id)))
-                                .a11y_button("Send")
-                                .px_3()
-                                .py_1()
-                                .rounded_md()
-                                .bg(theme.primary)
-                                .text_color(theme.primary_foreground)
-                                .cursor_pointer()
-                                .child("Send")
-                                .on_click(cx.listener(|this, _, window, cx| this.send(window, cx))),
-                        )
-                    }),
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(self.choices_row(cx))
+                            .child(self.attach_button(cx))
+                            .child(self.later_button(cx))
+                            .when(busy, |d| {
+                                d.child(
+                                    div()
+                                        .id(SharedString::from(format!("stop-{}", self.pane_id)))
+                                        .a11y_button("Stop (Esc)")
+                                        .px_3()
+                                        .py_1()
+                                        .rounded_md()
+                                        .border_1()
+                                        .border_color(theme.border)
+                                        .cursor_pointer()
+                                        .hover(|d| d.bg(theme.secondary))
+                                        .tooltip(|window, cx| {
+                                            gpui_kit::component::tooltip::Tooltip::new("Stop (Esc)")
+                                                .build(window, cx)
+                                        })
+                                        .child("■ Stop")
+                                        .on_click(cx.listener(|this, _, _, cx| this.stop(cx))),
+                                )
+                            })
+                            .child({
+                                // While a turn runs, the message waits its turn (Queue).
+                                let label = if busy { "Queue" } else { "Send" };
+                                div()
+                                    .id(SharedString::from(format!("send-{}", self.pane_id)))
+                                    .a11y_button(label)
+                                    .px_3()
+                                    .py_1()
+                                    .rounded_md()
+                                    .bg(theme.primary)
+                                    .text_color(theme.primary_foreground)
+                                    .when(can_send, |d| d.cursor_pointer())
+                                    .when(!can_send, |d| d.opacity(0.5))
+                                    .tooltip(move |window, cx| {
+                                        gpui_kit::component::tooltip::Tooltip::new(if busy {
+                                            "Queue message (Enter)"
+                                        } else {
+                                            "Send (Enter)"
+                                        })
+                                        .build(window, cx)
+                                    })
+                                    .child(label)
+                                    .on_click(
+                                        cx.listener(|this, _, window, cx| this.send(window, cx)),
+                                    )
+                            }),
+                    ),
             )
-            .when(!self.meta.is_empty(), |d| {
-                d.child(
-                    div()
-                        .px_3()
-                        .pb_1()
-                        .truncate()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(self.meta.join(" · ")),
-                )
-            })
-            .children(self.reply_button(cx))
-            .children(viewer)
+            .children(menu)
+            .into_any_element()
     }
-}
 
-impl ChatView {
-    fn menu_list(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let menu = self.menu.as_ref()?;
-        let theme = cx.theme().clone();
-        let rows = menu.items.iter().enumerate().map(|(i, item)| {
-            div()
-                .id(SharedString::from(format!("menu-{i}")))
-                .role(Role::ListItem)
-                .aria_label(format!("{}{}", item.sigil, item.name))
-                .aria_selected(i == menu.selected)
-                .when(i == menu.selected, |d| d.aria_active_descendant())
-                .px_2()
-                .py_1()
-                .flex()
-                .gap_2()
-                .rounded_md()
-                .text_sm()
-                .cursor_pointer()
-                .when(i == menu.selected, |d| d.bg(theme.secondary))
-                .child(
-                    div()
-                        .font_weight(FontWeight::MEDIUM)
-                        .child(format!("{}{}", item.sigil, item.name)),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .truncate()
-                        .text_color(theme.muted_foreground)
-                        .child(item.description.clone()),
-                )
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    if let Some(m) = this.menu.as_mut() {
-                        m.selected = i;
-                    }
-                    this.accept_menu(window, cx);
-                }))
-        });
+    /// Under the box: the folder and the branch, each shortened on its own (`cc-folder`).
+    fn folder_line(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.meta.is_empty() {
+            return None;
+        }
+        let theme = cx.theme();
+        let n = self.meta.len();
         Some(
             div()
-                .mx_2()
-                .p_1()
-                .rounded_lg()
-                .border_1()
-                .border_color(theme.border)
-                .bg(theme.popover)
+                .px_3()
+                .py_1()
                 .flex()
-                .flex_col()
-                .children(rows)
+                .gap_3()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .children(self.meta.iter().enumerate().map(|(i, m)| {
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        // The folder gives way first; the branch keeps its name when it can.
+                        .when(i + 1 < n, |d| d.flex_shrink(1.))
+                        .when(i + 1 == n && n > 1, |d| {
+                            d.flex_shrink_0().max_w(relative(0.5))
+                        })
+                        .child(m.clone())
+                }))
                 .into_any_element(),
         )
     }
 
-    fn picker_list(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let picker = self.picker?;
+    /// The `/`, `$` or `@` menu, over the box (`SlashMenu`): group headings on a bare `/`,
+    /// argument hints and sources, "No command matches" when nothing does.
+    fn menu_list(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let menu = self.menu.as_ref()?;
         let theme = cx.theme().clone();
-        let row = |id: String, label: String, detail: String, on: bool| {
-            div()
-                .id(SharedString::from(id))
-                .role(Role::ListItem)
-                .aria_label(label.clone())
-                .aria_selected(on)
-                .px_2()
-                .py_1()
-                .flex()
-                .gap_2()
-                .rounded_md()
-                .text_sm()
-                .cursor_pointer()
-                .when(on, |d| d.bg(theme.secondary))
-                .hover(|d| d.bg(theme.secondary))
-                .child(div().font_weight(FontWeight::MEDIUM).child(label))
-                .child(
-                    div()
-                        .flex_1()
-                        .truncate()
-                        .text_color(theme.muted_foreground)
-                        .child(detail),
-                )
-        };
-        let rows: Vec<AnyElement> =
-            match picker {
-                Picker::Model => {
-                    let models = if self.thread.models.is_empty() {
-                        fallback_models()
-                    } else {
-                        self.thread.models.clone()
-                    };
-                    let current = self.current_model().map(|m| m.value);
-                    models
-                        .into_iter()
-                        .map(|m| {
-                            let value = m.value.clone();
-                            row(
-                                format!("model-{}", m.value),
-                                m.label.clone(),
-                                m.description.clone(),
-                                current.as_ref() == Some(&m.value),
-                            )
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.choose_model(value.clone(), cx)
-                            }))
-                            .into_any_element()
-                        })
-                        .collect()
-                }
-                Picker::Effort => {
-                    let efforts = self.current_model().map(|m| m.efforts).unwrap_or_default();
-                    std::iter::once(None)
-                        .chain(efforts.into_iter().map(Some))
-                        .map(|e| {
-                            let label = e.clone().unwrap_or_else(|| "Default".into());
-                            let on = self.setup.effort == e;
-                            row(format!("effort-{label}"), label, String::new(), on)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.choose_effort(e.clone(), cx)
-                                }))
-                                .into_any_element()
-                        })
-                        .collect()
-                }
-                Picker::Mode => {
-                    let current = self
-                        .thread
-                        .mode
-                        .or(self.setup.mode)
-                        .unwrap_or(ChatMode::Default);
-                    [
-                        ChatMode::Default,
-                        ChatMode::AcceptEdits,
-                        ChatMode::Plan,
-                        ChatMode::Auto,
-                        ChatMode::DontAsk,
-                        ChatMode::BypassPermissions,
-                    ]
-                    .into_iter()
-                    .map(|m| {
-                        row(
-                            format!("mode-{}", m.as_str()),
-                            m.label().into(),
-                            m.hint().into(),
-                            m == current,
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| this.choose_mode(m, cx)))
-                        .into_any_element()
-                    })
-                    .collect()
-                }
+        let mut rows: Vec<AnyElement> = Vec::new();
+        let mut selected_row = 0;
+        if menu.items.is_empty() {
+            let what = match menu.sigil {
+                '$' => "skill",
+                '@' => "file",
+                _ => "command",
             };
+            rows.push(
+                div()
+                    .px_2()
+                    .py_1()
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child(format!("No {what} matches “{}{}”.", menu.sigil, menu.query))
+                    .into_any_element(),
+            );
+        }
+        for (i, item) in menu.items.iter().enumerate() {
+            let head = (menu.query.is_empty() && (i == 0 || menu.items[i - 1].group != item.group))
+                .then(|| item.group.label());
+            if let Some(head) = head {
+                rows.push(
+                    div()
+                        .px_2()
+                        .pt_1()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(head)
+                        .into_any_element(),
+                );
+            }
+            if i == menu.selected {
+                selected_row = rows.len();
+            }
+            let on = i == menu.selected;
+            rows.push(
+                div()
+                    .id(SharedString::from(format!("menu-{i}")))
+                    .role(Role::ListItem)
+                    .aria_label(format!("{}{}", item.sigil, item.name))
+                    .aria_selected(on)
+                    .when(on, |d| d.aria_active_descendant())
+                    .px_2()
+                    .py_1()
+                    .flex()
+                    .items_baseline()
+                    .gap_2()
+                    .rounded_md()
+                    .text_sm()
+                    .cursor_pointer()
+                    .when(on, |d| d.bg(theme.secondary))
+                    .child(
+                        div()
+                            .flex_none()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(format!("{}{}", item.sigil, item.name))
+                            .when(!item.argument_hint.is_empty(), |d| {
+                                d.child(
+                                    div()
+                                        .text_color(theme.muted_foreground)
+                                        .font_weight(FontWeight::NORMAL)
+                                        .child(format!(" {}", item.argument_hint)),
+                                )
+                            }),
+                    )
+                    .when_some(item.source.clone(), |d, s| {
+                        d.child(
+                            div()
+                                .flex_none()
+                                .px_1()
+                                .rounded_sm()
+                                .border_1()
+                                .border_color(theme.border)
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(s),
+                        )
+                    })
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(theme.muted_foreground)
+                            .child(item.description.clone()),
+                    )
+                    .on_mouse_move(cx.listener(move |this, _, _, cx| {
+                        if let Some(m) = this.menu.as_mut().filter(|m| m.selected != i) {
+                            m.selected = i;
+                            cx.notify();
+                        }
+                    }))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if let Some(m) = this.menu.as_mut() {
+                            m.selected = i;
+                        }
+                        this.accept_menu(window, cx);
+                    }))
+                    .into_any_element(),
+            );
+        }
+        self.menu_scroll.scroll_to_item(selected_row);
         Some(
             div()
-                .mx_2()
-                .p_1()
-                .rounded_lg()
-                .border_1()
-                .border_color(theme.border)
-                .bg(theme.popover)
-                .flex()
-                .flex_col()
-                .children(rows)
+                .absolute()
+                .left_0()
+                .right_0()
+                .bottom(relative(1.))
+                .px_2()
+                .child(
+                    div()
+                        .id(SharedString::from(format!("menu-list-{}", self.pane_id)))
+                        .role(Role::List)
+                        .aria_label(if menu.sigil == '@' {
+                            "Files"
+                        } else {
+                            "Commands"
+                        })
+                        .occlude()
+                        .max_h(px(300.))
+                        .overflow_y_scroll()
+                        .track_scroll(&self.menu_scroll)
+                        .p_1()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.popover)
+                        .shadow_lg()
+                        .flex()
+                        .flex_col()
+                        .children(rows),
+                )
                 .into_any_element(),
         )
     }
@@ -1475,7 +1704,10 @@ impl ChatView {
                 .border_color(theme.border)
                 .cursor_pointer()
                 // A click previews it (#163); × only removes.
-                .on_click(cx.listener(move |this, _, window, cx| this.open_viewer(i, window, cx)))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    let all = this.images.iter().map(|(_, i)| i.clone()).collect();
+                    this.open_viewer(all, i, window, cx)
+                }))
                 .child(img(image.clone()).size_full())
                 .child(
                     div()
@@ -1498,71 +1730,7 @@ impl ChatView {
                         })),
                 )
         });
-        div()
-            .px_2()
-            .pt_2()
-            .flex()
-            .gap_2()
-            .children(thumbs)
-            .into_any_element()
-    }
-
-    /// Model, effort and mode chips under the thread; each opens its picker.
-    fn choices_row(&self, cx: &mut Context<Self>) -> AnyElement {
-        let account = self.account_chip(cx);
-        let theme = cx.theme().clone();
-        let chip = |id: &'static str, label: String, which: Picker| {
-            div()
-                .id(id)
-                .a11y_button(match which {
-                    Picker::Model => format!("Model: {label}"),
-                    Picker::Mode => format!("Mode: {label}"),
-                    _ => label.clone(),
-                })
-                .px_2()
-                .py(px(1.))
-                .rounded_md()
-                .text_xs()
-                .cursor_pointer()
-                .text_color(theme.muted_foreground)
-                .hover(|d| d.bg(theme.secondary))
-                .when(self.picker == Some(which), |d| d.bg(theme.secondary))
-                .child(label)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.account_picker = None;
-                    this.picker = if this.picker == Some(which) {
-                        None
-                    } else {
-                        Some(which)
-                    };
-                    cx.notify();
-                }))
-        };
-        let model = self
-            .current_model()
-            .map_or_else(|| "Model".into(), |m| m.label);
-        let effort = self
-            .setup
-            .effort
-            .clone()
-            .map_or_else(|| "Effort: default".into(), |e| format!("Effort: {e}"));
-        let mode = self
-            .thread
-            .mode
-            .or(self.setup.mode)
-            .unwrap_or(ChatMode::Default)
-            .label()
-            .to_string();
-        div()
-            .px_2()
-            .pt_1()
-            .flex()
-            .gap_1()
-            .children(account)
-            .child(chip("pick-model", model, Picker::Model))
-            .child(chip("pick-effort", effort, Picker::Effort))
-            .child(chip("pick-mode", mode, Picker::Mode))
-            .into_any_element()
+        div().flex().gap_2().children(thumbs).into_any_element()
     }
 }
 

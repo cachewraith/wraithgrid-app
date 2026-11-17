@@ -10,6 +10,7 @@ use gpui_kit::*;
 use wraithgrid_core::agent_cli::AgentCli;
 
 use super::{ChatView, ChatViewEvent};
+use crate::a11y::A11y as _;
 
 /// One account the chat can carry on as.
 #[derive(Clone, Debug, PartialEq)]
@@ -26,6 +27,8 @@ pub(super) struct AccountPicker {
     query: Entity<InputState>,
     tab: String,
     active: usize,
+    /// The account picked, waiting on "Continue" (`switchChatAccount`'s confirm).
+    confirm: Option<AccountChoice>,
     _sub: Subscription,
 }
 
@@ -73,7 +76,7 @@ impl ChatView {
         }
     }
 
-    fn current_choice(&self) -> Option<&AccountChoice> {
+    pub(super) fn current_choice(&self) -> Option<&AccountChoice> {
         let id = self.current_account.as_ref()?;
         self.account_choices.iter().find(|a| &a.id == id)
     }
@@ -86,6 +89,7 @@ impl ChatView {
             return;
         };
         self.picker = None;
+        self.x.close_later();
         let query = cx.new(|cx| InputState::new(window, cx).placeholder("Search accounts"));
         let sub = cx.subscribe(&query, |this, _, e: &InputEvent, cx| {
             if let InputEvent::Change = e {
@@ -100,6 +104,7 @@ impl ChatView {
             query,
             tab: cur.cli,
             active: 0,
+            confirm: None,
             _sub: sub,
         });
         cx.notify();
@@ -155,15 +160,27 @@ impl ChatView {
         if busy && current.as_ref() != Some(&a.id) {
             return;
         }
-        self.close_account_picker(window, cx);
         if current.as_ref() == Some(&a.id) {
-            return;
+            return self.close_account_picker(window, cx);
         }
-        cx.emit(if a.signed_in {
-            ChatViewEvent::ContinueAs(a.id.clone())
-        } else {
-            ChatViewEvent::SignIn(a.id.clone())
-        });
+        if !a.signed_in {
+            self.close_account_picker(window, cx);
+            return cx.emit(ChatViewEvent::SignIn(a.id.clone()));
+        }
+        // Carrying the chat on as another account asks first.
+        if let Some(p) = &mut self.account_picker {
+            p.confirm = Some(a.clone());
+        }
+        cx.notify();
+    }
+
+    /// "Continue" on the confirm: the chat goes on as that account.
+    fn confirm_account(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(a) = self.account_picker.as_mut().and_then(|p| p.confirm.take()) else {
+            return;
+        };
+        self.close_account_picker(window, cx);
+        cx.emit(ChatViewEvent::ContinueAs(a.id));
     }
 
     fn account_key(&mut self, e: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -172,6 +189,15 @@ impl ChatView {
             return;
         };
         let n = shown.len().max(1);
+        if p.confirm.is_some() {
+            match e.keystroke.key.as_str() {
+                "escape" => p.confirm = None,
+                "enter" => self.confirm_account(window, cx),
+                _ => return,
+            }
+            cx.stop_propagation();
+            return cx.notify();
+        }
         match e.keystroke.key.as_str() {
             "escape" => self.close_account_picker(window, cx),
             "down" => p.active = (p.active + 1) % n,
@@ -206,11 +232,14 @@ impl ChatView {
     /// The chip, first in the row under the thread.
     pub(super) fn account_chip(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let cur = self.current_choice()?.clone();
+        let list = self.account_list(cx);
         let theme = cx.theme();
         let open = self.account_picker.is_some();
         Some(
             div()
                 .id("pick-account")
+                .relative()
+                .flex_none()
                 .role(Role::Button)
                 .aria_label(format!(
                     "Account: {}. Continue as another account",
@@ -229,18 +258,26 @@ impl ChatView {
                 .hover(|d| d.bg(theme.secondary))
                 .when(open, |d| d.bg(theme.secondary))
                 .child(crate::shell::provider_mark(&cur.cli, &cur.name, 12., cx))
-                .child(cur.name.clone())
+                .child(format!("{} ▾", cur.name))
                 .on_click(cx.listener(|this, _, window, cx| this.toggle_account_picker(window, cx)))
+                .children(list.map(|l| super::pickers::above(l, false)))
                 .into_any_element(),
         )
     }
 
-    pub(super) fn account_list(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn account_list(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let p = self.account_picker.as_ref()?;
         let cur = self.current_choice()?.clone();
         let (tabs, shown, q) = self.account_view(cx);
         let theme = cx.theme().clone();
         let busy = self.thread.busy;
+        // The plan, as the running CLI reports it for its own account.
+        let plan = self
+            .thread
+            .account
+            .as_ref()
+            .and_then(|i| i.plan.clone())
+            .filter(|p| p != "Signed in");
         let row = |i: usize, a: &AccountChoice, cx: &mut Context<Self>| {
             let on = a.id == cur.id;
             let active = i == p.active;
@@ -271,14 +308,24 @@ impl ChatView {
                         .gap_2()
                         .items_baseline()
                         .child(div().truncate().child(a.name.clone()))
-                        .when(!a.signed_in, |d| {
-                            d.child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child("Not signed in"),
-                            )
-                        }),
+                        .when_some(
+                            if !a.signed_in {
+                                Some("Not signed in".to_string())
+                            } else if on {
+                                plan.clone()
+                            } else {
+                                None
+                            },
+                            |d, sub| {
+                                d.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .truncate()
+                                        .child(sub),
+                                )
+                            },
+                        ),
                 )
                 .child(match (a.signed_in, a.session_pct) {
                     (false, _) => div()
@@ -445,10 +492,11 @@ impl ChatView {
                 .id("acct-picker")
                 .role(Role::Dialog)
                 .aria_label("Continue as")
-                .mx_2()
-                // As wide as the provider rail needs, never wider than the pane.
-                .max_w(px(width))
-                .min_w_0()
+                .occlude()
+                // As wide as the provider rail needs.
+                .w(px(width))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .shadow_lg()
                 .p_1()
                 .rounded_lg()
                 .border_1()
@@ -465,6 +513,67 @@ impl ChatView {
                     cx.listener(|this, _: &input::OutdentInline, _, cx| this.account_tab(-1, cx)),
                 )
                 .child(Input::new(&p.query))
+                .when_some(p.confirm.clone(), |d, a| {
+                    d.child(
+                        div()
+                            .id("acct-confirm")
+                            .role(Role::AlertDialog)
+                            .aria_label(format!("Continue as {}?", a.name))
+                            .m_1()
+                            .p_2()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(theme.ring)
+                            .child(format!("Continue this chat as {}?", a.name))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(switch_hint(&a.cli, &cur.cli, false)),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .justify_end()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .id("acct-confirm-no")
+                                            .a11y_button("Cancel")
+                                            .px_2()
+                                            .py_1()
+                                            .rounded_md()
+                                            .cursor_pointer()
+                                            .hover(|d| d.bg(theme.secondary))
+                                            .child("Cancel")
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                if let Some(p) = &mut this.account_picker {
+                                                    p.confirm = None;
+                                                }
+                                                cx.notify();
+                                            })),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("acct-confirm-yes")
+                                            .a11y_button("Continue")
+                                            .px_2()
+                                            .py_1()
+                                            .rounded_md()
+                                            .bg(theme.primary)
+                                            .text_color(theme.primary_foreground)
+                                            .cursor_pointer()
+                                            .child("Continue")
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.confirm_account(window, cx)
+                                            })),
+                                    ),
+                            ),
+                    )
+                })
                 .when(busy, |d| {
                     d.child(
                         div()
