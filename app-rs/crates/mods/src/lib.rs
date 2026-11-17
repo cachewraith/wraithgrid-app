@@ -6,6 +6,7 @@
 //! claude binary and its env come in as parameters; claude and the network are injected so
 //! tests run neither.
 
+pub mod catalog;
 pub mod mod_community;
 pub mod mod_manager;
 pub mod mods;
