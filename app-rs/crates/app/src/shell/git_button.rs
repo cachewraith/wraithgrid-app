@@ -8,17 +8,21 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wraithgrid_core::config::{Pane, Workspace};
 use wraithgrid_core::paths::{home_dir, is_strictly_inside, resolve_user_path, worktrees_root};
-use wraithgrid_core::types::PaneView;
+use wraithgrid_core::types::{PaneView, ShortcutId};
 use wraithgrid_git::{
     check_worktree, git_status, remove_worktree, GitCli, GitStatus, WorktreeCheck,
 };
 
-use super::{Modal, Shell, TITLE_BAR};
+use super::icons::{small, z, Glyph};
+use super::menu::MenuItem;
+use super::sidebar::pal;
+use super::{bounds_probe, Modal, Shell, TITLE_BAR};
 use crate::a11y::A11y as _;
 use crate::branch_picker::{BranchEvent, BranchPicker, PickerMode};
 use crate::changes::{ChangesPanel, GitAsk};
@@ -32,18 +36,8 @@ pub(super) struct GitMenu {
     at: Point<Pixels>,
 }
 
-/// One Git menu row: `divider` draws a line above it.
-struct MenuItem {
-    icon: &'static str,
-    label: String,
-    sub: Option<String>,
-    enabled: bool,
-    divider: bool,
-    action: MenuAction,
-}
-
 #[derive(Clone, Copy)]
-enum MenuAction {
+pub(super) enum MenuAction {
     Changes,
     Ask(GitAsk),
     Switch,
@@ -78,27 +72,27 @@ impl Shell {
             .find_map(|w| w.panes.iter().find(|p| p.id == id).map(|p| (w, p)))
     }
 
-    /// The focused pane (else the project's first) with its git status, when it is in a repo;
-    /// `local`: worktrees are made on this computer only, not for a pane on an ssh machine.
+    /// The focused pane with its git status, when it is in a repo; `local`: worktrees are
+    /// made on this computer only, not for a pane on an ssh machine.
     fn focused_git(&self) -> Option<(String, GitStatus, bool)> {
         let ws = self.config().active();
         let pane = self
             .focused
             .as_ref()
-            .and_then(|f| ws.panes.iter().find(|p| &p.id == f))
-            .or(ws.panes.first())?;
+            .and_then(|f| ws.panes.iter().find(|p| &p.id == f))?;
         let git = self.git_heads.get(&pane.cwd).filter(|g| g.repo)?;
         Some((pane.id.clone(), git.clone(), ws.machine_id.is_none()))
     }
 
-    /// `⑂ main · 3` in the top bar, hidden outside a repo; a click opens the Git menu.
+    /// The branch and changed count in the top row (`main · 3`), hidden outside a repo or with
+    /// no pane focused; a click opens the Git menu under it.
     pub(super) fn git_button(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let (pane, git, _) = self.focused_git()?;
-        let theme = cx.theme().clone();
+        let p = pal(cx);
         let branch = git.branch.clone().unwrap_or_else(|| "detached".into());
         let viewport = window.viewport_size();
         let open = self.git_menu.as_ref().is_some_and(|m| m.pane == pane);
@@ -106,41 +100,103 @@ impl Shell {
             .git_menu
             .as_ref()
             .filter(|m| m.pane == pane)
-            .map(|m| self.git_menu_list(&m.pane, &git, m.at, cx));
+            .map(|m| (m.pane.clone(), m.at));
+        let menu = menu.map(|(pane, at)| {
+            let items = self.git_menu_items(&pane, &git, cx);
+            let card = self.menu_card(
+                "git-menu",
+                "Git",
+                items,
+                Some(MENU_W),
+                |this, (pane, action), window, cx| {
+                    this.close_menus(cx);
+                    this.run_git_menu(pane, action, window, cx);
+                },
+                window,
+                cx,
+            );
+            anchored()
+                .position(at)
+                .snap_to_window_with_margin(px(4.))
+                .child(card)
+        });
+        let tip = [
+            Some(branch.clone()),
+            (git.changed > 0).then(|| format!("{} changed", git.changed)),
+            (git.ahead > 0).then(|| format!("{} ahead", git.ahead)),
+            (git.behind > 0).then(|| format!("{} behind", git.behind)),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" · ");
+        let label = if git.changed > 0 {
+            format!("Git: {branch}, {} changed", git.changed)
+        } else {
+            format!("Git: {branch}")
+        };
+        let bounds = self.git_bounds.clone();
         Some(
             div()
                 .id("git-button")
-                .a11y_toggle(format!("Git: branch {branch}"), open)
-                .px_2()
-                .py(px(3.))
-                .rounded_md()
-                .border_1()
-                .border_color(theme.border)
-                .text_xs()
+                .a11y_toggle(label, open)
+                .occlude()
+                .flex_shrink(1.)
+                .min_w(px(0.))
+                .max_w(z(260.))
+                .h(z(26.))
+                .px(z(9.))
                 .flex()
-                .gap_1()
+                .items_center()
+                .gap(z(6.))
+                .rounded(z(7.))
+                .border_1()
+                .border_color(p.line)
+                .text_size(z(12.))
+                .text_color(if open { p.tx } else { p.mu })
                 .cursor_pointer()
-                .when(open, |d| d.bg(theme.secondary))
-                .hover(|d| d.bg(theme.secondary))
-                .child(div().text_color(theme.muted_foreground).child("⑂"))
-                .child(branch)
+                .when(open, |d| d.bg(p.raise))
+                .hover(|s| s.bg(p.raise).text_color(p.tx))
+                .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+                .child(bounds_probe(self.git_bounds.clone()))
+                .child(small(Glyph::Branch, p.mu, p.bg))
+                .child(
+                    div()
+                        .min_w(px(0.))
+                        .truncate()
+                        .font_family(crate::terminal::mono(cx))
+                        .child(branch),
+                )
                 .when(git.changed > 0, |d| {
                     d.child(
                         div()
-                            .text_color(theme.warning)
+                            .flex_none()
+                            .text_color(p.warn)
                             .child(format!("· {}", git.changed)),
                     )
                 })
-                // Not a window drag: the title bar moves the window on mouse down.
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(move |this, e: &ClickEvent, window, cx| {
-                    let x = (e.position().x - px(12.))
-                        .min(window.viewport_size().width - px(MENU_W + 8.))
+                    if open {
+                        this.close_menus(cx);
+                        return;
+                    }
+                    this.close_menus(cx);
+                    let b = *bounds.borrow();
+                    let (left, bottom) = b
+                        .map_or((e.position().x - px(12.), e.position().y + px(14.)), |b| {
+                            (b.left(), b.bottom())
+                        });
+                    let x = left
+                        .min(
+                            window.viewport_size().width
+                                - z(MENU_W + 8.).to_pixels(window.rem_size()),
+                        )
                         .max(px(8.));
                     this.git_menu = Some(GitMenu {
                         pane: pane.clone(),
-                        at: point(x, px(TITLE_BAR + 4.)),
+                        at: point(x, bottom + px(6.)),
                     });
+                    this.menu_opened(e.is_keyboard());
                     cx.notify();
                 }))
                 .when_some(menu, |d, menu| {
@@ -156,36 +212,33 @@ impl Shell {
                                     .on_mouse_down(
                                         MouseButton::Left,
                                         cx.listener(|this, _, _, cx| {
-                                            this.git_menu = None;
+                                            this.close_menus(cx);
                                             cx.stop_propagation();
-                                            cx.notify();
                                         }),
                                     )
                                     .on_mouse_down(
                                         MouseButton::Right,
                                         cx.listener(|this, _, _, cx| {
-                                            this.git_menu = None;
-                                            cx.notify();
+                                            this.close_menus(cx);
                                         }),
                                     )
                                     .child(menu),
                             ),
                         )
-                        .with_priority(1),
+                        .with_priority(3),
                     )
                 })
                 .into_any_element(),
         )
     }
 
-    fn git_menu_list(
+    fn git_menu_items(
         &self,
         pane: &str,
         git: &GitStatus,
-        at: Point<Pixels>,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let theme = cx.theme().clone();
+        cx: &App,
+    ) -> Vec<MenuItem<(String, MenuAction)>> {
+        let p = pal(cx);
         let local = self
             .pane_by_id(pane)
             .is_some_and(|(w, _)| w.machine_id.is_none());
@@ -196,127 +249,60 @@ impl Shell {
                 String::new()
             }
         };
-        let item = |icon: &'static str, label: String, action: MenuAction| MenuItem {
-            icon,
-            label,
-            sub: None,
-            enabled: true,
-            divider: false,
-            action,
-        };
+        let item =
+            |label: String, action: MenuAction| MenuItem::new(label, (pane.to_string(), action));
+        let icon = |g: Glyph| small(g, p.mu, p.panel);
         let has_branch = git.branch.is_some();
         let mut items = vec![
-            MenuItem {
-                sub: Some(if git.changed > 0 {
+            item("Show changes".into(), MenuAction::Changes)
+                .icon(icon(Glyph::Diff))
+                .kbd(self.hint(ShortcutId::Diff))
+                .sub(if git.changed > 0 {
                     format!("{} changed", git.changed)
                 } else {
                     "nothing changed".into()
                 }),
-                ..item("±", "Show changes".into(), MenuAction::Changes)
+            MenuItem {
+                disabled: git.changed == 0,
+                ..item("Commit…".into(), MenuAction::Ask(GitAsk::Commit))
             },
             MenuItem {
-                enabled: git.changed > 0,
-                ..item("", "Commit…".into(), MenuAction::Ask(GitAsk::Commit))
-            },
-            MenuItem {
-                enabled: has_branch,
+                disabled: !has_branch,
                 ..item(
-                    "",
                     format!("Pull{}", n(git.behind, "behind")),
                     MenuAction::Ask(GitAsk::Pull),
                 )
             },
             MenuItem {
-                enabled: has_branch,
+                disabled: !has_branch,
                 ..item(
-                    "",
                     format!("Push{}", n(git.ahead, "ahead")),
                     MenuAction::Ask(GitAsk::Push),
                 )
             },
             MenuItem {
                 divider: true,
-                ..item("⑂", "Switch branch…".into(), MenuAction::Switch)
+                ..item("Switch branch…".into(), MenuAction::Switch).icon(icon(Glyph::Branch))
             },
         ];
         if local {
-            items.push(MenuItem {
-                sub: Some("its own folder (git worktree)".into()),
-                ..item(
-                    "+",
+            items.push(
+                item(
                     "New pane on a new branch…".into(),
                     MenuAction::NewBranchPane,
                 )
-            });
-            items.push(item(
-                "+",
-                "Open a branch in a new pane…".into(),
-                MenuAction::OpenBranch,
-            ));
-        }
-        let rows = items.into_iter().enumerate().map(|(i, it)| {
-            let pane = pane.to_string();
-            let action = it.action;
-            div()
-                .when(it.divider, |d| {
-                    d.mt_1().pt_1().border_t_1().border_color(theme.border)
-                })
-                .child(
-                    div()
-                        .id(SharedString::from(format!("git-menu-{i}")))
-                        .role(Role::MenuItem)
-                        .aria_label(it.label.clone())
-                        .px_2()
-                        .py_1()
-                        .rounded_md()
-                        .flex()
-                        .gap_2()
-                        .when(!it.enabled, |d| d.opacity(0.45))
-                        .when(it.enabled, |d| {
-                            d.cursor_pointer()
-                                .hover(|d| d.bg(theme.secondary))
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.git_menu = None;
-                                    this.run_git_menu(pane.clone(), action, window, cx);
-                                }))
-                        })
-                        .child(
-                            div()
-                                .w(px(14.))
-                                .text_color(theme.muted_foreground)
-                                .child(it.icon),
-                        )
-                        .child(div().flex().flex_col().child(it.label).when_some(
-                            it.sub,
-                            |d, sub| {
-                                d.child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(theme.muted_foreground)
-                                        .child(sub),
-                                )
-                            },
-                        )),
+                .icon(icon(Glyph::Plus))
+                .sub("its own folder (git worktree)"),
+            );
+            items.push(
+                item(
+                    "Open a branch in a new pane…".into(),
+                    MenuAction::OpenBranch,
                 )
-        });
-        div()
-            .id("git-menu")
-            .absolute()
-            .left(at.x)
-            .top(at.y)
-            .w(px(MENU_W))
-            .p_1()
-            .flex()
-            .flex_col()
-            .rounded_lg()
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.popover)
-            .shadow_lg()
-            .text_sm()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .children(rows)
-            .into_any_element()
+                .icon(icon(Glyph::Plus)),
+            );
+        }
+        items
     }
 
     fn run_git_menu(
@@ -344,7 +330,7 @@ impl Shell {
     }
 
     /// Opens the Changes panel on the pane's folder (`toggleDiff(true)`), focusing the pane.
-    fn show_changes(
+    pub(super) fn show_changes(
         &mut self,
         pane_id: &str,
         window: &mut Window,
@@ -516,17 +502,32 @@ impl Shell {
         }
     }
 
-    /// A pane header's `⑂ main · 3`, hidden outside a repo: click shows its changes,
-    /// right-click switches its branch.
-    pub(super) fn branch_chip(&self, pane: &Pane, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// A terminal pane header's branch and changed count (`gitc`), hidden outside a repo:
+    /// click shows its changes, right-click switches its branch; `compact` drops the name.
+    pub(super) fn branch_chip(
+        &self,
+        pane: &Pane,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let g = self.git_heads.get(&pane.cwd).filter(|g| g.repo)?;
-        let theme = cx.theme().clone();
+        let p = pal(cx);
         let branch = g.branch.clone().unwrap_or_else(|| "detached".into());
-        let text = if g.changed > 0 {
-            format!("⑂ {branch} · {}", g.changed)
-        } else {
-            format!("⑂ {branch}")
-        };
+        let tip = format!(
+            "{}{}{} — show changes ({}); right-click to switch branch",
+            g.branch.clone().unwrap_or_else(|| "detached HEAD".into()),
+            if g.changed > 0 {
+                format!(" · {} changed", g.changed)
+            } else {
+                String::new()
+            },
+            if g.ahead > 0 {
+                format!(" · {} ahead", g.ahead)
+            } else {
+                String::new()
+            },
+            self.hint(ShortcutId::Diff)
+        );
         let (show, switch) = (pane.id.clone(), pane.id.clone());
         Some(
             div()
@@ -535,18 +536,47 @@ impl Shell {
                     "Branch {branch}, {} changed files. Show changes",
                     g.changed
                 ))
-                .px_1()
-                .rounded_sm()
+                .flex_shrink(1.)
+                .min_w(px(0.))
+                .max_w(relative(0.34))
+                .h(z(22.))
+                .px(z(7.))
+                .flex()
+                .items_center()
+                .gap(z(5.))
+                .rounded(z(6.))
                 .cursor_pointer()
-                .text_color(theme.muted_foreground)
-                .hover(|d| d.bg(theme.secondary))
-                .child(text)
+                .text_size(z(11.5))
+                .text_color(p.mu)
+                .hover(|s| s.bg(p.raise).text_color(p.tx))
+                .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+                .child(small(Glyph::Branch, p.mu, p.bg))
+                .when(!compact, |d| {
+                    d.child(
+                        div()
+                            .min_w(px(0.))
+                            .truncate()
+                            .font_family(crate::terminal::mono(cx))
+                            .child(branch),
+                    )
+                })
+                .when(g.changed > 0, |d| {
+                    d.child(
+                        div()
+                            .flex_none()
+                            .text_color(p.warn)
+                            .child(g.changed.to_string()),
+                    )
+                })
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.show_changes(&show, window, cx);
                 }))
                 .on_mouse_down(
                     MouseButton::Right,
                     cx.listener(move |this, _, window, cx| {
+                        // Not also the pane's menu, which the header opens on right-click.
+                        cx.stop_propagation();
                         this.open_branches(switch.clone(), PickerMode::Switch, window, cx)
                     }),
                 )

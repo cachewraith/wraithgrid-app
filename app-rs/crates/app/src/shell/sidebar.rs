@@ -6,10 +6,9 @@
 //! `ProjectIconPicker`), provider marks (`ProviderLogo`, `AccountIcon`) and the menus
 //! (`ContextMenu`). Icon sets are bundled (`assets/`), never read from config or the network.
 
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::tooltip::Tooltip;
@@ -23,7 +22,9 @@ use wraithgrid_core::types::{
     AutoSwitchMode, ShortcutId, SIDEBAR_WIDTH_DEFAULT, SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_MIN,
 };
 
-use super::{pane_label, Shell, TITLE_BAR};
+use super::icons::{glyph, hex, svg_image, z, Glyph};
+use super::menu::MenuItem;
+use super::{pane_label, Shell};
 use crate::a11y::A11y as _;
 use crate::team_section::team_pane_ids;
 
@@ -50,6 +51,8 @@ pub(super) struct SidebarState {
     place: String,
     /// When each pane was last seen working (`activeAt`, ms).
     active_at: HashMap<String, i64>,
+    /// Where each project row was drawn, for its menu opened from the keyboard.
+    row_bounds: std::rc::Rc<std::cell::RefCell<HashMap<String, Bounds<Pixels>>>>,
 }
 
 struct Menu {
@@ -97,43 +100,6 @@ enum Act {
     Settings,
 }
 
-enum ItemIcon {
-    Glyph(Glyph),
-    Project(String),
-    Avatar { name: String, cli: String },
-}
-
-/// One menu row (`ContextMenu`'s `MenuItem`).
-struct Item {
-    label: String,
-    icon: ItemIcon,
-    sub: Option<String>,
-    sub_warn: bool,
-    checked: bool,
-    heading: Option<&'static str>,
-    divider: bool,
-    danger: bool,
-    disabled: bool,
-    act: Act,
-}
-
-impl Item {
-    fn new(label: impl Into<String>, icon: ItemIcon, act: Act) -> Self {
-        Item {
-            label: label.into(),
-            icon,
-            sub: None,
-            sub_warn: false,
-            checked: false,
-            heading: None,
-            divider: false,
-            danger: false,
-            disabled: false,
-            act,
-        }
-    }
-}
-
 /// The edge being dragged.
 #[derive(Clone)]
 struct SideResize;
@@ -144,29 +110,28 @@ impl Render for SideResize {
     }
 }
 
-/// CSS px that follow the app zoom (`--rs`-free sizes from sidebar.css).
-fn z(v: f32) -> Rems {
-    rems(v / 16.0)
-}
-
 /// The theme's colors under the CSS names the Electron styles use.
 #[derive(Clone, Copy)]
 pub(super) struct Pal {
-    tx: Hsla,
-    mu: Hsla,
-    fa: Hsla,
-    line: Hsla,
-    line2: Hsla,
-    sel: Hsla,
-    hover: Hsla,
-    raise: Hsla,
-    ok: Hsla,
-    warn: Hsla,
-    err: Hsla,
-    acc: Hsla,
-    panel: Hsla,
-    side: Hsla,
-    bg: Hsla,
+    pub tx: Hsla,
+    pub mu: Hsla,
+    pub fa: Hsla,
+    pub line: Hsla,
+    pub line2: Hsla,
+    pub sel: Hsla,
+    pub hover: Hsla,
+    pub raise: Hsla,
+    pub ok: Hsla,
+    pub warn: Hsla,
+    pub err: Hsla,
+    pub acc: Hsla,
+    pub panel: Hsla,
+    pub side: Hsla,
+    pub bg: Hsla,
+    /// The accent fill of a primary button, its hover, and the text on it.
+    pub acc_fill: Hsla,
+    pub acc_fill_hover: Hsla,
+    pub on_acc: Hsla,
 }
 
 pub(super) fn pal(cx: &App) -> Pal {
@@ -187,110 +152,13 @@ pub(super) fn pal(cx: &App) -> Pal {
         panel: t.popover,
         side: t.sidebar,
         bg: t.background,
+        acc_fill: t.primary,
+        acc_fill_hover: t.primary_hover,
+        on_acc: t.primary_foreground,
     }
 }
 
 // ---- Icons ------------------------------------------------------------------------------
-
-/// Electron's stroke icons (`icons.tsx`, 16×16 at 1.6 stroke).
-#[derive(Clone, Copy)]
-enum Glyph {
-    Plus,
-    Sidebar,
-    Compose,
-    Search,
-    Clock,
-    Gauge,
-    ChevronRight,
-    ChevronDown,
-    ChevronUp,
-    UserPlus,
-    Users,
-    Mods,
-    Settings,
-    Rename,
-    Trash,
-    Monitor,
-    Check,
-    Play,
-    Stop,
-}
-
-impl Glyph {
-    fn body(self) -> &'static str {
-        match self {
-            Glyph::Plus => r#"<path d="M8 3v10M3 8h10"/>"#,
-            Glyph::Sidebar => {
-                r#"<rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M6 3v10"/>"#
-            }
-            Glyph::Compose => {
-                r#"<path d="M13 9v3.5a1.5 1.5 0 0 1-1.5 1.5h-8A1.5 1.5 0 0 1 2 12.5v-8A1.5 1.5 0 0 1 3.5 3H7"/><path d="M11.5 2.5l2 2L8 10H6V8z"/>"#
-            }
-            Glyph::Search => r#"<circle cx="7" cy="7" r="4"/><path d="M10 10l3.5 3.5"/>"#,
-            Glyph::Clock => r#"<circle cx="8" cy="8" r="6"/><path d="M8 4.5V8l2 1.5"/>"#,
-            Glyph::Gauge => {
-                r#"<path d="M2.8 11.5a5.5 5.5 0 1 1 10.4 0"/><path d="M8 9.2l2.6-2.6"/>"#
-            }
-            Glyph::ChevronRight => r#"<path d="M6 4l4 4-4 4"/>"#,
-            Glyph::ChevronDown => r#"<g transform="rotate(90 8 8)"><path d="M6 4l4 4-4 4"/></g>"#,
-            Glyph::ChevronUp => r#"<g transform="rotate(-90 8 8)"><path d="M6 4l4 4-4 4"/></g>"#,
-            Glyph::UserPlus => {
-                r#"<circle cx="7" cy="5.5" r="2.5"/><path d="M2.5 13c.6-2.4 2.3-3.5 4.5-3.5 1 0 1.9.2 2.6.7M12 9.5v4M10 11.5h4"/>"#
-            }
-            Glyph::Users => {
-                r#"<circle cx="6" cy="5.5" r="2.3"/><path d="M1.8 13c.4-2.3 2.1-3.6 4.2-3.6s3.8 1.3 4.2 3.6M10.5 3.4a2.2 2.2 0 0 1 0 4.2M12 9.6c1.3.5 2 1.6 2.2 3.4"/>"#
-            }
-            Glyph::Mods => r#"<path d="M6 2v3M10 2v3M4.5 5h7v2.5a3.5 3.5 0 0 1-7 0zM8 11v3"/>"#,
-            Glyph::Settings => {
-                r#"<path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/><circle cx="5.5" cy="4.5" r="1.5" fill="{bg}"/><circle cx="10.5" cy="8" r="1.5" fill="{bg}"/><circle cx="6.5" cy="11.5" r="1.5" fill="{bg}"/>"#
-            }
-            Glyph::Rename => r#"<path d="M10.5 3l2.5 2.5L6 12.5H3.5V10z"/>"#,
-            Glyph::Trash => r#"<path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5"/>"#,
-            Glyph::Monitor => {
-                r#"<rect x="2" y="2.5" width="12" height="8.5" rx="1.5"/><path d="M6 13.5h4M8 11v2.5"/>"#
-            }
-            Glyph::Check => r#"<path d="M3.5 8.5l3 3 6-7"/>"#,
-            Glyph::Play => r#"<path d="M5.5 3.8v8.4L12 8z"/>"#,
-            Glyph::Stop => r#"<rect x="4.5" y="4.5" width="7" height="7" rx="1.5"/>"#,
-        }
-    }
-}
-
-thread_local! {
-    static IMAGES: RefCell<HashMap<String, Arc<Image>>> = RefCell::new(HashMap::new());
-}
-
-/// One SVG as an image, made once per text (rasterized at 64 px so it stays sharp).
-fn svg_image(svg: String) -> Arc<Image> {
-    IMAGES.with(|m| {
-        let mut m = m.borrow_mut();
-        if let Some(i) = m.get(&svg) {
-            return i.clone();
-        }
-        let image = Arc::new(Image::from_bytes(
-            ImageFormat::Svg,
-            svg.clone().into_bytes(),
-        ));
-        m.insert(svg, image.clone());
-        image
-    })
-}
-
-fn hex(c: Hsla) -> (String, f32) {
-    let c = Rgba::from(c);
-    let b = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-    (format!("#{:02x}{:02x}{:02x}", b(c.r), b(c.g), b(c.b)), c.a)
-}
-
-fn glyph(g: Glyph, size: f32, color: Hsla, bg: Hsla) -> Img {
-    let (c, a) = hex(color);
-    let (bg, _) = hex(bg);
-    let svg = format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 16 16" fill="none" stroke="{c}" stroke-opacity="{a:.3}" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">{}</svg>"#,
-        g.body().replace("{bg}", &bg)
-    );
-    img(svg_image(svg)).size(z(size)).flex_none()
-}
 
 struct SvgIcon {
     body: String,
@@ -685,7 +553,7 @@ fn picker_icons(general: bool, query: &str) -> Vec<String> {
 
 impl Shell {
     /// `view` in the Electron store: what the main area shows.
-    fn side_view(&self) -> &'static str {
+    pub(super) fn side_view(&self) -> &'static str {
         if self.settings_view.is_some() {
             "settings"
         } else if self.accounts_view.is_some() {
@@ -704,7 +572,7 @@ impl Shell {
     }
 
     /// Back to the panes (`setView('grid')`).
-    fn side_show_grid(&mut self) {
+    pub(super) fn side_show_grid(&mut self) {
         self.settings_view = None;
         self.accounts_view = None;
         self.usage_view = None;
@@ -812,12 +680,13 @@ impl Shell {
             .sidebar
             .drag_width
             .unwrap_or(self.config().settings.sidebar_width as f32);
-        let panel = self.side_panel(collapsed, width, narrow, cx);
-        let drawer =
-            (narrow && self.sidebar.drawer).then(|| self.side_panel(false, width, narrow, cx));
-        let menu = self.side_menu_layer(viewport, cx);
+        let panel = self.side_panel(collapsed, width, narrow, window, cx);
+        let drawer = (narrow && self.sidebar.drawer)
+            .then(|| self.side_panel(false, width, narrow, window, cx));
+        let menu = self.side_menu_layer(viewport, window, cx);
         let picker = self.icon_picker_layer(viewport, cx);
         let dragging = self.sidebar.drag_width.is_some();
+        let top = self.frame_top(window);
         div()
             .id("sidebar")
             .relative()
@@ -844,11 +713,12 @@ impl Shell {
                     div()
                         .id("side-resize")
                         .group("side-resize")
+                        // The gap between the sidebar and main cards is the handle (#88).
                         .absolute()
                         .top_0()
                         .bottom_0()
-                        .right_0()
-                        .w(px(6.))
+                        .right(z(-super::PANEL_GAP))
+                        .w(z(super::PANEL_GAP))
                         .cursor(CursorStyle::ResizeLeftRight)
                         .tooltip(|window, cx| {
                             Tooltip::new("Drag to resize, double-click to reset").build(window, cx)
@@ -856,10 +726,11 @@ impl Shell {
                         .child(
                             div()
                                 .absolute()
-                                .top_0()
-                                .bottom_0()
-                                .right(px(0.))
+                                .top(px(18.))
+                                .bottom(px(18.))
+                                .left(z(super::PANEL_GAP / 2. - 1.))
                                 .w(px(2.))
+                                .rounded(px(1.))
                                 .bg(p.acc)
                                 .opacity(if dragging { 0.6 } else { 0. })
                                 .group_hover("side-resize", |s| s.opacity(0.6)),
@@ -909,8 +780,8 @@ impl Shell {
                                         .occlude()
                                         .absolute()
                                         .left_0()
-                                        .top(px(TITLE_BAR))
-                                        .h(viewport.height - px(TITLE_BAR))
+                                        .top(px(top))
+                                        .h(viewport.height - px(top))
                                         .shadow_lg()
                                         .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                             cx.stop_propagation()
@@ -933,6 +804,7 @@ impl Shell {
         collapsed: bool,
         width: f32,
         narrow: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Div {
         let p = pal(cx);
@@ -972,8 +844,8 @@ impl Shell {
             .flex()
             .flex_col()
             .bg(p.side)
-            .border_r_1()
-            .border_color(p.line)
+            .rounded(z(super::PANEL_R))
+            .overflow_hidden()
             .text_color(p.tx)
             .text_size(z(13.))
             .child(header);
@@ -986,7 +858,7 @@ impl Shell {
                     .py(z(10.))
                     .border_t_1()
                     .border_color(p.line)
-                    .child(self.account_switcher(true, width, cx)),
+                    .child(self.account_switcher(true, width, window, cx)),
             );
         }
         base.child(self.side_nav(cx))
@@ -1001,7 +873,7 @@ impl Shell {
                     .p(z(8.))
                     .border_t_1()
                     .border_color(p.line)
-                    .child(self.account_switcher(false, width, cx))
+                    .child(self.account_switcher(false, width, window, cx))
                     .child(self.side_meta(cx)),
             )
     }
@@ -1221,6 +1093,7 @@ impl Shell {
         let foot = |d: Div| d.mt(z(6.)).text_size(z(11.)).text_color(p.fa);
         div()
             .id("side-usage")
+            .group("side-usage")
             .a11y_button("Usage")
             .flex_none()
             .flex()
@@ -1253,7 +1126,13 @@ impl Shell {
                             .truncate()
                             .child(account.as_ref().map_or("Usage".into(), |a| a.name.clone())),
                     )
-                    .child(glyph(Glyph::ChevronRight, 14., p.fa, p.side)),
+                    .child(
+                        div()
+                            .ml_auto()
+                            .opacity(0.)
+                            .group_hover("side-usage", |s| s.opacity(1.))
+                            .child(glyph(Glyph::ChevronRight, 14., p.fa, p.side)),
+                    ),
             )
             .when_some(five, |d, w| d.child(line("5h", w)))
             .when_some(week, |d, w| d.child(line("week", w)))
@@ -1339,9 +1218,9 @@ impl Shell {
         let on = c.active_workspace == w.id && self.side_view() == "project";
         let statuses: Vec<Option<&'static str>> =
             w.panes.iter().map(|p| self.pane_status(&p.id)).collect();
-        let running = statuses.contains(&Some("running"));
+        let running = statuses.contains(&Some("running")) || statuses.contains(&Some("starting"));
         let background = statuses.contains(&Some("background"));
-        let waiting = statuses.contains(&Some("approval"));
+        let waiting = statuses.contains(&Some("approval")) || statuses.contains(&Some("login"));
         let busy = waiting || running || background;
         let state = if waiting {
             "needs you"
@@ -1523,15 +1402,50 @@ impl Shell {
                                 cx.listener({
                                     let id = id.clone();
                                     move |this, e: &MouseDownEvent, _, cx| {
-                                        this.sidebar.menu = Some(Menu {
-                                            kind: MenuKind::Project(id.clone()),
-                                            at: e.position,
-                                            confirm: false,
-                                        });
-                                        cx.notify();
+                                        this.open_project_menu(id.clone(), e.position, false, cx)
                                     }
                                 }),
-                            ),
+                            )
+                            // From the keyboard: ←/→ fold the chat list, Shift+F10 or the
+                            // Menu key opens the row's menu under it.
+                            .focusable()
+                            .tab_index(0)
+                            .focus_visible(|s| s.border_1().border_color(p.acc))
+                            .on_key_down(cx.listener({
+                                let (id, rows) = (id.clone(), self.sidebar.row_bounds.clone());
+                                move |this, e: &KeyDownEvent, _, cx| {
+                                    let k = &e.keystroke;
+                                    match k.key.as_str() {
+                                        "right" | "left" if !k.modifiers.modified() => {
+                                            this.set_project_open(&id, k.key == "right", cx)
+                                        }
+                                        "f10" if k.modifiers.shift => {}
+                                        "menu" | "contextmenu" => {}
+                                        _ => return,
+                                    }
+                                    if k.key != "right" && k.key != "left" {
+                                        let at = rows
+                                            .borrow()
+                                            .get(&id)
+                                            .map_or(point(px(40.), px(120.)), |b| {
+                                                b.bottom_left() + point(px(12.), px(0.))
+                                            });
+                                        this.open_project_menu(id.clone(), at, true, cx);
+                                    }
+                                    cx.stop_propagation();
+                                }
+                            }))
+                            .child({
+                                let (rows, key) = (self.sidebar.row_bounds.clone(), id.clone());
+                                canvas(
+                                    move |b, _, _| {
+                                        rows.borrow_mut().insert(key, b);
+                                    },
+                                    |_, _, _, _| {},
+                                )
+                                .absolute()
+                                .size_full()
+                            }),
                     )
                     .child(
                         div()
@@ -1588,8 +1502,8 @@ impl Shell {
                 let account = pane.account_id.as_deref().and_then(|a| c.account(a));
                 let status = self.pane_status(&pane.id);
                 let on = grid && self.focused.as_deref() == Some(pane.id.as_str());
-                let busy = matches!(status, Some("running" | "background"));
-                let loud = status == Some("approval");
+                let busy = matches!(status, Some("running" | "starting" | "background"));
+                let loud = matches!(status, Some("approval" | "login"));
                 let branch = self
                     .git_heads
                     .get(&pane.cwd)
@@ -1616,7 +1530,12 @@ impl Shell {
                         .child(text)
                 };
                 let right = if loud {
-                    Some(state("approve", p.warn).into_any_element())
+                    let word = if status == Some("login") {
+                        "sign in"
+                    } else {
+                        "approve"
+                    };
+                    Some(state(word, p.warn).into_any_element())
                 } else if busy {
                     Some(
                         state(
@@ -1663,9 +1582,8 @@ impl Shell {
                     })
                     .child(div().flex_1().min_w(px(0.)).truncate().child(title))
                     .children(right)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.side_show_grid();
-                        this.reveal_chat(&ws, &id, cx);
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.reveal_chat(&ws, &id, window, cx);
                     }))
                     .into_any_element()
             })
@@ -1724,10 +1642,12 @@ impl Shell {
             .workspaces
             .iter()
             .map(|w| {
-                let working = w
-                    .panes
-                    .iter()
-                    .any(|x| matches!(self.pane_status(&x.id), Some("running" | "background")));
+                let working = w.panes.iter().any(|x| {
+                    matches!(
+                        self.pane_status(&x.id),
+                        Some("running" | "starting" | "background")
+                    )
+                });
                 let on = c.active_workspace == w.id;
                 let tip = if working {
                     format!("{} · working", w.name)
@@ -1749,17 +1669,26 @@ impl Shell {
                     .when(on, |d| d.bg(p.sel))
                     .when(!on, |d| d.hover(|s| s.bg(p.hover)))
                     .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
-                    .child(project_icon(&w.icon, 20., p.mu))
-                    .when(working, |d| {
-                        d.child(
-                            div()
-                                .absolute()
-                                .right(z(3.))
-                                .bottom(z(3.))
-                                .size(z(6.))
-                                .rounded_full()
-                                .bg(p.ok),
-                        )
+                    // Working, the icon pops (#121) rather than carrying a dot.
+                    .child(match icon_or_folder(&w.icon).filter(|_| working) {
+                        Some(icon) => div()
+                            .size(z(24.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                img(svg_image(svg_of(icon, p.mu)))
+                                    .flex_none()
+                                    .with_animation(
+                                        SharedString::from(format!("rail-pop-{}", w.id)),
+                                        Animation::new(std::time::Duration::from_millis(1600))
+                                            .repeat()
+                                            .with_easing(bounce(ease_in_out)),
+                                        |i, t| i.size(z(20. + 4. * t)),
+                                    ),
+                            )
+                            .into_any_element(),
+                        None => project_icon(&w.icon, 20., p.mu),
                     })
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.open_project_page(id.clone(), window, cx)
@@ -1811,6 +1740,7 @@ impl Shell {
         &mut self,
         compact: bool,
         width: f32,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let p = pal(cx);
@@ -1825,6 +1755,11 @@ impl Shell {
         let label = current
             .as_ref()
             .map_or("No account".to_string(), |a| a.name.clone());
+        // Its plan when known ("Pro · new chats"), else how many accounts there are.
+        let plan = current
+            .as_ref()
+            .and_then(|a| self.plans.get(&a.id))
+            .cloned();
         let sub = if c.accounts.is_empty() {
             "Add one to start".to_string()
         } else if current.as_ref().is_some_and(|a| !a.signed_in) {
@@ -1832,7 +1767,7 @@ impl Shell {
         } else {
             format!(
                 "{} · new chats",
-                plural(c.accounts.len(), "account", "accounts")
+                plan.unwrap_or_else(|| plural(c.accounts.len(), "account", "accounts"))
             )
         };
         let open = self
@@ -1846,7 +1781,8 @@ impl Shell {
             } else {
                 (width - 16.).max(240.)
             };
-            self.menu_list(self.account_items(), Some(w), cx)
+            let items = self.account_items(&p);
+            self.menu_list("Accounts", items, Some(w), window, cx)
         });
         let tip = format!("New chats use {label}");
         div()
@@ -1865,12 +1801,18 @@ impl Shell {
             .when(compact, |d| {
                 d.tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
             })
-            .on_click(cx.listener(|this, _, _, cx| {
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if open {
+                    this.close_menus(cx);
+                    return;
+                }
+                this.close_menus(cx);
                 this.sidebar.menu = Some(Menu {
                     kind: MenuKind::Accounts,
                     at: point(px(0.), px(0.)),
                     confirm: false,
                 });
+                this.menu_opened(false);
                 cx.notify();
             }))
             .child(match &current {
@@ -1971,51 +1913,32 @@ impl Shell {
 
     // ---- Menus --------------------------------------------------------------------------
 
-    fn project_items(&self, ws: &str, confirm: bool) -> Vec<Item> {
+    fn project_items(&self, ws: &str, confirm: bool, p: &Pal) -> Vec<MenuItem<Act>> {
         let c = self.config();
         let Some(w) = c.workspaces.iter().find(|w| w.id == ws) else {
             return vec![];
         };
         let panes = w.panes.len();
         let can_delete = c.workspaces.len() > 1;
-        let mut items = vec![Item::new(
-            "New chat",
-            ItemIcon::Glyph(Glyph::Compose),
-            Act::NewChat(ws.into()),
-        )];
+        let g = |g: Glyph| glyph(g, 14., p.mu, p.panel);
+        let mut items =
+            vec![MenuItem::new("New chat", Act::NewChat(ws.into())).icon(g(Glyph::Compose))];
         if !w.team.is_empty() {
             items.push(if team_pane_ids(&w.team, &w.panes).is_empty() {
-                Item::new(
-                    "Start team",
-                    ItemIcon::Glyph(Glyph::Play),
-                    Act::StartTeam(ws.into()),
-                )
+                MenuItem::new("Start team", Act::StartTeam(ws.into())).icon(g(Glyph::Play))
             } else {
-                Item::new(
-                    "Stop team",
-                    ItemIcon::Glyph(Glyph::Stop),
-                    Act::StopTeam(ws.into()),
-                )
+                MenuItem::new("Stop team", Act::StopTeam(ws.into())).icon(g(Glyph::Stop))
             });
         }
         // A web preview runs on this computer only (H5).
         if w.machine_id.is_none() {
-            items.push(Item::new(
-                "Preview",
-                ItemIcon::Glyph(Glyph::Monitor),
-                Act::Preview(ws.into()),
-            ));
+            items.push(MenuItem::new("Preview", Act::Preview(ws.into())).icon(g(Glyph::Monitor)));
         }
-        items.push(Item::new(
-            "Rename",
-            ItemIcon::Glyph(Glyph::Rename),
-            Act::Rename(ws.into()),
-        ));
-        items.push(Item::new(
-            "Change icon",
-            ItemIcon::Project(w.icon.clone()),
-            Act::Icon(ws.into()),
-        ));
+        items.push(MenuItem::new("Rename", Act::Rename(ws.into())).icon(g(Glyph::Rename)));
+        items.push(
+            MenuItem::new("Change icon", Act::Icon(ws.into()))
+                .icon(project_icon(&w.icon, 14., p.mu)),
+        );
         // Where the panes run can change only while there are none.
         if !c.machines.is_empty() {
             let targets = std::iter::once((None, "this computer".to_string()))
@@ -2031,13 +1954,9 @@ impl Shell {
                 } else {
                     format!("Run on {name}")
                 };
-                items.push(Item {
+                items.push(MenuItem {
                     disabled: panes > 0,
-                    ..Item::new(
-                        label,
-                        ItemIcon::Glyph(Glyph::Monitor),
-                        Act::RunOn(ws.into(), id),
-                    )
+                    ..MenuItem::new(label, Act::RunOn(ws.into(), id)).icon(g(Glyph::Monitor))
                 });
             }
         }
@@ -2052,15 +1971,21 @@ impl Shell {
         } else {
             "Delete project".into()
         };
-        items.push(Item {
+        let trash = glyph(
+            Glyph::Trash,
+            14.,
+            if can_delete { p.err } else { p.mu },
+            p.panel,
+        );
+        items.push(MenuItem {
             danger: true,
             disabled: !can_delete,
-            ..Item::new(label, ItemIcon::Glyph(Glyph::Trash), Act::Delete(ws.into()))
+            ..MenuItem::new(label, Act::Delete(ws.into())).icon(trash)
         });
         items
     }
 
-    fn account_items(&self) -> Vec<Item> {
+    fn account_items(&self, p: &Pal) -> Vec<MenuItem<Act>> {
         let c = self.config();
         let current = c
             .settings
@@ -2075,200 +2000,102 @@ impl Shell {
                 *in_use.entry(a).or_default() += 1;
             }
         }
-        let mut items: Vec<Item> = c
+        let g = |g: Glyph| glyph(g, 14., p.mu, p.panel);
+        let mut items: Vec<MenuItem<Act>> = c
             .accounts
             .iter()
             .enumerate()
             .map(|(i, a)| {
                 let open = in_use.get(a.id.as_str()).copied().unwrap_or(0);
+                // Signed in, its plan when known (`accountInfo`), and its open panes (#49).
+                let state = if a.signed_in {
+                    self.plans
+                        .get(&a.id)
+                        .cloned()
+                        .unwrap_or_else(|| "Signed in".into())
+                } else {
+                    "Login needed".into()
+                };
                 let sub = [
-                    Some(
-                        if a.signed_in {
-                            "Signed in"
-                        } else {
-                            "Login needed"
-                        }
-                        .to_string(),
-                    ),
+                    Some(state),
                     (open > 0).then(|| format!("{} open", plural(open, "pane", "panes"))),
                 ]
                 .into_iter()
                 .flatten()
                 .collect::<Vec<_>>()
                 .join(" · ");
-                Item {
-                    sub: Some(sub),
+                MenuItem {
                     sub_warn: !a.signed_in,
                     checked: current.as_deref() == Some(a.id.as_str()),
                     heading: (i == 0).then_some("New chats use"),
-                    ..Item::new(
-                        a.name.clone(),
-                        ItemIcon::Avatar {
-                            name: a.name.clone(),
-                            cli: a.cli.as_str().into(),
-                        },
-                        Act::UseAccount(a.id.clone()),
-                    )
+                    ..MenuItem::new(a.name.clone(), Act::UseAccount(a.id.clone()))
+                        .sub(sub)
+                        .icon(avatar(a.cli.as_str(), &a.name, 26., p))
                 }
             })
             .collect();
-        items.push(Item::new(
-            "New account",
-            ItemIcon::Glyph(Glyph::UserPlus),
-            Act::Accounts,
-        ));
-        items.push(Item {
+        items.push(MenuItem::new("New account", Act::Accounts).icon(g(Glyph::UserPlus)));
+        items.push(MenuItem {
             divider: true,
-            ..Item::new("Usage", ItemIcon::Glyph(Glyph::Gauge), Act::Usage)
+            ..MenuItem::new("Usage", Act::Usage).icon(g(Glyph::Gauge))
         });
-        items.push(Item::new(
-            "Manage accounts",
-            ItemIcon::Glyph(Glyph::Users),
-            Act::Accounts,
-        ));
-        items.push(Item::new("Mods", ItemIcon::Glyph(Glyph::Mods), Act::Mods));
-        items.push(Item::new(
-            "Settings",
-            ItemIcon::Glyph(Glyph::Settings),
-            Act::Settings,
-        ));
+        items.push(MenuItem::new("Manage accounts", Act::Accounts).icon(g(Glyph::Users)));
+        items.push(MenuItem::new("Mods", Act::Mods).icon(g(Glyph::Mods)));
+        items.push(MenuItem::new("Settings", Act::Settings).icon(g(Glyph::Settings)));
         items
     }
 
-    /// A menu's rows (`ContextMenu`): headings, dividers, two-line items, a check.
+    /// A sidebar menu (`ContextMenu`), run by `run_side_menu`.
     fn menu_list(
-        &self,
-        items: Vec<Item>,
+        &mut self,
+        label: &'static str,
+        items: Vec<MenuItem<Act>>,
         width: Option<f32>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        let p = pal(cx);
-        let rows = items.into_iter().enumerate().map(|(i, it)| {
-            let act = it.act.clone();
-            let color = if it.disabled {
-                p.fa
-            } else if it.danger {
-                p.err
-            } else {
-                p.tx
-            };
-            let icon = match &it.icon {
-                ItemIcon::Glyph(g) => glyph(
-                    *g,
-                    14.,
-                    if it.danger && !it.disabled {
-                        p.err
-                    } else {
-                        p.mu
-                    },
-                    p.panel,
-                )
-                .into_any_element(),
-                ItemIcon::Project(id) => project_icon(id, 14., p.mu),
-                ItemIcon::Avatar { name, cli } => avatar(cli, name, 26., &p).into_any_element(),
-            };
-            let two = it.sub.is_some();
-            div()
-                .flex()
-                .flex_col()
-                .when(it.divider, |d| {
-                    d.child(div().h(px(1.)).my(z(4.)).bg(p.line))
-                })
-                .when_some(it.heading, |d, h| {
-                    d.child(
-                        div()
-                            .px(z(8.))
-                            .pt(z(4.))
-                            .pb(z(4.))
-                            .text_size(z(11.5))
-                            .text_color(p.fa)
-                            .child(h),
-                    )
-                })
-                .child(
-                    div()
-                        .id(SharedString::from(format!("side-menu-{i}")))
-                        .role(Role::MenuItem)
-                        .aria_label(it.label.clone())
-                        .min_h(z(34.))
-                        .flex()
-                        .items_center()
-                        .gap(z(8.))
-                        .py(z(6.))
-                        .pl(z(6.))
-                        .pr(z(10.))
-                        .rounded(z(6.))
-                        .text_size(z(12.5))
-                        .text_color(color)
-                        .when(it.checked, |d| d.bg(p.sel))
-                        .when(!it.disabled, |d| {
-                            d.cursor_pointer()
-                                .hover(|s| s.bg(p.raise))
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.run_side_menu(act.clone(), window, cx)
-                                }))
-                        })
-                        .child(
-                            div()
-                                .min_w(z(16.))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .child(icon),
-                        )
-                        .child(if two {
-                            div()
-                                .flex_1()
-                                .min_w(px(0.))
-                                .flex()
-                                .flex_col()
-                                .child(div().truncate().child(it.label))
-                                .child(
-                                    div()
-                                        .truncate()
-                                        .text_size(z(11.5))
-                                        .text_color(if it.sub_warn { p.warn } else { p.fa })
-                                        .child(it.sub.unwrap_or_default()),
-                                )
-                        } else {
-                            div().flex_1().child(it.label)
-                        })
-                        .when(it.checked, |d| {
-                            d.child(glyph(Glyph::Check, 14., p.tx, p.panel))
-                        }),
-                )
+        self.menu_card(
+            "side-menu",
+            label,
+            items,
+            width,
+            |this, act, window, cx| this.run_side_menu(act, window, cx),
+            window,
+            cx,
+        )
+    }
+
+    /// Opens a project's menu at a point (right-click, or Shift+F10 on its row).
+    fn open_project_menu(
+        &mut self,
+        ws: String,
+        at: Point<Pixels>,
+        keys: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_menus(cx);
+        self.sidebar.menu = Some(Menu {
+            kind: MenuKind::Project(ws),
+            at,
+            confirm: false,
         });
-        div()
-            .id("side-menu")
-            .occlude()
-            .min_w(z(190.))
-            .when_some(width, |d, w| d.w(z(w)))
-            .p(z(4.))
-            .flex()
-            .flex_col()
-            .rounded(z(9.))
-            .border_1()
-            .border_color(p.line2)
-            .bg(p.panel)
-            .shadow_lg()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
-                if e.keystroke.key == "escape" {
-                    this.sidebar.menu = None;
-                    cx.notify();
-                }
-            }))
-            .children(rows)
+        self.menu_opened(keys);
+        cx.notify();
     }
 
     /// A scrim that closes the open menu, and a project's menu at the pointer.
     fn side_menu_layer(
         &mut self,
         viewport: Size<Pixels>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let Some(menu) = &self.sidebar.menu else {
             return vec![];
+        };
+        let project = match &menu.kind {
+            MenuKind::Project(ws) => Some((menu.at, ws.clone(), menu.confirm)),
+            MenuKind::Accounts => None,
         };
         let mut out = vec![deferred(
             anchored().position(point(px(0.), px(0.))).child(
@@ -2280,30 +2107,30 @@ impl Shell {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _, _, cx| {
-                            this.sidebar.menu = None;
+                            this.close_menus(cx);
                             cx.stop_propagation();
-                            cx.notify();
                         }),
                     )
                     .on_mouse_down(
                         MouseButton::Right,
                         cx.listener(|this, _, _, cx| {
-                            this.sidebar.menu = None;
-                            cx.notify();
+                            this.close_menus(cx);
                         }),
                     ),
             ),
         )
         .with_priority(2)
         .into_any_element()];
-        if let MenuKind::Project(ws) = &menu.kind {
-            let (at, items) = (menu.at, self.project_items(ws, menu.confirm));
+        if let Some((at, ws, confirm)) = project {
+            let p = pal(cx);
+            let items = self.project_items(&ws, confirm, &p);
+            let card = self.menu_list("Project", items, None, window, cx);
             out.push(
                 deferred(
                     anchored()
                         .position(at)
                         .snap_to_window_with_margin(px(4.))
-                        .child(self.menu_list(items, None, cx)),
+                        .child(card),
                 )
                 .with_priority(3)
                 .into_any_element(),
@@ -2312,14 +2139,22 @@ impl Shell {
         out
     }
 
+    /// Closes the sidebar's own menu; true when one was open.
+    pub(super) fn close_side_menu(&mut self) -> bool {
+        self.sidebar.menu.take().is_some()
+    }
+
     /// A sidebar menu or the icon picker is open (drawn over the grid).
     pub(super) fn sidebar_popup_open(&self) -> bool {
         self.sidebar.menu.is_some() || self.sidebar.picker.is_some()
     }
 
-    /// Closes an open sidebar menu or icon picker; true when one was open.
+    /// Closes an open sidebar menu, the icon picker or the narrow window's drawer; true when
+    /// one was open.
     pub(super) fn close_side_popups(&mut self, cx: &mut Context<Self>) -> bool {
-        let open = self.sidebar.menu.take().is_some() | self.sidebar.picker.take().is_some();
+        let open = self.close_menus(cx)
+            | self.sidebar.picker.take().is_some()
+            | std::mem::take(&mut self.sidebar.drawer);
         if open {
             cx.notify();
         }
@@ -2334,7 +2169,7 @@ impl Shell {
                 return cx.notify();
             }
         }
-        self.sidebar.menu = None;
+        self.close_menus(cx);
         match act {
             Act::NewChat(ws) => self.side_new_chat(ws, window, cx),
             Act::Preview(ws) => self.open_preview(&ws, window, cx),

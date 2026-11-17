@@ -6,6 +6,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wraithgrid_core::layout::{empty_slot_ids, Preset};
 
+use super::icons::{glyph, hex, svg_image, z, Glyph};
 use super::Shell;
 use crate::a11y::A11y as _;
 
@@ -32,39 +33,15 @@ impl Shell {
         let theme = cx.theme().clone();
         let name = self.config().active().name.clone();
         let (new_pane_hint, _) = self.hints();
-        let cell = |accent: bool| {
-            div()
-                .size(px(26.))
-                .rounded(px(6.))
-                .border_2()
-                .border_color(if accent { theme.ring } else { theme.border })
-                .when(accent, |d| {
-                    d.border_dashed()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_color(theme.ring)
-                        .child("+")
-                })
-        };
-        let art = div()
-            .flex()
-            .flex_col()
-            .gap(px(4.))
-            .child(
-                div()
-                    .flex()
-                    .gap(px(4.))
-                    .child(cell(true))
-                    .child(cell(false)),
-            )
-            .child(
-                div()
-                    .flex()
-                    .gap(px(4.))
-                    .child(cell(false))
-                    .child(cell(false)),
-            );
+        // `EmptyState`'s drawing: a dashed accent cell with a +, and three quiet ones.
+        let (acc, _) = hex(theme.ring);
+        let (line, _) = hex(theme.input);
+        let (plus, _) = hex(theme.link);
+        let art = img(svg_image(format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 64 64" fill="none" stroke-width="2"><rect x="4" y="4" width="26" height="26" rx="6" stroke="{acc}" stroke-dasharray="4 4"/><rect x="34" y="4" width="26" height="26" rx="6" stroke="{line}"/><rect x="4" y="34" width="26" height="26" rx="6" stroke="{line}"/><rect x="34" y="34" width="26" height="26" rx="6" stroke="{line}"/><path d="M17 12v10M12 17h10" stroke="{plus}" stroke-linecap="round"/></svg>"#
+        )))
+        .size(z(64.))
+        .flex_none();
         let cards = Preset::ALL.into_iter().map(|p| {
             let (cols, rows) = mini(p);
             let grid = div()
@@ -129,7 +106,13 @@ impl Shell {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child("+ New pane")
+                    .child(glyph(
+                        Glyph::Plus,
+                        16.,
+                        theme.primary_foreground,
+                        theme.primary,
+                    ))
+                    .child("New pane")
                     .when(!new_pane_hint.is_empty(), |d| {
                         d.child(div().text_xs().opacity(0.8).child(new_pane_hint.clone()))
                     })
