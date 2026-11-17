@@ -1,4 +1,38 @@
-# What's new in 1.26.0: a branch per pane, Reply to a quote, image preview
+# What's new in 2.1.0: 2.0 made right
+
+*v2.1.0 · 2026-11-17*
+
+2.0 left out a lot of what 1.26 did, and some of it was broken. 2.1 brings the chat, the window and Settings back to how 1.26 worked.
+
+| New | What changed |
+|---|---|
+| Chat as in 1.26 | Tool calls are one-line cards that open on a click; code blocks and answers have Copy; approvals sit above the message box; the `/`, `@` and `$` menus float over it; Esc stops a turn and Send becomes Queue while the agent works. The chat starts when it opens, so models and slash commands are there before your first message |
+| Window as in 1.26 | One-pane mode (the pane's header becomes the top row), the 1.26 pane header with state words, thin dividers, real icons, menus you can use with the keyboard, and your plan in the sidebar |
+| Settings and Mods | Theme cards, claude and shell detection with Browse…, real switches, colour swatches, a font preview. Mods has Uninstall, Add to all accounts, search, marketplaces and mod folders |
+| New pane, New project, palette | Folders are checked as you type and show their git branch; the command palette has its full set of commands again |
+
+| Fix | What changed |
+|---|---|
+| claude not found | Chats reopened at startup no longer say "claude was not found on PATH" when Wraithgrid starts from a launcher; codex and agy chats find their CLI on PATH too |
+| Settings undid changes | Changing a setting no longer reverts zoom, pinned folders or the sidebar changed while Settings was open |
+| Full access | Can't be the default for new chats any more; per chat only, with a second click |
+| Dialogs and shortcuts | Typing in a dialog stays in it and Esc closes it; shortcuts wait while a dialog is open; top-bar buttons no longer get lost to a window drag; closing a running pane asks first |
+
+---
+
+## Previously, in 2.0.0: rewritten in Rust
+
+*v2.0.0 · 2026-11-16*
+
+| New | What changed |
+|---|---|
+| Native app | Wraithgrid is now a Rust + GPUI program instead of Electron: faster to start and lighter on memory. Settings, accounts, projects and chats carry over |
+| Folder picker | An in-app folder picker for New chat and New project, with pinned and recent folders |
+| Attach files | Attach files to a chat with 📎 or by dropping them on the message box |
+
+---
+
+## Previously, in 1.26.0: a branch per pane, Reply to a quote, image preview
 
 *v1.26.0 · 2026-11-05*
 
