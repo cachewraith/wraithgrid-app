@@ -1,12 +1,15 @@
-//! A pane's menu (`Pane.tsx`'s ContextMenu): from its ⋯ button or a right-click on its header;
-//! and the confirm before closing a pane whose process still works (`CloseConfirm`).
+//! A pane's menu (`Pane.tsx`'s ContextMenu): from its ⋯ button, a right-click on its header or
+//! Shift+F10; alone on screen it is the app's More menu too (#89). And the confirm before
+//! closing a pane whose process still works (`CloseConfirm`).
 
-use gpui_kit::component::ActiveTheme as _;
-use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use wraithgrid_core::types::PaneView;
+use wraithgrid_core::types::{PaneView, ShortcutId};
 
-use super::Shell;
+use super::icons::{glyph, small, z, Glyph};
+use super::menu::MenuItem;
+use super::sidebar::pal;
+use super::top_bar::UtilAct;
+use super::{BtnKind, Shell};
 use crate::a11y::A11y as _;
 use crate::dialogs::PaletteAction;
 
@@ -19,20 +22,27 @@ enum Act {
     OpenBranch,
     Restart,
     Close,
+    Util(UtilAct),
 }
 
 impl Shell {
+    /// Opens a pane's menu at a point; `keys`: from the keyboard, its first row shows lit.
     pub(super) fn open_pane_menu(
         &mut self,
         pane_id: String,
         at: Point<Pixels>,
+        keys: bool,
         cx: &mut Context<Self>,
     ) {
+        self.close_menus(cx);
+        self.focused = Some(pane_id.clone());
         self.pane_menu = Some((pane_id, at));
+        self.menu_opened(keys);
         cx.notify();
     }
 
-    fn pane_menu_items(&self, pane_id: &str) -> Vec<(String, Act, bool)> {
+    fn pane_menu_items(&self, pane_id: &str, cx: &App) -> Vec<MenuItem<(String, Act)>> {
+        let p = pal(cx);
         let c = self.config();
         let Some(pane) = c
             .workspaces
@@ -43,36 +53,58 @@ impl Shell {
             return vec![];
         };
         let chat = pane.view == PaneView::Chat && !self.as_terminal.contains(&pane.id);
-        let agent = !pane.shell && pane.view != PaneView::Preview;
+        let cli = pane
+            .account_id
+            .as_deref()
+            .and_then(|id| c.account(id))
+            .map(|a| a.cli);
+        // Only a CLI that can resume a conversation offers to (`canResume`).
+        let resumable = !pane.shell
+            && pane.view != PaneView::Preview
+            && cli.is_none_or(|c| c.spec().resume_args.is_some());
         let repo = self.git_heads.get(&pane.cwd).is_some_and(|g| g.repo);
         let remote = self.machine_of_pane(pane_id).is_some();
+        let item = |label: &str, act: Act| MenuItem::new(label, (pane_id.to_string(), act));
+        let icon = |g: Glyph| small(g, p.mu, p.panel);
         let mut items = vec![];
         if chat {
-            items.push(("New conversation".into(), Act::NewConversation, false));
+            items.push(item("New conversation", Act::NewConversation).icon(icon(Glyph::Compose)));
         }
-        if agent && !chat {
-            items.push((
-                format!(
-                    "Continue conversation on restore: {}",
-                    if pane.resume { "on" } else { "off" }
-                ),
-                Act::Resume(!pane.resume),
-                false,
-            ));
+        if resumable && !chat {
+            let label = format!(
+                "Continue conversation on restore: {}",
+                if pane.resume { "on" } else { "off" }
+            );
+            let mut it = MenuItem::new(label, (pane_id.to_string(), Act::Resume(!pane.resume)));
+            if pane.resume {
+                it = it.icon(small(Glyph::Check, p.tx, p.panel));
+            }
+            items.push(it);
         }
         if repo {
-            items.push(("Show changes".into(), Act::ShowChanges, false));
-            items.push(("Switch branch…".into(), Act::SwitchBranch, false));
+            items.push(item("Show changes", Act::ShowChanges).kbd(self.hint(ShortcutId::Diff)));
+            items.push(item("Switch branch…", Act::SwitchBranch).icon(icon(Glyph::Branch)));
             if !remote {
-                items.push((
-                    "Open a branch in a new pane…".into(),
-                    Act::OpenBranch,
-                    false,
-                ));
+                items.push(item("Open a branch in a new pane…", Act::OpenBranch));
             }
         }
-        items.push(("Restart".into(), Act::Restart, false));
-        items.push(("Close pane".into(), Act::Close, true));
+        items.push(item("Restart", Act::Restart).icon(icon(Glyph::Restart)));
+        items.push(MenuItem {
+            danger: true,
+            ..item("Close pane", Act::Close).icon(small(Glyph::Close, p.err, p.panel))
+        });
+        // Alone on screen, this ⋯ is the app's More menu too (#89).
+        if self.solo_pane().as_deref() == Some(pane_id) {
+            let id = pane_id.to_string();
+            for (i, mut it) in self
+                .utility_items(move |u| (id.clone(), Act::Util(u)), cx)
+                .into_iter()
+                .enumerate()
+            {
+                it.divider = i == 0;
+                items.push(it);
+            }
+        }
         items
     }
 
@@ -83,7 +115,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.pane_menu = None;
+        self.close_menus(cx);
         match act {
             Act::NewConversation => {
                 if let Some(chat) = self.chats.get(&pane_id).cloned() {
@@ -100,11 +132,9 @@ impl Shell {
                     p.resume = on;
                 }
             }),
+            // `toggleDiff(true)`: the panel shows this pane's folder.
             Act::ShowChanges => {
-                self.focused = Some(pane_id);
-                if self.changes.is_none() {
-                    self.toggle_changes(window, cx);
-                }
+                self.show_changes(&pane_id, window, cx);
             }
             Act::SwitchBranch | Act::OpenBranch => {
                 self.focused = Some(pane_id);
@@ -117,6 +147,7 @@ impl Shell {
             }
             Act::Restart => self.restart_pane(pane_id, cx),
             Act::Close => self.request_close_pane(pane_id, cx),
+            Act::Util(u) => self.run_util(u, window, cx),
         }
         cx.notify();
     }
@@ -124,31 +155,20 @@ impl Shell {
     /// The menu at the pointer, over a scrim that closes it.
     pub(super) fn pane_menu_layer(
         &mut self,
-        window: &Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let (pane_id, at) = self.pane_menu.clone()?;
-        let theme = cx.theme().clone();
         let size = window.viewport_size();
-        let rows = self.pane_menu_items(&pane_id).into_iter().enumerate().map(
-            |(i, (label, act, danger))| {
-                let id = pane_id.clone();
-                div()
-                    .id(SharedString::from(format!("pane-menu-{i}")))
-                    .role(Role::MenuItem)
-                    .aria_label(label.clone())
-                    .px_3()
-                    .py_1()
-                    .rounded_md()
-                    .text_sm()
-                    .cursor_pointer()
-                    .when(danger, |d| d.text_color(theme.danger))
-                    .hover(|d| d.bg(theme.secondary))
-                    .child(label)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.run_pane_act(id.clone(), act, window, cx)
-                    }))
-            },
+        let items = self.pane_menu_items(&pane_id, cx);
+        let card = self.menu_card(
+            "pane-menu",
+            "Pane actions",
+            items,
+            None,
+            |this, (id, act), window, cx| this.run_pane_act(id, act, window, cx),
+            window,
+            cx,
         );
         Some(
             deferred(
@@ -161,30 +181,20 @@ impl Shell {
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, _, _, cx| {
-                                this.pane_menu = None;
-                                cx.notify();
+                                this.close_menus(cx);
+                            }),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(|this, _, _, cx| {
+                                this.close_menus(cx);
                             }),
                         )
                         .child(
                             anchored()
                                 .position(at)
                                 .snap_to_window_with_margin(px(4.))
-                                .child(
-                                    div()
-                                        .w(px(260.))
-                                        .p_1()
-                                        .rounded_lg()
-                                        .border_1()
-                                        .border_color(theme.border)
-                                        .bg(theme.popover)
-                                        .shadow_lg()
-                                        .flex()
-                                        .flex_col()
-                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                            cx.stop_propagation()
-                                        })
-                                        .children(rows),
-                                ),
+                                .child(card),
                         ),
                 ),
             )
@@ -200,92 +210,133 @@ impl Shell {
             Some("running" | "approval" | "background")
         );
         if busy {
+            self.focused = Some(pane_id.clone());
             self.closing = Some(pane_id);
+            self.close_focus_pending = true;
             cx.notify();
         } else {
             self.close_pane(pane_id, cx);
         }
     }
 
-    /// "Process is still running", over the pane being closed.
+    /// "Process is still running", over the pane being closed; Cancel takes the keyboard,
+    /// Esc cancels.
     pub(super) fn close_confirm(
         &mut self,
         pane_id: &str,
         command: &str,
         cwd: &str,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         if self.closing.as_deref() != Some(pane_id) {
             return None;
         }
-        let theme = cx.theme().clone();
+        let p = pal(cx);
+        let focus = self
+            .close_focus
+            .get_or_insert_with(|| cx.focus_handle())
+            .clone();
+        if std::mem::take(&mut self.close_focus_pending) {
+            window.focus(&focus, cx);
+        }
+        let pid = self
+            .pids
+            .get(pane_id)
+            .filter(|p| **p > 0)
+            .map_or(String::new(), |p| format!(" (pid {p})"));
+        let mono = crate::terminal::mono(cx);
         let (cancel, close) = (pane_id.to_string(), pane_id.to_string());
         Some(
             div()
+                .id(SharedString::from(format!("close-scrim-{pane_id}")))
                 .absolute()
                 .inset_0()
                 .bg(hsla(0., 0., 0., 0.45))
                 .flex()
                 .items_center()
                 .justify_center()
+                .p(z(12.))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .child(
                     div()
-                        .w(px(380.))
-                        .max_w(relative(0.9))
-                        .p_4()
-                        .rounded_lg()
+                        .id(SharedString::from(format!("close-dlg-{pane_id}")))
+                        .role(Role::AlertDialog)
+                        .aria_label("Close pane")
+                        .w_full()
+                        .max_w(z(360.))
+                        .p(z(16.))
+                        .rounded(z(10.))
                         .border_1()
-                        .border_color(theme.border)
-                        .bg(theme.popover)
+                        .border_color(p.line2)
+                        .bg(p.raise)
+                        .shadow_lg()
                         .flex()
                         .flex_col()
-                        .gap_2()
-                        .child(
-                            div()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(theme.warning)
-                                .child("⚠ Process is still running"),
-                        )
-                        .child(div().text_sm().child(format!(
-                            "{command} is still running in {cwd}. Closing the pane ends the process. Unsaved work in this session stops."
-                        )))
+                        .gap(z(10.))
                         .child(
                             div()
                                 .flex()
-                                .justify_end()
-                                .gap_2()
+                                .items_center()
+                                .gap(z(8.))
+                                .text_size(z(14.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(glyph(Glyph::Warn, 16., p.warn, p.raise))
+                                .child("Process is still running"),
+                        )
+                        .child(
+                            div()
+                                .text_size(z(12.5))
+                                .text_color(p.mu)
                                 .child(
                                     div()
-                                        .id(SharedString::from(format!("close-cancel-{pane_id}")))
-                                        .a11y_button("Cancel")
-                                        .px_3()
-                                        .py_1()
-                                        .rounded_md()
-                                        .cursor_pointer()
-                                        .hover(|d| d.bg(theme.secondary))
-                                        .child("Cancel")
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            if this.closing.as_deref() == Some(cancel.as_str()) {
-                                                this.closing = None;
-                                            }
-                                            cx.notify();
-                                        })),
+                                        .flex()
+                                        .flex_wrap()
+                                        .child(div().font_family(mono.clone()).text_color(p.tx).child(command.to_string()))
+                                        .child("\u{a0}is still running in\u{a0}")
+                                        .child(div().font_family(mono).child(cwd.to_string()))
+                                        .child(format!("{pid}.")),
                                 )
                                 .child(
-                                    div()
-                                        .id(SharedString::from(format!("close-ok-{pane_id}")))
-                                        .a11y_button("Close pane")
-                                        .px_3()
-                                        .py_1()
-                                        .rounded_md()
-                                        .cursor_pointer()
-                                        .bg(theme.danger)
-                                        .text_color(gpui_kit::white())
-                                        .child("Close pane")
-                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                    "Closing the pane ends the process. Unsaved work in this session stops.",
+                                ),
+                        )
+                        .child(
+                            div()
+                                .mt(z(4.))
+                                .flex()
+                                .justify_end()
+                                .gap(z(8.))
+                                .child(
+                                    super::ui_btn(
+                                        SharedString::from(format!("close-cancel-{pane_id}")),
+                                        BtnKind::Ghost,
+                                        &p,
+                                    )
+                                    .a11y_button("Cancel")
+                                    .track_focus(&focus)
+                                    .focus_visible(|s| s.border_color(p.acc))
+                                    .child("Cancel")
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        if this.closing.as_deref() == Some(cancel.as_str()) {
                                             this.closing = None;
-                                            this.close_pane(close.clone(), cx);
-                                        })),
+                                            this.focus_pane_view(&cancel.clone(), window, cx);
+                                        }
+                                        cx.notify();
+                                    })),
+                                )
+                                .child(
+                                    super::ui_btn(
+                                        SharedString::from(format!("close-ok-{pane_id}")),
+                                        BtnKind::Danger,
+                                        &p,
+                                    )
+                                    .a11y_button("Close pane")
+                                    .child("Close pane")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.closing = None;
+                                        this.close_pane(close.clone(), cx);
+                                    })),
                                 ),
                         ),
                 )

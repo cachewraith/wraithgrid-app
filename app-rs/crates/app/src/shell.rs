@@ -47,13 +47,16 @@ use crate::terminal::{
     PaneResizer, PaneStarter, PaneWriter, TermCore, TerminalEvent, TerminalStyle, TerminalView,
 };
 use crate::usage_view::{UsageView, UsageViewEvent};
+use icons::{glyph, small, z, Glyph};
 
 mod auto_switch;
 mod empty;
 mod git_button;
 mod handoff;
+mod icons;
 mod later;
 mod machines;
+mod menu;
 mod pane_bars;
 mod pane_menu;
 mod preview;
@@ -65,7 +68,23 @@ mod tray;
 
 pub use machines::{probe_text, remote_host};
 
+/// The window's top strip where the OS draws its buttons (macOS, Windows' overlay).
 const TITLE_BAR: f32 = 36.0;
+/// The top row over the panes (`.top`), and one pane's header alone in it (#89).
+const TOP_ROW: f32 = 48.0;
+const SOLO_ROW: f32 = 44.0;
+/// The gap between the sidebar, main and Changes cards, and their corner (#88).
+const PANEL_GAP: f32 = 6.0;
+const PANEL_R: f32 = 10.0;
+/// Split panes keep at least this much room when a divider is dragged.
+const MIN_COL_PX: f32 = 180.0;
+const MIN_ROW_PX: f32 = 110.0;
+/// A pane drag starts only after the pointer moved this far (dnd-kit's distance).
+const PANE_DRAG_PX: f32 = 6.0;
+/// Six or more panes on screen switch to the compact density (`DENSE_PANE_COUNT`), where
+/// terminals draw at most this size (`DENSE_FONT_SIZE`).
+const DENSE_PANE_COUNT: usize = 6;
+const DENSE_FONT_SIZE: f32 = 11.0;
 const SAVE_DELAY: Duration = Duration::from_millis(300);
 
 pub struct Shell {
@@ -113,6 +132,9 @@ pub struct Shell {
     pane_menu: Option<(String, Point<Pixels>)>,
     /// The pane whose close asks first: its process still works.
     closing: Option<String>,
+    /// The confirm's Cancel button, which takes the keyboard when it shows.
+    close_focus: Option<FocusHandle>,
+    close_focus_pending: bool,
     /// Web preview panes' views (#74), made when first shown.
     previews: HashMap<String, Entity<crate::preview_view::PreviewView>>,
     focused: Option<String>,
@@ -159,6 +181,27 @@ pub struct Shell {
     _update_task: Option<Task<()>>,
     /// Set when the Electron app runs on the same config: nothing may start or be saved.
     blocked: Option<String>,
+    /// The open menu's keyboard and focus (`menu.rs`).
+    menu_nav: menu::MenuNav,
+    /// Each account's plan once a status check said it ("Pro", "Max").
+    plans: HashMap<String, String>,
+    _plan_task: Option<Task<()>>,
+    /// Each pane's process id in the host, for the close confirm.
+    pids: HashMap<String, i64>,
+    /// When each terminal's process was first seen ended (ms), for its exit bar.
+    ended_at: HashMap<String, i64>,
+    /// "110%" for a moment after the zoom changed, like a browser.
+    zoom_badge: Option<f64>,
+    _zoom_badge_task: Option<Task<()>>,
+    /// The window title last set.
+    window_title: String,
+    /// A pane header pressed and maybe dragged onto another pane to swap them.
+    pane_drag: Option<PaneDrag>,
+    /// Where the ⋯ and Git buttons were drawn, for their menus.
+    more_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
+    git_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
+    /// The grid was dense last frame (the sidebar folds once when it gets dense).
+    was_dense: bool,
 }
 
 impl Shell {
@@ -199,6 +242,8 @@ impl Shell {
             updated_to: None,
             pane_menu: None,
             closing: None,
+            close_focus: None,
+            close_focus_pending: false,
             previews: HashMap::new(),
             focused: None,
             zoomed: None,
@@ -242,6 +287,18 @@ impl Shell {
             _git_task: None,
             _update_task: None,
             blocked,
+            menu_nav: Default::default(),
+            plans: HashMap::new(),
+            _plan_task: None,
+            pids: HashMap::new(),
+            ended_at: HashMap::new(),
+            zoom_badge: None,
+            _zoom_badge_task: None,
+            window_title: String::new(),
+            pane_drag: None,
+            more_bounds: Rc::default(),
+            git_bounds: Rc::default(),
+            was_dense: false,
         }
     }
 
@@ -265,10 +322,13 @@ impl Shell {
             cx.background_executor().timer(Duration::from_secs(1)).await;
             let host = host.clone();
             let panes = cx.background_spawn(async move { host.list() }).await;
+            let pids: HashMap<String, i64> =
+                panes.iter().map(|p| (p.pane_id.clone(), p.pid)).collect();
             let states: HashMap<String, String> =
                 panes.into_iter().map(|p| (p.pane_id, p.state)).collect();
             if this
                 .update(cx, |this, cx| {
+                    this.pids = pids;
                     if this.states != states {
                         this.state_changes(&states, cx);
                         this.states = states;
@@ -566,7 +626,22 @@ impl Shell {
         .detach();
     }
 
+    /// `switchWorkspace`: the project's grid, its first pane focused, nothing zoomed or asked;
+    /// screens and dialogs close.
     fn select_workspace(&mut self, id: String, cx: &mut Context<Self>) {
+        let Some(ws) = self.config().workspaces.iter().find(|w| w.id == id) else {
+            return;
+        };
+        let ids: Vec<String> = ws.panes.iter().map(|p| p.id.clone()).collect();
+        self.focused = pane_ids(shown_layout(ws.layout.as_ref(), &ids).as_ref())
+            .into_iter()
+            .next();
+        self.side_show_grid();
+        self.zoomed = None;
+        self.closing = None;
+        self.modal = None;
+        self.pending_slot = None;
+        self.close_menus(cx);
         self.update(cx, |c| c.active_workspace = id);
     }
 
@@ -642,13 +717,7 @@ impl Shell {
                         PaletteAction::Preview(id) => this.open_preview(&id, window, cx),
                         PaletteAction::NewPane => return this.open_new_pane(window, cx),
                         PaletteAction::NewTerminal => this.new_pane(None, cx),
-                        PaletteAction::ToggleZoom => {
-                            this.zoomed = if this.zoomed.is_some() {
-                                None
-                            } else {
-                                this.focused.clone()
-                            };
-                        }
+                        PaletteAction::ToggleZoom => this.toggle_zoom(None, cx),
                         PaletteAction::Settings => return this.open_settings(window, cx),
                         PaletteAction::Accounts => return this.open_accounts(window, cx),
                         PaletteAction::Changes => this.toggle_changes(window, cx),
@@ -661,7 +730,7 @@ impl Shell {
                         PaletteAction::Shortcuts => return this.toggle_shortcuts(window, cx),
                         PaletteAction::ClosePane => {
                             if let Some(id) = this.focused.clone() {
-                                this.close_pane(id, cx);
+                                this.request_close_pane(id, cx);
                             }
                         }
                     }
@@ -1169,6 +1238,7 @@ impl Shell {
         if self.blocked.is_some() {
             return;
         }
+        self.probe_plans(cx);
         let usage = self.usage.clone();
         self._usage_task = Some(cx.spawn(async move |this, cx| {
             let mut poller = wraithgrid_usage::poll::UsagePoller::new(
@@ -1241,6 +1311,81 @@ impl Shell {
                     ))
                     .await;
             }
+        }));
+    }
+
+    /// Each signed-in account's plan ("pro", "max", "ChatGPT"), from its CLI's own status
+    /// command (the one sign-in ends with), for the account switcher (`accountInfo`'s plan).
+    fn probe_plans(&mut self, cx: &mut Context<Self>) {
+        let c = self.config().clone();
+        if !c.accounts.iter().any(|a| a.signed_in) {
+            return;
+        }
+        self._plan_task = Some(cx.spawn(async move |this, cx| {
+            let plans = cx
+                .background_spawn(async move {
+                    // The login shell's PATH, so the CLIs are found (waits for it once).
+                    let env = crate::runtime::spawn_env();
+                    let home = home_dir();
+                    c.accounts
+                        .iter()
+                        .filter(|a| a.signed_in)
+                        .filter_map(|a| {
+                            let flow = wraithgrid_core::login::login_flow(a.cli)?;
+                            let program = if a.cli == AgentCli::Claude {
+                                crate::mods_glue::claude_binary(&c, &env)
+                            } else {
+                                c.settings
+                                    .cli_paths
+                                    .iter()
+                                    .find(|(cli, p)| *cli == a.cli && !p.trim().is_empty())
+                                    .map(|(_, p)| {
+                                        wraithgrid_core::paths::resolve_user_path(p.trim(), &home)
+                                    })
+                                    .or_else(|| {
+                                        wraithgrid_core::platform::find_on_path(
+                                            a.cli.spec().bin,
+                                            |k| env.get(k).cloned(),
+                                            Os::current(),
+                                        )
+                                    })
+                            }?;
+                            let pane_env = wraithgrid_core::pane_env::build_pane_env(
+                                wraithgrid_core::pane_env::PaneEnvInput {
+                                    base: &env,
+                                    shell: false,
+                                    cli: a.cli,
+                                    config_dir: Some(a.config_dir.as_str()),
+                                    home: &home,
+                                    mod_dirs: &c.settings.mod_dirs,
+                                    os: Os::current(),
+                                },
+                            );
+                            let o = std::process::Command::new(program)
+                                .args(flow.status)
+                                .current_dir(&home)
+                                .env_clear()
+                                .envs(&pane_env)
+                                .stdin(std::process::Stdio::null())
+                                .output()
+                                .ok()?;
+                            let mut text = String::from_utf8_lossy(&o.stdout).into_owned();
+                            if flow.status_stderr {
+                                text.push_str(&String::from_utf8_lossy(&o.stderr));
+                            }
+                            let status = flow.parse_status(&text);
+                            status
+                                .plan
+                                .filter(|_| status.logged_in)
+                                .map(|p| (a.id.clone(), p))
+                        })
+                        .collect::<HashMap<_, _>>()
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.plans.extend(plans);
+                cx.notify();
+            });
         }));
     }
 
@@ -1363,8 +1508,7 @@ impl Shell {
                     }
                     ScheduledEvent::OpenChat(ws, pane) => {
                         this.scheduled_view = None;
-                        this.reveal_chat(ws, pane, cx);
-                        this.close_modal(window, cx);
+                        this.reveal_chat(ws, pane, window, cx);
                     }
                     ScheduledEvent::Toggle(id, on) => {
                         if let Some(job) = this
@@ -1399,21 +1543,53 @@ impl Shell {
         cx.notify();
     }
 
-    /// A pane's status as Electron's `PaneStatus` names it.
+    /// A pane's status as Electron's `PaneStatus` names it (`deriveStatus`): a terminal shown
+    /// but not in the host yet is starting; one whose account has not signed in needs login.
     fn pane_status(&self, pane_id: &str) -> Option<&'static str> {
         use wraithgrid_chat::ChatStatus;
-        match self.chat_states.get(pane_id) {
-            Some(ChatStatus::Running) => Some("running"),
-            Some(ChatStatus::Background) => Some("background"),
-            Some(ChatStatus::Approval) => Some("approval"),
-            Some(ChatStatus::Idle) => Some("idle"),
-            None => self.states.get(pane_id).map(|s| match s.as_str() {
-                "running" => "running",
-                "blocked" => "approval",
-                "exited" => "exited",
-                _ => "idle",
-            }),
+        if let Some(s) = self.chat_states.get(pane_id) {
+            return Some(match s {
+                ChatStatus::Running => "running",
+                ChatStatus::Background => "background",
+                ChatStatus::Approval => "approval",
+                ChatStatus::Idle => "idle",
+            });
         }
+        let ended = self
+            .terminals
+            .get(pane_id)
+            .is_some_and(|_| self.ended_at.contains_key(pane_id));
+        let host = self.states.get(pane_id).map(String::as_str);
+        if ended || host == Some("exited") {
+            return Some("exited");
+        }
+        if self.login_needed(pane_id) {
+            return Some("login");
+        }
+        match host {
+            Some("running") => Some("running"),
+            Some("blocked") => Some("approval"),
+            Some(_) => Some("idle"),
+            None if self.terminals.contains_key(pane_id) => Some("starting"),
+            None => None,
+        }
+    }
+
+    /// An agent's terminal whose account has not signed in yet (`loginNeeded`).
+    fn login_needed(&self, pane_id: &str) -> bool {
+        let c = self.config();
+        c.workspaces
+            .iter()
+            .flat_map(|w| &w.panes)
+            .find(|p| p.id == pane_id)
+            .filter(|p| {
+                !p.shell
+                    && p.view != PaneView::Preview
+                    && (p.view != PaneView::Chat || self.as_terminal.contains(&p.id))
+            })
+            .and_then(|p| p.account_id.as_deref())
+            .and_then(|id| c.account(id))
+            .is_some_and(|a| !a.signed_in)
     }
 
     fn pane_statuses(&self) -> HashMap<String, &'static str> {
@@ -1456,8 +1632,7 @@ impl Shell {
                 ProjectPageEvent::Reveal(pane) => {
                     this.project_view = None;
                     let ws = this.config().active_workspace.clone();
-                    this.reveal_chat(&ws, pane, cx);
-                    this.close_modal(window, cx);
+                    this.reveal_chat(&ws, pane, window, cx);
                 }
                 ProjectPageEvent::Reopen(ws, pane) => {
                     this.project_view = None;
@@ -1992,6 +2167,8 @@ impl Shell {
         self.host_for(&pane_id).kill(&pane_id);
         self.router.unregister(&pane_id);
         self.terminals.remove(&pane_id);
+        self.ended_at.remove(&pane_id);
+        self.login_started.retain(|p| p != &pane_id);
         self.focused = Some(pane_id);
         cx.notify();
     }
@@ -2096,12 +2273,29 @@ impl Shell {
         if let Some(pane_id) = self.focused.clone() {
             // A new pane has no view until it is drawn: focus it on the next frame.
             cx.on_next_frame(window, move |this, window, cx| {
-                if let Some(view) = this.terminals.get(&pane_id) {
-                    window.focus(&view.focus_handle(cx), cx);
-                }
+                this.focus_pane_view(&pane_id, window, cx)
             });
         }
         cx.notify();
+    }
+
+    /// Gives the keyboard to a pane: its terminal, or its chat's message box.
+    fn focus_pane_view(&mut self, pane_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(view) = self.terminals.get(pane_id) {
+            window.focus(&view.focus_handle(cx), cx);
+        } else if let Some(chat) = self.chats.get(pane_id) {
+            let handle = chat.read(cx).composer_focus(cx);
+            window.focus(&handle, cx);
+        }
+    }
+
+    /// `focusPane`: the pane is focused, and its view takes the keyboard.
+    fn focus_pane(&mut self, pane_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.focused.as_deref() != Some(pane_id) {
+            self.focused = Some(pane_id.to_string());
+            cx.notify();
+        }
+        self.focus_pane_view(pane_id, window, cx);
     }
 
     /// Adds a pane to the active project next to the focused one (`addPaneToActive`).
@@ -2402,6 +2596,7 @@ impl Shell {
                                 a.signed_in = true;
                             }
                         });
+                        this.probe_plans(cx);
                     }
                     LoginEvent::UseTerminal => {
                         this.login_in_terminal(account_id.clone(), window, cx)
@@ -2550,8 +2745,15 @@ impl Shell {
         true
     }
 
-    /// Shows a chat: switches to its project and focuses it, reopening it from History.
-    fn reveal_chat(&mut self, ws_id: &str, pane_id: &str, cx: &mut Context<Self>) {
+    /// `revealPane`: switches to the chat's project, puts it back in the layout if it was left
+    /// out, and focuses it in the grid; a closed one comes back from History.
+    fn reveal_chat(
+        &mut self,
+        ws_id: &str,
+        pane_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let open = self
             .config()
             .workspaces
@@ -2560,7 +2762,26 @@ impl Shell {
             .map(|w| w.id.clone());
         match open {
             Some(ws) => {
-                self.select_workspace(ws, cx);
+                if self.config().active_workspace != ws {
+                    self.select_workspace(ws, cx);
+                }
+                let id = pane_id.to_string();
+                self.update(cx, |c| {
+                    let active = c.active_workspace.clone();
+                    if let Some(w) = c.workspaces.iter_mut().find(|w| w.id == active) {
+                        let ids: Vec<String> = w.panes.iter().map(|p| p.id.clone()).collect();
+                        let shown = shown_layout(w.layout.as_ref(), &ids);
+                        if !pane_ids(shown.as_ref()).contains(&id) {
+                            w.layout = Some(place_new_pane(
+                                shown.as_ref(),
+                                &id,
+                                None,
+                                None,
+                                SplitDir::Row,
+                            ));
+                        }
+                    }
+                });
                 self.focused = Some(pane_id.to_string());
                 self.zoomed = None;
             }
@@ -2568,7 +2789,8 @@ impl Shell {
                 self.reopen_chat(ws_id, pane_id, true, cx);
             }
         }
-        cx.notify();
+        self.side_show_grid();
+        self.close_modal(window, cx);
     }
 
     /// The pane's terminal view, made the first time it is shown: it reattaches to the
@@ -2683,9 +2905,24 @@ impl Shell {
         }
     }
 
-    fn title_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (left, right) = self.top_bar(window, cx);
-        let theme = cx.theme();
+    /// Where the window's frame starts under its top strip, in window px.
+    pub(super) fn frame_top(&self, _window: &Window) -> f32 {
+        let zoom = self.config().settings.ui_zoom as f32;
+        if self.tall_strip() {
+            TITLE_BAR * zoom
+        } else {
+            PANEL_GAP * zoom
+        }
+    }
+
+    /// macOS and Windows draw their window buttons in a strip of their own (`TitleBar`);
+    /// elsewhere the strip is a thin gap and our buttons end the top row (#89).
+    fn tall_strip(&self) -> bool {
+        matches!(self.chrome, Chrome::Mac | Chrome::Overlay)
+    }
+
+    /// Which window buttons to draw: close, and minimize/maximize.
+    fn controls_shown(&self, window: &Window) -> (bool, bool) {
         let tiled_edge = match window.window_decorations() {
             Decorations::Client { tiling } => {
                 tiling.top || tiling.left || tiling.right || tiling.bottom
@@ -2694,85 +2931,265 @@ impl Shell {
         };
         let native_frame = matches!(window.window_decorations(), Decorations::Server)
             && self.chrome == Chrome::Custom;
-        let (show_close, show_min_max) = match self.chrome {
+        match self.chrome {
             Chrome::Mac => (false, false),
             Chrome::Tiling => (true, false),
             Chrome::Overlay => (true, true),
             Chrome::Custom => (!native_frame, !native_frame && !tiled_edge),
-        };
-        let control = |id: &'static str,
-                       glyph: &'static str,
-                       area: WindowControlArea,
-                       cx: &mut Context<Self>| {
-            div()
-                .id(id)
-                .a11y_button(match area {
-                    WindowControlArea::Close => "Close window",
-                    WindowControlArea::Max => "Maximize",
-                    _ => "Minimize",
-                })
-                .w(px(40.))
-                .h_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .cursor_pointer()
-                .hover(|d| d.bg(cx.theme().secondary))
-                .window_control_area(area)
-                .child(glyph)
-                .on_click(cx.listener(move |this, _, window, cx| match area {
-                    WindowControlArea::Close => this.request_close(window, cx),
-                    WindowControlArea::Max => window.zoom_window(),
-                    _ => window.minimize_window(),
-                }))
-        };
-        div()
-            .id("title-bar")
-            .h(px(TITLE_BAR))
-            .flex_shrink_0()
-            .flex()
-            .items_center()
-            .gap_2()
-            .pl_3()
-            .when(self.chrome == Chrome::Mac, |d| d.pl(px(80.)))
-            .bg(theme.title_bar)
-            .border_b_1()
-            .border_color(theme.border)
-            .window_control_area(WindowControlArea::Drag)
-            .on_mouse_down(MouseButton::Left, |event, window, _| {
+        }
+    }
+
+    /// Empty space that moves the window; a double-click maximizes, as a title bar does. What
+    /// sits on it occludes it, so its buttons never move the window (and on Windows the hit
+    /// test sees them, not the drag area).
+    fn drag_area(&self, el: Stateful<Div>) -> Stateful<Div> {
+        let zoom = self.chrome != Chrome::Tiling;
+        el.window_control_area(WindowControlArea::Drag)
+            .on_mouse_down(MouseButton::Left, move |event, window, _| {
                 if event.click_count == 2 {
-                    window.zoom_window();
+                    if zoom {
+                        window.zoom_window();
+                    }
                 } else {
                     window.start_window_move();
                 }
             })
-            .child(div().font_weight(FontWeight::SEMIBOLD).child("Wraithgrid"))
-            .when(self.blocked.is_none(), |d| d.children(left))
-            .child(div().flex_1())
-            .when(self.blocked.is_none(), |d| d.children(right))
-            .when_some(self.update_button(), |d, (label, enabled)| {
-                d.child(
-                    button("update", "", cx)
-                        .aria_label(label.clone())
-                        .child(label)
-                        .when(enabled, |b| {
-                            b.bg(cx.theme().primary)
-                                .text_color(cx.theme().primary_foreground)
+    }
+
+    /// Our minimize / maximize / close at the end of the top row (`WindowControls`); none
+    /// where the OS draws its own.
+    pub(super) fn window_controls(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if self.tall_strip() {
+            return None;
+        }
+        self.control_group(window, cx)
+    }
+
+    fn control_group(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (show_close, show_min_max) = self.controls_shown(window);
+        if !show_close && !show_min_max {
+            return None;
+        }
+        let p = sidebar::pal(cx);
+        let control =
+            |id: &'static str, g: Glyph, area: WindowControlArea, cx: &mut Context<Self>| {
+                let close = area == WindowControlArea::Close;
+                let group = SharedString::from(id);
+                div()
+                    .id(id)
+                    .group(group.clone())
+                    .a11y_button(match area {
+                        WindowControlArea::Close => "Close window",
+                        WindowControlArea::Max => "Maximize",
+                        _ => "Minimize",
+                    })
+                    .occlude()
+                    .relative()
+                    .w(z(34.))
+                    .h(z(26.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(z(6.))
+                    .cursor_pointer()
+                    .hover(move |s| {
+                        if close {
+                            s.bg(rgb(0xc0263e))
+                        } else {
+                            s.bg(p.raise)
+                        }
+                    })
+                    .window_control_area(area)
+                    .tooltip(move |window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(match area {
+                            WindowControlArea::Close => "Close window",
+                            WindowControlArea::Max => "Maximize",
+                            _ => "Minimize",
                         })
-                        .on_click(cx.listener(|this, _, _, cx| this.run_update(cx))),
-                )
+                        .build(window, cx)
+                    })
+                    .child(glyph(g, 16., p.mu, p.bg).group_hover(group.clone(), |s| {
+                        if close {
+                            s.opacity(0.)
+                        } else {
+                            s
+                        }
+                    }))
+                    .when(close, |d| {
+                        d.child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .opacity(0.)
+                                .group_hover(group, |s| s.opacity(1.))
+                                .child(glyph(g, 16., gpui_kit::white(), p.bg)),
+                        )
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| match area {
+                        WindowControlArea::Close => this.request_close(window, cx),
+                        WindowControlArea::Max => window.zoom_window(),
+                        _ => window.minimize_window(),
+                    }))
+            };
+        Some(
+            div()
+                .flex_none()
+                .ml(z(4.))
+                .flex()
+                .items_center()
+                .gap(px(2.))
+                .when(show_min_max, |d| {
+                    d.child(control("min", Glyph::Minimize, WindowControlArea::Min, cx))
+                        .child(control("max", Glyph::Maximize, WindowControlArea::Max, cx))
+                })
+                .when(show_close, |d| {
+                    d.child(control("close", Glyph::Close, WindowControlArea::Close, cx))
+                })
+                .into_any_element(),
+        )
+    }
+
+    /// The in-app update's button (download, then restart into it), while there is one.
+    pub(super) fn update_chip(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (label, enabled) = self.update_button()?;
+        let p = sidebar::pal(cx);
+        Some(
+            ui_btn(
+                "update",
+                if enabled {
+                    BtnKind::Primary
+                } else {
+                    BtnKind::Plain
+                },
+                &p,
+            )
+            .a11y_button(label.clone())
+            .occlude()
+            .h(z(28.))
+            .child(label)
+            .on_click(cx.listener(|this, _, _, cx| this.run_update(cx)))
+            .into_any_element(),
+        )
+    }
+
+    /// What the main area shows, for the title: a screen's name, else the project's.
+    fn place_name(&self) -> String {
+        match self.sidebar_screen_title() {
+            Some(t) => t.to_string(),
+            None => self.config().active().name.clone(),
+        }
+    }
+
+    fn sidebar_screen_title(&self) -> Option<&'static str> {
+        [
+            (self.settings_view.is_some(), "Settings"),
+            (self.accounts_view.is_some(), "Accounts"),
+            (self.mods_view.is_some(), "Mods"),
+            (self.usage_view.is_some(), "Usage"),
+            (self.scheduled_view.is_some(), "Scheduled"),
+        ]
+        .into_iter()
+        .find_map(|(on, t)| on.then_some(t))
+    }
+
+    /// The window's top strip: on macOS and Windows the name with the OS's buttons
+    /// (`TitleBar`), elsewhere a thin gap above the cards that moves the window.
+    fn frame_strip(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        if !self.tall_strip() {
+            return self
+                .drag_area(div().id("title-strip"))
+                .h(z(PANEL_GAP))
+                .flex_none()
+                .into_any_element();
+        }
+        let p = sidebar::pal(cx);
+        let mac = self.chrome == Chrome::Mac;
+        let controls = if mac {
+            None
+        } else {
+            self.control_group(window, cx)
+        };
+        let update = if mac { None } else { self.update_chip(cx) };
+        self.drag_area(div().id("title-bar"))
+            .h(z(TITLE_BAR))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(z(8.))
+            .pl(if mac {
+                DefiniteLength::from(px(80.))
+            } else {
+                DefiniteLength::from(z(12.))
             })
-            .when(show_min_max, |d| {
-                d.child(control("min", "–", WindowControlArea::Min, cx))
-                    .child(control("max", "□", WindowControlArea::Max, cx))
-            })
-            .when(show_close, |d| {
-                d.child(control("close", "✕", WindowControlArea::Close, cx))
-            })
+            .pr(z(6.))
+            .child(logo(18.))
+            .child(
+                div()
+                    .text_size(z(13.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("Wraithgrid"),
+            )
+            .child(
+                div()
+                    .text_size(z(12.))
+                    .text_color(p.mu)
+                    .truncate()
+                    .child(format!("— {}", self.place_name())),
+            )
+            .child(div().flex_1().h_full())
+            .children(update)
+            .children(controls)
+            .into_any_element()
     }
 
     fn sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.render_sidebar(window, cx)
+    }
+
+    /// The pane the grid shows alone (one pane, not zoomed): its header is the top row (#89).
+    pub(super) fn solo_pane(&self) -> Option<String> {
+        if self.blocked.is_some() || self.side_view() != "grid" {
+            return None;
+        }
+        let ws = self.config().active();
+        if self
+            .zoomed
+            .as_ref()
+            .is_some_and(|z| ws.panes.iter().any(|p| &p.id == z))
+        {
+            return None;
+        }
+        let ids: Vec<String> = ws.panes.iter().map(|p| p.id.clone()).collect();
+        match shown_layout(ws.layout.as_ref(), &ids) {
+            Some(LayoutNode::Pane { pane_id }) => Some(pane_id),
+            _ => None,
+        }
+    }
+
+    /// Six or more panes on screen: the compact density (smaller terminal text, sidebar folds).
+    fn dense(&self) -> bool {
+        if self.zoomed.is_some() || self.side_view() != "grid" {
+            return false;
+        }
+        let ws = self.config().active();
+        let ids: Vec<String> = ws.panes.iter().map(|p| p.id.clone()).collect();
+        pane_ids(shown_layout(ws.layout.as_ref(), &ids).as_ref()).len() >= DENSE_PANE_COUNT
+    }
+
+    /// A rebindable shortcut as its keys ("Ctrl+Shift+Z").
+    pub(super) fn hint(&self, id: ShortcutId) -> String {
+        bindings(&self.config().settings.shortcuts)
+            .into_iter()
+            .find(|(i, _)| *i == id)
+            .map(|(_, b)| sidebar::binding_hint(&b))
+            .unwrap_or_default()
     }
 
     fn grid(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -2804,9 +3221,19 @@ impl Shell {
             .as_ref()
             .and_then(|z| ws.panes.iter().find(|p| &p.id == z))
         {
-            return self.pane(&p.clone(), window, cx);
+            return div()
+                .size_full()
+                .p(z(6.))
+                .child(self.pane(&p.clone(), window, cx))
+                .into_any_element();
         }
-        match shown_layout(ws.layout.as_ref(), &ids) {
+        // While a divider is dragged, its sizes live here and are saved on release.
+        let layout = self
+            .drag
+            .as_ref()
+            .and_then(|d| d.current.clone())
+            .or_else(|| shown_layout(ws.layout.as_ref(), &ids));
+        match layout {
             None => self.empty_project(cx),
             Some(layout) => self.node(&layout, &ws.panes, vec![], window, cx),
         }
@@ -2826,27 +3253,34 @@ impl Shell {
                 None => div().into_any_element(),
             },
             LayoutNode::Empty { slot_id } => {
+                // `.slot`: a dashed card inset in its cell.
                 let slot = slot_id.clone();
-                let theme = cx.theme().clone();
+                let p = sidebar::pal(cx);
+                let group = SharedString::from(format!("slot-{slot_id}"));
                 div()
                     .size_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .border_1()
-                    .border_dashed()
-                    .border_color(theme.border)
+                    .p(z(8.))
                     .child(
                         div()
                             .id(SharedString::from(format!("slot-{slot_id}")))
+                            .group(group.clone())
                             .a11y_button("New pane here")
-                            .px_3()
-                            .py_1()
-                            .rounded_md()
+                            .size_full()
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .justify_center()
+                            .gap(z(8.))
+                            .rounded(z(6.))
+                            .border_1()
+                            .border_dashed()
+                            .border_color(p.line2)
+                            .text_size(z(13.))
+                            .text_color(p.mu)
                             .cursor_pointer()
-                            .text_color(theme.muted_foreground)
-                            .hover(|d| d.bg(theme.secondary))
-                            .child("+ New pane here")
+                            .hover(|s| s.border_color(p.acc).text_color(p.tx))
+                            .child(glyph(Glyph::Plus, 16., p.mu, p.bg))
+                            .child("New pane here")
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.pending_slot = Some(slot.clone());
                                 this.open_new_pane(window, cx);
@@ -2859,9 +3293,9 @@ impl Shell {
                 sizes,
                 children,
             } => {
-                let border = cx.theme().border;
+                let p = sidebar::pal(cx);
                 let row = *dir == SplitDir::Row;
-                let mut container = div().size_full().flex().bg(border);
+                let mut container = div().size_full().flex().relative();
                 container = if row {
                     container.flex_row()
                 } else {
@@ -2879,20 +3313,54 @@ impl Shell {
                 );
                 for (i, (child, size)) in children.iter().zip(sizes).enumerate() {
                     if i > 0 {
-                        // A divider: drag it to share the space between its neighbours.
+                        // A 1px line; drag its wider edge to share the space between its
+                        // neighbours (`.sep`).
                         let (drag_path, dir) = (path.clone(), *dir);
+                        let active = self
+                            .drag
+                            .as_ref()
+                            .is_some_and(|d| d.path == path && d.index == i - 1);
                         let handle = div()
-                            .id(SharedString::from(format!("divider-{path:?}-{i}")))
+                            .relative()
                             .flex_shrink_0()
-                            .when(row, |d| d.w(px(4.)).h_full().cursor_col_resize())
-                            .when(!row, |d| d.h(px(4.)).w_full().cursor_row_resize())
-                            .hover(|d| d.bg(cx.theme().ring))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, e: &MouseDownEvent, _, cx| {
-                                    this.start_drag(drag_path.clone(), i - 1, dir, e.position);
-                                    cx.stop_propagation();
-                                }),
+                            .bg(if active { p.acc } else { p.line })
+                            .when(row, |d| d.w(px(1.)).h_full())
+                            .when(!row, |d| d.h(px(1.)).w_full())
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("divider-{path:?}-{i}")))
+                                    .role(Role::Splitter)
+                                    .aria_label("Resize panes")
+                                    .absolute()
+                                    .when(row, |d| {
+                                        d.top_0()
+                                            .bottom_0()
+                                            .left(px(-1.))
+                                            .w(px(3.))
+                                            .cursor_col_resize()
+                                    })
+                                    .when(!row, |d| {
+                                        d.left_0()
+                                            .right_0()
+                                            .top(px(-1.))
+                                            .h(px(3.))
+                                            .cursor_row_resize()
+                                    })
+                                    .when(active, |d| d.bg(p.acc))
+                                    .hover(|s| s.bg(p.acc))
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                                            this.start_drag(
+                                                drag_path.clone(),
+                                                i - 1,
+                                                dir,
+                                                e.position,
+                                            );
+                                            cx.stop_propagation();
+                                            cx.notify();
+                                        }),
+                                    ),
                             );
                         container = container.child(handle);
                     }
@@ -2937,30 +3405,82 @@ impl Shell {
             start_sizes: sizes.clone(),
             extent: f32::from(extent),
             layout,
+            current: None,
         });
     }
 
+    /// Sizes follow the pointer in memory; nothing is saved until the release.
     fn drag_to(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
-        let Some(d) = &self.drag else { return };
+        let Some(d) = &mut self.drag else { return };
         let moved = if d.dir == SplitDir::Row {
             at.x - d.start.x
         } else {
             at.y - d.start.y
         };
-        let delta = f64::from(f32::from(moved) / d.extent.max(1.0) * 100.0);
+        let extent = d.extent.max(1.0);
+        let delta = f64::from(f32::from(moved) / extent * 100.0);
         let (a, b) = (d.start_sizes[d.index], d.start_sizes[d.index + 1]);
-        // Neither neighbour goes below 5% of the split.
-        let delta = delta.clamp(5.0 - a, b - 5.0);
+        // Neither neighbour gets narrower than a column (or lower than a row) can be.
+        let min_px = if d.dir == SplitDir::Row {
+            MIN_COL_PX
+        } else {
+            MIN_ROW_PX
+        };
+        let min = f64::from(min_px / extent * 100.0);
+        let (lo, hi) = (min - a, b - min);
+        let delta = if lo <= hi { delta.clamp(lo, hi) } else { 0.0 };
         let mut sizes = d.start_sizes.clone();
         sizes[d.index] = a + delta;
         sizes[d.index + 1] = b - delta;
-        let layout = set_sizes_at(&d.layout, &d.path, &sizes);
+        d.current = Some(set_sizes_at(&d.layout, &d.path, &sizes));
+        cx.notify();
+    }
+
+    /// The divider was let go: its sizes are saved.
+    fn finish_drag(&mut self, cx: &mut Context<Self>) {
+        let Some(layout) = self.drag.take().and_then(|d| d.current) else {
+            return cx.notify();
+        };
         self.update(cx, |c| {
             let active = c.active_workspace.clone();
             if let Some(w) = c.workspaces.iter_mut().find(|w| w.id == active) {
                 w.layout = Some(layout);
             }
         });
+    }
+
+    /// A pane header pressed: a drag onto another pane starts after a few pixels.
+    fn pane_drag_move(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(d) = &mut self.pane_drag else { return };
+        d.at = at;
+        if !d.active {
+            let moved = at - d.start;
+            let dist = (f32::from(moved.x).powi(2) + f32::from(moved.y).powi(2)).sqrt();
+            d.active = dist >= PANE_DRAG_PX;
+        }
+        if d.active {
+            cx.notify();
+        }
+    }
+
+    /// The pane under the pointer while dragging one, other than the dragged one.
+    fn pane_drop_target(&self) -> Option<String> {
+        let d = self.pane_drag.as_ref().filter(|d| d.active)?;
+        self.pane_bounds
+            .borrow()
+            .iter()
+            .find(|(id, b)| **id != d.pane_id && b.contains(&d.at))
+            .map(|(id, _)| id.clone())
+    }
+
+    fn pane_drag_end(&mut self, cx: &mut Context<Self>) {
+        let target = self.pane_drop_target();
+        if let Some(d) = self.pane_drag.take() {
+            if let Some(t) = target {
+                self.swap_panes(&d.pane_id, &t, cx);
+            }
+            cx.notify();
+        }
     }
 
     /// Something was sent in the pane: next launch continues its conversation.
@@ -2985,6 +3505,19 @@ impl Shell {
         }
     }
 
+    /// Esc: closes the nearest thing that is open (a menu, the drawer, the close confirm).
+    fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.close_side_popups(cx) {
+            return true;
+        }
+        if let Some(id) = self.closing.take() {
+            self.focus_pane_view(&id, window, cx);
+            cx.notify();
+            return true;
+        }
+        false
+    }
+
     /// App shortcuts, before the focused terminal sees the key.
     fn shortcut(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         // Settings → Keyboard is recording a new chord: the key is the binding.
@@ -2993,10 +3526,27 @@ impl Shell {
             return;
         }
         let k = &event.keystroke;
-        // A sidebar menu or picker closes on Esc wherever the focus is.
-        if k.key == "escape" && self.close_side_popups(cx) {
+        if k.key == "escape" && self.modal.is_none() && self.escape(window, cx) {
             window.refresh();
             return cx.stop_propagation();
+        }
+        // Shift+F10 or the Menu key: the focused pane's menu, under its header.
+        let menu_key = (k.key == "f10" && k.modifiers.shift && !k.modifiers.control)
+            || k.key == "menu"
+            || k.key == "contextmenu";
+        if menu_key && self.modal.is_none() && self.side_view() == "grid" {
+            let in_sidebar = self.sidebar_has_focus(window, cx);
+            if let (false, Some(id)) = (in_sidebar, self.focused.clone()) {
+                let at = self
+                    .pane_bounds
+                    .borrow()
+                    .get(&id)
+                    .map_or(point(px(200.), px(120.)), |b| {
+                        b.origin + point(px(12.), z(34.).to_pixels(window.rem_size()))
+                    });
+                self.open_pane_menu(id, at, true, cx);
+                return cx.stop_propagation();
+            }
         }
         let m = k.modifiers;
         let press = Press {
@@ -3013,44 +3563,111 @@ impl Shell {
         ) else {
             return;
         };
+        // Dialogs own the keyboard, except that a sheet's own shortcut toggles it.
+        let toggles = matches!(
+            (&action, &self.modal),
+            (
+                Action::Shortcut(ShortcutId::Shortcuts),
+                Some(Modal::Shortcuts(_))
+            ) | (
+                Action::Shortcut(ShortcutId::Palette),
+                Some(Modal::Palette(_))
+            )
+        );
+        if self.modal.is_some() && !toggles {
+            return;
+        }
         cx.stop_propagation();
         match action {
             Action::Shortcut(ShortcutId::NewPane) => self.open_new_pane(window, cx),
-            Action::Shortcut(ShortcutId::Palette) => self.open_palette(window, cx),
-            Action::Shortcut(ShortcutId::ClosePane) => {
-                if let Some(id) = self.focused.clone() {
-                    self.close_pane(id, cx);
+            Action::Shortcut(ShortcutId::Palette) => {
+                if self.modal.is_some() {
+                    self.close_modal(window, cx)
+                } else {
+                    self.open_palette(window, cx)
                 }
             }
-            Action::Shortcut(ShortcutId::ToggleZoom) => {
-                self.zoomed = if self.zoomed.is_some() {
-                    None
-                } else {
-                    self.focused.clone()
-                };
-                cx.notify();
+            Action::Shortcut(ShortcutId::ClosePane) => {
+                if self.side_view() == "grid" {
+                    if let Some(id) = self.focused.clone() {
+                        self.request_close_pane(id, cx);
+                    }
+                }
             }
+            Action::Shortcut(ShortcutId::ToggleZoom) => self.toggle_zoom(None, cx),
             Action::Shortcut(ShortcutId::Diff) => self.toggle_changes(window, cx),
             Action::Shortcut(ShortcutId::Shortcuts) => self.toggle_shortcuts(window, cx),
-            Action::Focus(dir) => self.move_focus(dir, window, cx),
+            Action::Focus(dir) => {
+                if self.side_view() == "grid" {
+                    self.move_focus(dir, window, cx)
+                }
+            }
             Action::Workspace(i) => {
                 if let Some(id) = self.config().workspaces.get(i).map(|w| w.id.clone()) {
                     self.select_workspace(id, cx);
+                    self.close_modal(window, cx);
                 }
             }
             Action::UiZoom(delta) => {
                 let next = step_zoom(self.config().settings.ui_zoom, delta);
                 self.update(cx, |c| c.settings.ui_zoom = next);
+                self.show_zoom_badge(next, cx);
             }
         }
+    }
+
+    /// The keyboard is in the sidebar (a project row): its own Shift+F10 opens its menu.
+    fn sidebar_has_focus(&self, window: &Window, cx: &App) -> bool {
+        let Some(focused) = window.focused(cx) else {
+            return false;
+        };
+        let in_pane = self
+            .terminals
+            .values()
+            .any(|v| v.focus_handle(cx).contains_focused(window, cx))
+            || self.chats.values().any(|v| {
+                v.focus_handle(cx).contains_focused(window, cx)
+                    || v.read(cx).composer_focus(cx).contains_focused(window, cx)
+            });
+        let shell = self.focus.as_ref().is_some_and(|f| *f == focused);
+        !in_pane && !shell
+    }
+
+    /// "110%" for a moment after the zoom changes (`ZoomBadge`).
+    fn show_zoom_badge(&mut self, zoom: f64, cx: &mut Context<Self>) {
+        self.zoom_badge = Some(zoom);
+        self._zoom_badge_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(1200))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.zoom_badge = None;
+                cx.notify();
+            });
+        }));
+        cx.notify();
     }
 
     /// Focuses the nearest pane in a direction, by where panes were drawn.
     fn move_focus(&mut self, dir: Direction, window: &mut Window, cx: &mut Context<Self>) {
         let bounds = self.pane_bounds.borrow().clone();
         let Some(from) = self.focused.as_ref().and_then(|f| bounds.get(f)).copied() else {
+            // Nothing focused yet: the first pane on screen.
+            let first = {
+                let ws = self.config().active();
+                let ids: Vec<String> = ws.panes.iter().map(|p| p.id.clone()).collect();
+                pane_ids(shown_layout(ws.layout.as_ref(), &ids).as_ref())
+                    .into_iter()
+                    .next()
+            };
+            if let Some(id) = first {
+                self.focus_pane(&id, window, cx);
+            }
             return;
         };
+        if self.zoomed.is_some() {
+            return;
+        }
         let c = from.center();
         let best = bounds
             .iter()
@@ -3068,37 +3685,37 @@ impl Shell {
             })
             .min_by(|a, b| a.1.total_cmp(&b.1));
         if let Some((id, _)) = best {
-            if let Some(view) = self.terminals.get(&id) {
-                window.focus(&view.focus_handle(cx), cx);
-            }
-            self.focused = Some(id);
-            cx.notify();
+            self.focus_pane(&id, window, cx);
         }
     }
 
     fn pane(&mut self, pane: &Pane, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
+        let p = sidebar::pal(cx);
         let config = self.config().clone();
         let chat = pane.view == PaneView::Chat && !self.as_terminal.contains(&pane.id);
+        let preview = pane.view == PaneView::Preview;
         let label = pane_label(&config, pane);
-        let id = pane.id.clone();
+        let account = pane
+            .account_id
+            .as_deref()
+            .and_then(|a| config.account(a))
+            .cloned();
+        let cli = account.as_ref().map_or(AgentCli::Claude, |a| a.cli);
+        let command = if pane.shell {
+            "shell".to_string()
+        } else {
+            cli.spec().bin.to_string()
+        };
         let mut ended_text: Option<String> = None;
-        let (body, status, stopped): (AnyElement, String, bool) = if pane.view == PaneView::Preview
-        {
+        // The terminal's own title (what the CLI set), for the state word's tooltip.
+        let mut detail: Option<String> = None;
+        let body: AnyElement = if preview {
             let view = self.preview(pane, window, cx);
-            (
-                div().size_full().child(view).into_any_element(),
-                "preview".to_string(),
-                false,
-            )
+            div().size_full().child(view).into_any_element()
         } else if chat {
             let view = self.chat(pane, window, cx);
-            let status = match view.read(cx).status() {
-                wraithgrid_chat::ChatStatus::Running => "working",
-                wraithgrid_chat::ChatStatus::Approval => "needs approval",
-                wraithgrid_chat::ChatStatus::Background => "in background",
-                wraithgrid_chat::ChatStatus::Idle => "chat",
-            };
+            self.chat_states
+                .insert(pane.id.clone(), view.read(cx).status());
             if view.focus_handle(cx).contains_focused(window, cx)
                 || view
                     .read(cx)
@@ -3107,44 +3724,46 @@ impl Shell {
             {
                 self.focused = Some(pane.id.clone());
             }
-            (
-                div().size_full().child(view).into_any_element(),
-                status.to_string(),
-                false,
-            )
+            div().size_full().child(view).into_any_element()
         } else {
             let view = self.terminal(pane, cx);
-            let (title, ended) = {
-                let v = view.read(cx);
-                (v.title(), v.ended())
-            };
-            let focused = view.focus_handle(cx).contains_focused(window, cx);
-            if focused {
+            let ended = view.read(cx).ended();
+            detail = Some(view.read(cx).title());
+            if view.focus_handle(cx).contains_focused(window, cx) {
                 self.focused = Some(pane.id.clone());
             }
-            let stopped = ended.is_some();
-            ended_text = ended.clone();
-            let status = ended.unwrap_or(title);
-            (
-                div().size_full().child(view).into_any_element(),
-                status,
-                stopped,
-            )
+            if ended.is_none() {
+                self.ended_at.remove(&pane.id);
+            }
+            ended_text = ended;
+            div().size_full().child(view).into_any_element()
         };
-        let focused = self.focused.as_deref() == Some(pane.id.as_str());
-        let close = id.clone();
-        let confirm = self.close_confirm(&pane.id, &label, &pane.cwd, cx);
-        let banner = self.login_banner(pane, chat, cx);
-        let exited = self.exited_bar(pane, ended_text.as_deref(), cx);
+        let exited = ended_text.is_some();
+        let confirm = self.close_confirm(&pane.id, &command, &pane.cwd, window, cx);
+        let banner = self.login_banner(pane, chat, exited, cx);
+        let exited_bar = self.exited_bar(pane, &command, ended_text.as_deref(), cx);
+        let header = self.pane_header(pane, &label, detail, window, cx);
         let (bounds, key) = (self.pane_bounds.clone(), pane.id.clone());
-        let target = pane.id.clone();
+        let drop_here = self.pane_drop_target().as_deref() == Some(pane.id.as_str());
+        let dragging = self
+            .pane_drag
+            .as_ref()
+            .is_some_and(|d| d.active && d.pane_id == pane.id);
+        let focus_id = pane.id.clone();
         div()
             .id(SharedString::from(format!("pane-{}", pane.id)))
             .relative()
-            .drag_over::<PaneDrag>(|d, _, _, cx| d.border_color(cx.theme().primary))
-            .on_drop(cx.listener(move |this, drag: &PaneDrag, _, cx| {
-                if drag.pane_id != target {
-                    this.swap_panes(&drag.pane_id, &target, cx);
+            .size_full()
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .bg(p.bg)
+            .when(dragging, |d| d.opacity(0.6))
+            // A click anywhere in the pane focuses it (`onMouseDownCapture`).
+            .capture_any_mouse_down(cx.listener(move |this, _, _, cx| {
+                if this.focused.as_deref() != Some(focus_id.as_str()) {
+                    this.focused = Some(focus_id.clone());
+                    cx.notify();
                 }
             }))
             .child(
@@ -3155,181 +3774,417 @@ impl Shell {
                 .absolute()
                 .size_full(),
             )
-            .size_full()
-            .flex()
-            .flex_col()
-            .bg(theme.background)
-            .border_1()
-            .border_color(if focused {
-                theme.ring
+            .child(header)
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .overflow_hidden()
+                    .child(body)
+                    .children(banner)
+                    .children(exited_bar)
+                    .children(confirm),
+            )
+            // The drop target while another pane is dragged over it: an inset accent line.
+            .when(drop_here, |d| {
+                d.child(div().absolute().inset_0().border_2().border_color(p.acc))
+            })
+            .into_any_element()
+    }
+
+    /// A pane's title row (`PaneHeader`): logo, title, state word, a terminal's branch; its
+    /// buttons show on hover. Alone on screen it is the app's top row too (#89).
+    fn pane_header(
+        &mut self,
+        pane: &Pane,
+        label: &str,
+        detail: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let p = sidebar::pal(cx);
+        let id = pane.id.clone();
+        let solo = self.solo_pane().as_deref() == Some(id.as_str());
+        let focused = self.focused.as_deref() == Some(id.as_str());
+        let config = self.config().clone();
+        let chat = pane.view == PaneView::Chat && !self.as_terminal.contains(&pane.id);
+        let account = pane.account_id.as_deref().and_then(|a| config.account(a));
+        let status = self.pane_status(&pane.id);
+        let (word, tone) = if pane.view == PaneView::Preview {
+            ("preview".to_string(), Tone::Quiet)
+        } else {
+            state_word(status)
+        };
+        let zoomed = self.zoomed.as_deref() == Some(id.as_str());
+        let zoom_hint = self.hint(ShortcutId::ToggleZoom);
+        let zoom_tip = if zoomed {
+            format!("Back to grid ({zoom_hint})")
+        } else {
+            format!("Zoom pane ({zoom_hint})")
+        };
+        let compact = self
+            .pane_bounds
+            .borrow()
+            .get(&id)
+            .is_some_and(|b| f32::from(b.size.width) < 460.0);
+        let group = SharedString::from(format!("ph-{id}"));
+        let menu_open = self.pane_menu.as_ref().is_some_and(|(m, _)| *m == id);
+        let mono = crate::terminal::mono(cx);
+        let focus_hint = if cfg!(target_os = "macos") {
+            "⌘⌥Arrow"
+        } else {
+            "Ctrl+Alt+Arrow"
+        };
+        let icon_btn = |bid: String, g: Glyph, tip: String| {
+            div()
+                .id(SharedString::from(bid))
+                .a11y_button(tip.clone())
+                .when(solo, |d| d.occlude())
+                .flex_none()
+                .size(z(24.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(z(6.))
+                .cursor_pointer()
+                .hover(|s| s.bg(p.raise))
+                .tooltip(move |window, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+                })
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(small(g, p.mu, p.bg))
+        };
+        let word_tip = [Some(status_label(status).to_string()), detail]
+            .into_iter()
+            .flatten()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(" · ");
+        let word_el = {
+            let el = div()
+                .id(SharedString::from(format!("ph-st-tip-{id}")))
+                .tooltip(move |window, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new(word_tip.clone()).build(window, cx)
+                })
+                .flex_none()
+                .font_family(mono)
+                .text_size(z(11.))
+                .text_color(match tone {
+                    Tone::Working => p.ok,
+                    Tone::Warn => p.warn,
+                    Tone::Quiet => p.fa,
+                })
+                .child(word);
+            if tone == Tone::Working {
+                // `working` sweeps (#75): the word breathes rather than carrying a dot.
+                el.with_animation(
+                    SharedString::from(format!("ph-st-{id}")),
+                    Animation::new(Duration::from_millis(1800))
+                        .repeat()
+                        .with_easing(bounce(ease_in_out)),
+                    |d, t| d.opacity(1.0 - 0.45 * t),
+                )
+                .into_any_element()
             } else {
-                theme.background
+                el.into_any_element()
+            }
+        };
+        let tools = div()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(z(if solo { 6. } else { 4. }))
+            .when(!solo && !menu_open, |d| {
+                d.opacity(0.).group_hover(group.clone(), |s| s.opacity(1.))
+            })
+            .when(solo, |d| {
+                d.child(self.layout_presets(false, cx))
+                    .child(self.usage_pill(cx))
+            })
+            .child(
+                icon_btn(
+                    format!("zoom-{id}"),
+                    if zoomed { Glyph::Unzoom } else { Glyph::Zoom },
+                    zoom_tip,
+                )
+                .on_click(cx.listener({
+                    let id = id.clone();
+                    move |this, _, _, cx| this.toggle_zoom(Some(id.clone()), cx)
+                })),
+            )
+            .child(
+                icon_btn(
+                    format!("more-{id}"),
+                    Glyph::More,
+                    if solo {
+                        "Chat and app actions".into()
+                    } else {
+                        format!("Pane actions: {label}")
+                    },
+                )
+                .when(menu_open, |d| d.bg(p.raise))
+                .on_click(cx.listener({
+                    let id = id.clone();
+                    move |this, e: &ClickEvent, _, cx| {
+                        if menu_open {
+                            this.close_menus(cx);
+                        } else {
+                            this.open_pane_menu(id.clone(), e.position(), e.is_keyboard(), cx)
+                        }
+                    }
+                })),
+            );
+        let ws = self.config().active().clone();
+        let hidden = if solo {
+            ws.panes.len().saturating_sub(1)
+        } else {
+            0
+        };
+        let lead: Vec<AnyElement> = if solo {
+            vec![
+                self.project_link(&ws.id, &ws.name, cx),
+                div()
+                    .flex_none()
+                    .mx(z(-2.))
+                    .text_color(p.fa)
+                    .child("/")
+                    .into_any_element(),
+            ]
+        } else {
+            vec![]
+        };
+        let after: Vec<AnyElement> = if solo {
+            let mut v: Vec<AnyElement> = self.hidden_chip(hidden, cx).into_iter().collect();
+            v.extend(self.git_button(window, cx));
+            v
+        } else if !chat {
+            self.branch_chip(pane, compact, cx).into_iter().collect()
+        } else {
+            vec![]
+        };
+        let end: Vec<AnyElement> = if solo {
+            let mut v: Vec<AnyElement> = self.update_chip(cx).into_iter().collect();
+            v.extend(self.window_controls(window, cx));
+            v
+        } else {
+            vec![]
+        };
+        let title_tip = format!("{label} — focus pane ({focus_hint})");
+        let base = div().id(SharedString::from(format!("pane-head-{id}")));
+        let base = if solo { self.drag_area(base) } else { base };
+        base.group(group)
+            .h(z(if solo { SOLO_ROW } else { 34. }))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(z(if solo { 10. } else { 8. }))
+            .pl(z(if solo { 14. } else { 10. }))
+            .pr(z(if solo { 8. } else { 4. }))
+            .border_b_1()
+            .border_color(p.line)
+            .bg(if focused && !solo { p.side } else { p.bg })
+            .text_size(z(12.))
+            .text_color(p.tx)
+            .on_mouse_down(MouseButton::Right, {
+                let id = id.clone();
+                cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                    this.open_pane_menu(id.clone(), e.position, false, cx)
+                })
+            })
+            // Pressed on its empty space: the pane takes the keyboard, and a drag past a few
+            // pixels carries it onto another pane to swap them (not alone, not zoomed).
+            .when(!solo, |d| {
+                let id = id.clone();
+                let title = label.to_string();
+                let can_drag = self.zoomed.is_none();
+                d.cursor_grab().on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, e: &MouseDownEvent, window, cx| {
+                        this.focus_pane(&id.clone(), window, cx);
+                        if can_drag {
+                            this.pane_drag = Some(PaneDrag {
+                                pane_id: id.clone(),
+                                title: title.clone(),
+                                start: e.position,
+                                at: e.position,
+                                active: false,
+                            });
+                        }
+                    }),
+                )
+            })
+            .children(lead)
+            .child(match account.filter(|_| !pane.shell) {
+                Some(a) => sidebar::provider_logo(a.cli.as_str(), &a.name, 13., &p),
+                None if !pane.shell => sidebar::provider_logo("claude", label, 13., &p),
+                None => small(Glyph::Monitor, p.mu, p.bg).into_any_element(),
             })
             .child(
                 div()
-                    .id(SharedString::from(format!("pane-head-{id}")))
-                    .h(px(26.))
-                    .flex_shrink_0()
-                    .px_2()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .text_xs()
-                    .bg(theme.title_bar)
-                    .on_mouse_down(MouseButton::Right, {
+                    .id(SharedString::from(format!("ph-title-{id}")))
+                    .a11y_button(title_tip.clone())
+                    .when(solo, |d| d.occlude())
+                    .min_w(px(0.))
+                    .flex_shrink(1.)
+                    .when(!solo, |d| d.max_w(relative(0.4)))
+                    .truncate()
+                    .text_size(z(13.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(if focused || solo { p.tx } else { p.mu })
+                    .cursor_pointer()
+                    .tooltip(move |window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(title_tip.clone())
+                            .build(window, cx)
+                    })
+                    .child(label.to_string())
+                    .on_click(cx.listener({
                         let id = id.clone();
-                        cx.listener(move |this, e: &MouseDownEvent, _, cx| {
-                            this.open_pane_menu(id.clone(), e.position, cx)
-                        })
-                    })
-                    .when(self.zoomed.is_none(), |d| {
-                        d.cursor_grab().on_drag(
-                            PaneDrag {
-                                pane_id: id.clone(),
-                                title: label.clone(),
-                            },
-                            |drag, _, _, cx| cx.new(|_| drag.clone()),
-                        )
-                    })
-                    .child(status_dot(
-                        match self.chat_states.get(&pane.id) {
-                            Some(
-                                wraithgrid_chat::ChatStatus::Running
-                                | wraithgrid_chat::ChatStatus::Background,
-                            ) => Some("running"),
-                            Some(wraithgrid_chat::ChatStatus::Approval) => Some("blocked"),
-                            Some(wraithgrid_chat::ChatStatus::Idle) => Some("idle"),
-                            None => self.states.get(&pane.id).map(String::as_str),
-                        },
-                        &theme,
-                    ))
-                    .child(div().font_weight(FontWeight::MEDIUM).child(label.clone()))
-                    .children(self.branch_chip(pane, cx))
-                    .child(
-                        div()
-                            .flex_1()
-                            .truncate()
-                            .text_color(theme.muted_foreground)
-                            .child(status),
-                    )
-                    .when(
-                        chat && pane
-                            .account_id
-                            .as_deref()
-                            .and_then(|a| config.account(a))
-                            .is_some_and(|a| a.cli.can_continue_as()),
-                        |d| {
-                            let switch = id.clone();
-                            d.child(
-                                div()
-                                    .id(SharedString::from(format!("continue-{id}")))
-                                    .a11y_button("Continue as…")
-                                    .px_2()
-                                    .rounded_sm()
-                                    .cursor_pointer()
-                                    .text_color(theme.muted_foreground)
-                                    .hover(|d| d.bg(theme.secondary))
-                                    .child("Continue as…")
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.ask_continue_as(switch.clone(), window, cx)
-                                    })),
-                            )
-                        },
-                    )
-                    .when(stopped, |d| {
-                        let restart = id.clone();
-                        d.child(
-                            div()
-                                .id(SharedString::from(format!("restart-{id}")))
-                                .a11y_button("Restart")
-                                .px_2()
-                                .rounded_sm()
-                                .border_1()
-                                .border_color(theme.border)
-                                .cursor_pointer()
-                                .hover(|d| d.bg(theme.secondary))
-                                .child("Restart")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.restart_pane(restart.clone(), cx)
-                                })),
-                        )
-                    })
-                    .child({
-                        let zoom = id.clone();
-                        let zoomed = self.zoomed.as_deref() == Some(id.as_str());
-                        div()
-                            .id(SharedString::from(format!("zoom-{id}")))
-                            .a11y_button(if zoomed { "Back to grid" } else { "Zoom pane" })
-                            .px_1()
-                            .rounded_sm()
-                            .cursor_pointer()
-                            .hover(|d| d.bg(theme.secondary))
-                            .child(if zoomed { "⤡" } else { "⤢" })
-                            .tooltip(move |window, cx| {
-                                gpui_kit::component::tooltip::Tooltip::new(if zoomed {
-                                    "Back to the grid"
-                                } else {
-                                    "Zoom pane"
-                                })
-                                .build(window, cx)
-                            })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.zoomed = if this.zoomed.as_deref() == Some(zoom.as_str()) {
-                                    None
-                                } else {
-                                    Some(zoom.clone())
-                                };
-                                cx.notify();
-                            }))
-                    })
-                    .child({
-                        let more = id.clone();
-                        div()
-                            .id(SharedString::from(format!("more-{id}")))
-                            .a11y_button(format!("Pane actions: {label}"))
-                            .px_1()
-                            .rounded_sm()
-                            .cursor_pointer()
-                            .hover(|d| d.bg(theme.secondary))
-                            .child("⋯")
-                            .on_click(cx.listener(move |this, e: &ClickEvent, _, cx| {
-                                this.open_pane_menu(more.clone(), e.position(), cx)
-                            }))
-                    })
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("close-{id}")))
-                            .a11y_button(format!("Close pane: {label}"))
-                            .px_1()
-                            .rounded_sm()
-                            .cursor_pointer()
-                            .hover(|d| d.bg(theme.secondary))
-                            .child("✕")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.request_close_pane(close.clone(), cx)
-                            })),
-                    ),
+                        move |this, _, window, cx| this.focus_pane(&id.clone(), window, cx)
+                    })),
             )
-            .children(banner)
-            .child(div().flex_1().min_h(px(0.)).overflow_hidden().child(body))
-            .children(exited)
-            .children(confirm)
+            .child(word_el)
+            .children(after)
+            .child(div().flex_1().min_w(px(0.)).h_full())
+            .child(tools)
+            .children(end)
             .into_any_element()
     }
 }
 
+/// How a state word is drawn.
+#[derive(Clone, Copy, PartialEq)]
+enum Tone {
+    Working,
+    Warn,
+    Quiet,
+}
+
+/// The state as one quiet word (#75): `working` breathes, `approve` is amber; no dots.
+fn state_word(status: Option<&str>) -> (String, Tone) {
+    let (w, t) = match status {
+        Some("running") => ("working", Tone::Working),
+        Some("background") => ("background", Tone::Working),
+        Some("approval") => ("approve", Tone::Warn),
+        Some("login") => ("sign in", Tone::Warn),
+        Some("exited") => ("exited", Tone::Warn),
+        Some("starting") | None => ("starting", Tone::Quiet),
+        Some("done") => ("done", Tone::Quiet),
+        Some(_) => ("idle", Tone::Quiet),
+    };
+    (w.to_string(), t)
+}
+
+/// `PANE_STATUS_LABEL`: the state in words, for tooltips.
+fn status_label(status: Option<&str>) -> &'static str {
+    match status {
+        Some("running") => "running",
+        Some("background") => "in background",
+        Some("approval") => "needs approval",
+        Some("login") => "login needed",
+        Some("exited") => "exited",
+        Some("done") => "done",
+        Some("idle") => "idle",
+        _ => "starting",
+    }
+}
+
+/// The app's mark (`Logo`): one filled cell and three outlined.
+fn logo(size: f32) -> AnyElement {
+    let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="72" height="72" viewBox="0 0 18 18"><rect x="1" y="1" width="7" height="7" rx="2" fill="#7c5cff"/><g fill="none" stroke="#8a8f98" stroke-width="1.5"><rect x="10" y="1" width="7" height="7" rx="2"/><rect x="1" y="10" width="7" height="7" rx="2"/><rect x="10" y="10" width="7" height="7" rx="2"/></g></svg>"##;
+    img(icons::svg_image(svg.to_string()))
+        .size(z(size))
+        .flex_none()
+        .into_any_element()
+}
+
+/// Records where an element was drawn (for a menu that opens under it).
+fn bounds_probe(slot: Rc<RefCell<Option<Bounds<Pixels>>>>) -> impl IntoElement {
+    canvas(
+        move |b, _, _| {
+            *slot.borrow_mut() = Some(b);
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .size_full()
+}
+
+/// `.btn` and its kinds: plain, `pri` (accent), `gh` (ghost), `dng` (danger).
+#[derive(Clone, Copy, PartialEq)]
+enum BtnKind {
+    Plain,
+    Primary,
+    Ghost,
+    Danger,
+}
+
+fn ui_btn(id: impl Into<ElementId>, kind: BtnKind, p: &sidebar::Pal) -> Stateful<Div> {
+    let p = *p;
+    let (bg, fg, line) = match kind {
+        BtnKind::Plain => (p.raise, p.tx, p.line2),
+        BtnKind::Primary => (p.acc_fill, p.on_acc, p.acc_fill),
+        BtnKind::Ghost => (
+            gpui_kit::transparent_black(),
+            p.tx,
+            gpui_kit::transparent_black(),
+        ),
+        BtnKind::Danger => (p.err, gpui_kit::white(), p.err),
+    };
+    div()
+        .id(id)
+        .occlude()
+        .flex_none()
+        .h(z(32.))
+        .px(z(12.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap(z(8.))
+        .rounded(z(8.))
+        .border_1()
+        .border_color(line)
+        .bg(bg)
+        .text_size(z(13.))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(fg)
+        .cursor_pointer()
+        .hover(move |s| match kind {
+            BtnKind::Plain | BtnKind::Ghost => s.bg(p.hover),
+            BtnKind::Primary => s.bg(p.acc_fill_hover),
+            BtnKind::Danger => s.opacity(0.9),
+        })
+}
+
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme().clone();
+        let p = sidebar::pal(cx);
         let settings = &self.config().settings;
         let zoom = settings.ui_zoom as f32;
         window.set_rem_size(px(16.0 * zoom));
+        // Six or more panes on screen: smaller terminal text, and the sidebar folds once.
+        let dense = self.dense();
+        let font = settings.font_size as f32;
         let style = TerminalStyle {
             family: settings.font_family.as_str().into(),
-            size: settings.font_size as f32 * zoom,
+            size: if dense {
+                font.min(DENSE_FONT_SIZE)
+            } else {
+                font
+            } * zoom,
         };
         if cx.try_global::<TerminalStyle>() != Some(&style) {
             cx.set_global(style);
+        }
+        if dense && !self.was_dense && !self.config().settings.sidebar_collapsed {
+            self.update(cx, |c| c.settings.sidebar_collapsed = true);
+        }
+        self.was_dense = dense;
+        // `Wraithgrid — <project or screen>`.
+        let title = format!("Wraithgrid — {}", self.place_name());
+        if title != self.window_title {
+            window.set_window_title(&title);
+            self.window_title = title;
         }
         // Panes no longer shown forget where they were drawn.
         let shown = pane_ids(
@@ -3345,18 +4200,26 @@ impl Render for Shell {
             )
             .as_ref(),
         );
-        self.pane_bounds
-            .borrow_mut()
-            .retain(|id, _| shown.contains(id));
         let on_screen = match &self.zoomed {
             Some(z) => vec![z.clone()],
             None => shown.clone(),
         };
+        self.pane_bounds
+            .borrow_mut()
+            .retain(|id, _| on_screen.contains(id));
         self.sync_preview_visibility(&on_screen, cx);
+        let strip = self.frame_strip(window, cx);
+        let top_row = self.top_row(window, cx);
         let grid = self.grid(window, cx);
         let pane_menu = self.pane_menu_layer(window, cx);
         let utility_menu = self.utility_menu_layer(window, cx);
         let status_bar = self.status_bar(cx).into_any_element();
+        let sidebar = self.sidebar(window, cx).into_any_element();
+        let changes = self
+            .changes
+            .clone()
+            .filter(|_| self.side_view() == "grid")
+            .map(|panel| self.changes_panel(panel, cx));
         let modal: Option<AnyElement> = self.modal.as_ref().map(|m| match m {
             Modal::NewPane(d) => d.clone().into_any_element(),
             Modal::Palette(p) => p.clone().into_any_element(),
@@ -3370,7 +4233,56 @@ impl Render for Shell {
             Modal::Login(d) => d.clone().into_any_element(),
             Modal::Switch(d) => d.clone().into_any_element(),
         });
+        let drag_ghost = self.pane_drag.as_ref().filter(|d| d.active).map(|d| {
+            deferred(
+                anchored().position(d.at + point(px(12.), px(8.))).child(
+                    div()
+                        .px(z(12.))
+                        .py(z(4.))
+                        .rounded(z(8.))
+                        .border_1()
+                        .border_color(p.acc)
+                        .bg(p.panel)
+                        .shadow_lg()
+                        .text_size(z(12.))
+                        .text_color(p.tx)
+                        .child(d.title.clone()),
+                ),
+            )
+            .with_priority(5)
+        });
+        let badge = self.zoom_badge.map(|z| {
+            let size = window.viewport_size();
+            deferred(
+                anchored().position(point(px(0.), px(0.))).child(
+                    div()
+                        .w(size.width)
+                        .h(size.height)
+                        .flex()
+                        .flex_col()
+                        .justify_end()
+                        .items_center()
+                        .pb(px(44.))
+                        .child(
+                            div()
+                                .px(px(14.))
+                                .py(px(6.))
+                                .rounded_full()
+                                .bg(p.panel)
+                                .border_1()
+                                .border_color(p.line2)
+                                .shadow_lg()
+                                .text_size(px(13.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(p.tx)
+                                .child(format!("{}%", (z * 100.0).round() as i64)),
+                        ),
+                ),
+            )
+            .with_priority(6)
+        });
         let focus = self.focus.get_or_insert_with(|| cx.focus_handle()).clone();
+        self.menu_focus_back(window, cx);
         if window.focused(cx).is_none() {
             window.focus(&focus, cx);
         }
@@ -3380,38 +4292,73 @@ impl Render for Shell {
             .relative()
             .capture_key_down(cx.listener(Self::shortcut))
             .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| {
+                // Let go outside the window: the drag ends where it is.
+                let held = e.pressed_button == Some(MouseButton::Left);
                 if this.drag.is_some() {
-                    this.drag_to(e.position, cx);
+                    if held {
+                        this.drag_to(e.position, cx);
+                    } else {
+                        this.finish_drag(cx);
+                    }
+                }
+                if this.pane_drag.is_some() {
+                    if held {
+                        this.pane_drag_move(e.position, cx);
+                    } else {
+                        this.pane_drag = None;
+                        cx.notify();
+                    }
                 }
             }))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _, _, _| this.drag = None),
-            )
+            .capture_any_mouse_up(cx.listener(|this, e: &MouseUpEvent, _, cx| {
+                if e.button != MouseButton::Left {
+                    return;
+                }
+                if this.drag.is_some() {
+                    this.finish_drag(cx);
+                }
+                if this.pane_drag.is_some() {
+                    this.pane_drag_end(cx);
+                }
+            }))
             .size_full()
             .flex()
             .flex_col()
-            .bg(theme.background)
-            .text_color(theme.foreground)
+            .bg(cx.theme().window_border)
+            .text_color(p.tx)
             .text_sm()
-            .child(self.title_bar(window, cx))
+            .child(strip)
             .child(
+                // The sidebar, main and Changes cards on the frame, split by a gap (#88).
                 div()
                     .flex_1()
                     .min_h(px(0.))
                     .flex()
-                    .child(self.sidebar(window, cx))
-                    .child(div().flex_1().min_w(px(0.)).h_full().child(grid))
-                    .when_some(
-                        self.changes.clone().filter(|_| {
-                            self.settings_view.is_none() && self.accounts_view.is_none()
-                        }),
-                        |d, panel| d.child(self.changes_panel(panel, cx)),
-                    ),
+                    .gap(z(PANEL_GAP))
+                    .px(z(PANEL_GAP))
+                    .pb(z(PANEL_GAP))
+                    .child(sidebar)
+                    .child(
+                        div()
+                            .id("main")
+                            .flex_1()
+                            .min_w(px(0.))
+                            .h_full()
+                            .flex()
+                            .flex_col()
+                            .rounded(z(PANEL_R))
+                            .overflow_hidden()
+                            .bg(p.bg)
+                            .children(top_row)
+                            .child(div().flex_1().min_h(px(0.)).child(grid))
+                            .child(status_bar),
+                    )
+                    .children(changes),
             )
-            .child(status_bar)
             .children(pane_menu)
             .children(utility_menu)
+            .children(drag_ghost)
+            .children(badge)
             .when_some(modal, |d, modal| {
                 d.child(
                     div()
@@ -3535,14 +4482,13 @@ impl Shell {
                 this.update(cx, |c| c.settings.diff_width = w as i64);
             }
         };
+        // A card of its own on the frame (#88); its edge is the gap before it.
         div()
             .id("changes-panel")
             .relative()
             .w(px(width))
             .h_full()
             .flex_shrink_0()
-            .border_l_1()
-            .border_color(theme.border)
             .on_drag_move(cx.listener(|this, e: &DragMoveEvent<DiffResize>, _, cx| {
                 let w = f32::from(e.bounds.right() - e.event.position.x);
                 this.diff_drag = Some(
@@ -3551,7 +4497,14 @@ impl Shell {
                 );
                 cx.notify();
             }))
-            .child(panel)
+            .child(
+                div()
+                    .size_full()
+                    .rounded(z(PANEL_R))
+                    .overflow_hidden()
+                    .bg(theme.background)
+                    .child(panel),
+            )
             .child(
                 div()
                     .id("changes-resize")
@@ -3561,16 +4514,17 @@ impl Shell {
                     .absolute()
                     .top_0()
                     .bottom_0()
-                    .left(px(-3.))
-                    .w(px(6.))
+                    .left(z(-PANEL_GAP))
+                    .w(z(PANEL_GAP))
                     .cursor(CursorStyle::ResizeLeftRight)
                     .child(
                         div()
                             .absolute()
-                            .top_0()
-                            .bottom_0()
-                            .left(px(2.))
+                            .top(px(18.))
+                            .bottom(px(18.))
+                            .left(z(PANEL_GAP / 2. - 1.))
                             .w(px(2.))
+                            .rounded(px(1.))
                             .bg(theme.ring)
                             .opacity(if dragging { 0.6 } else { 0. })
                             .group_hover("changes-resize", |s| s.opacity(0.6)),
@@ -3603,22 +4557,6 @@ pub(crate) fn provider_mark(cli: &str, name: &str, size: f32, cx: &App) -> AnyEl
     sidebar::provider_logo(cli, name, size, &sidebar::pal(cx))
 }
 
-fn button(id: impl Into<ElementId>, label: &'static str, cx: &mut Context<Shell>) -> Stateful<Div> {
-    let theme = cx.theme();
-    div()
-        .id(id)
-        .a11y_button(label)
-        .px_2()
-        .py(px(3.))
-        .rounded_md()
-        .border_1()
-        .border_color(theme.border)
-        .text_xs()
-        .cursor_pointer()
-        .hover(|d| d.bg(theme.secondary))
-        .child(label)
-}
-
 fn empty_state(message: String, cx: &mut Context<Shell>) -> impl IntoElement {
     div()
         .size_full()
@@ -3640,6 +4578,8 @@ struct DividerDrag {
     /// The split's length along the drag, in pixels.
     extent: f32,
     layout: LayoutNode,
+    /// The layout with the sizes so far, drawn while dragging and saved on release.
+    current: Option<LayoutNode>,
 }
 
 fn node_at<'a>(node: &'a LayoutNode, path: &[usize]) -> Option<&'a LayoutNode> {
@@ -3652,39 +4592,14 @@ fn node_at<'a>(node: &'a LayoutNode, path: &[usize]) -> Option<&'a LayoutNode> {
     }
 }
 
-/// The pane's state as a dot: running green, needs approval amber, idle grey, exited red.
-fn status_dot(state: Option<&str>, theme: &gpui_kit::component::Theme) -> impl IntoElement {
-    let color: Hsla = match state {
-        Some("running") => rgb(0x34d399).into(),
-        Some("blocked") => rgb(0xf5a524).into(),
-        Some("exited") => rgb(0xf43f5e).into(),
-        _ => theme.muted_foreground,
-    };
-    div().size(px(7.)).rounded_full().flex_shrink_0().bg(color)
-}
-
-/// A pane dragged by its header onto another to swap them (dnd-kit's drag in PaneGrid.tsx).
-#[derive(Clone)]
+/// A pane header pressed, and once past a few pixels dragged onto another pane to swap them
+/// (dnd-kit's drag in PaneGrid.tsx).
 struct PaneDrag {
     pane_id: String,
     title: String,
-}
-
-impl Render for PaneDrag {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        div()
-            .px_3()
-            .py_1()
-            .rounded_md()
-            .border_1()
-            .border_color(theme.ring)
-            .bg(theme.popover)
-            .shadow_lg()
-            .text_xs()
-            .text_color(theme.foreground)
-            .child(self.title.clone())
-    }
+    start: Point<Pixels>,
+    at: Point<Pixels>,
+    active: bool,
 }
 
 enum Modal {

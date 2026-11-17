@@ -152,7 +152,7 @@ impl Shell {
         }
         if let Some(p) = ws.panes.iter().find(|p| p.view == PaneView::Preview) {
             let (ws, p) = (ws.id.clone(), p.id.clone());
-            return self.reveal_chat(&ws, &p, cx);
+            return self.reveal_chat(&ws, &p, window, cx);
         }
         let Some(cwd) = ws.project_folder() else {
             // No folder yet: the project page asks for one (Edit project).
