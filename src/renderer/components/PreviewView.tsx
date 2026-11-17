@@ -1,5 +1,6 @@
 // Web preview (#74): the project's dev server and its page, in a pane. The page is a sandboxed
-// <webview> in its own session; main only lets it load addresses on this computer.
+// <webview> in its own session; main only lets it load addresses on this computer. Tauri has
+// no <webview>: there the page is an <iframe> (FramePage), cross-origin to the app.
 import { memo, useEffect, useRef, useState, type FormEvent } from 'react'
 import {
   isLocalUrl,
@@ -23,6 +24,9 @@ interface WebviewEl extends HTMLElement {
   getURL(): string
   getWebContentsId(): number
 }
+
+/** Tauri's webview has no <webview> tag; the preview is an <iframe> there. */
+const NO_WEBVIEW = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 
 function PreviewViewBody({ paneId }: { paneId: string }) {
   const actions = useActions()
@@ -82,15 +86,26 @@ function PreviewViewBody({ paneId }: { paneId: string }) {
         </div>
       ) : null}
       {pv.url ? (
-        <Page
-          key={pv.url}
-          paneId={paneId}
-          url={pv.url}
-          dim={stopped}
-          showLog={showLog}
-          onToggleLog={() => setShowLog(!showLog)}
-          openExternal={(u) => void api.shell.openExternal(u)}
-        />
+        NO_WEBVIEW ? (
+          <FramePage
+            key={pv.url}
+            url={pv.url}
+            dim={stopped}
+            showLog={showLog}
+            onToggleLog={() => setShowLog(!showLog)}
+            openExternal={(u) => void api.shell.openExternal(u)}
+          />
+        ) : (
+          <Page
+            key={pv.url}
+            paneId={paneId}
+            url={pv.url}
+            dim={stopped}
+            showLog={showLog}
+            onToggleLog={() => setShowLog(!showLog)}
+            openExternal={(u) => void api.shell.openExternal(u)}
+          />
+        )
       ) : (
         <div className="pv-wait">
           {stopped ? null : (
@@ -288,6 +303,130 @@ function Page(p: {
         className={`pv-web${p.dim ? ' dim' : ''}`}
         src={p.url}
         partition={PREVIEW_PARTITION}
+      />
+    </>
+  )
+}
+
+/**
+ * The preview as an <iframe> (Tauri). The page is cross-origin, so its own navigation can't
+ * be read: back/forward walk the addresses loaded from here, reload reloads the frame, and
+ * there are no console errors, failed requests or screenshot to attach.
+ */
+function FramePage(p: {
+  url: string
+  dim: boolean
+  showLog: boolean
+  onToggleLog: () => void
+  openExternal: (url: string) => void
+}) {
+  const { api } = useServices()
+  const [trail, setTrail] = useState({ urls: [p.url], at: 0 })
+  // Bumped by Reload: a new frame loads the address again.
+  const [load, setLoad] = useState(0)
+  const at = trail.urls[trail.at] ?? p.url
+  const [text, setText] = useState(p.url)
+  const [attachError, setAttachError] = useState<string | null>(null)
+
+  const show = (urls: string[], i: number): void => {
+    setTrail({ urls, at: i })
+    setText(urls[i] ?? p.url)
+  }
+  const go = (e: FormEvent): void => {
+    e.preventDefault()
+    const url = /^[a-z]+:\/\//i.test(text.trim()) ? text.trim() : `http://${text.trim()}`
+    if (isLocalUrl(url) && !/^https?:\/\/tauri\.localhost/i.test(url)) {
+      show([...trail.urls.slice(0, trail.at + 1), url], trail.at + 1)
+      setLoad((n) => n + 1)
+    } else {
+      p.openExternal(url)
+      setText(at)
+    }
+  }
+  const attach = async (): Promise<void> => {
+    setAttachError(null)
+    // Fails cleanly: there is no web contents to capture behind an iframe.
+    const shot = await api.preview.capture(1)
+    if (!shot.ok) setAttachError(shot.error)
+  }
+
+  return (
+    <>
+      <form className="pv-tb" onSubmit={go}>
+        <button
+          type="button"
+          className="icon-btn sm"
+          aria-label="Back"
+          title="Back"
+          disabled={trail.at === 0}
+          onClick={() => show(trail.urls, trail.at - 1)}
+        >
+          <IconBack small />
+        </button>
+        <button
+          type="button"
+          className="icon-btn sm pv-fwd"
+          aria-label="Forward"
+          title="Forward"
+          disabled={trail.at >= trail.urls.length - 1}
+          onClick={() => show(trail.urls, trail.at + 1)}
+        >
+          <IconBack small />
+        </button>
+        <button
+          type="button"
+          className="icon-btn sm"
+          aria-label="Reload"
+          title="Reload"
+          onClick={() => setLoad((n) => n + 1)}
+        >
+          <IconRestart small />
+        </button>
+        <input
+          className="pv-url mono"
+          aria-label="Address"
+          value={text}
+          spellCheck={false}
+          onChange={(e) => setText(e.target.value)}
+          onBlur={() => setText(at)}
+        />
+        <button
+          type="button"
+          className="icon-btn sm"
+          aria-label="Open in browser"
+          title="Open in browser"
+          onClick={() => p.openExternal(at)}
+        >
+          <IconExport small />
+        </button>
+        <button
+          type="button"
+          className={`btn gh pv-log-btn${p.showLog ? ' on' : ''}`}
+          aria-pressed={p.showLog}
+          onClick={p.onToggleLog}
+        >
+          <IconList small /> Log
+        </button>
+        <button
+          type="button"
+          className="btn gh"
+          title={attachError ?? 'Screenshot, console errors and failed requests into the chat'}
+          onClick={() => void attach()}
+        >
+          <IconPaperclip small /> Attach to chat
+        </button>
+      </form>
+      {attachError ? (
+        <div className="pv-bar" role="alert">
+          <span>{attachError}</span>
+        </div>
+      ) : null}
+      <iframe
+        key={`${trail.at}:${load}`}
+        className={`pv-web${p.dim ? ' dim' : ''}`}
+        src={at}
+        title="Preview"
+        sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-popups allow-downloads"
       />
     </>
   )
