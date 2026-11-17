@@ -25,7 +25,9 @@ const ORDERED = new Set<string>([IPC.configSet])
 
 function call<T = unknown>(channel: string, payload?: unknown): Promise<T> {
   const command = ORDERED.has(channel) ? 'ipc_ordered' : 'ipc'
-  return invoke<T>(command, { channel, payload: payload ?? null })
+  const run = (): Promise<T> => invoke<T>(command, { channel, payload: payload ?? null })
+  const key = paneKey(channel, payload)
+  return key ? inOrder(key, run) : run()
 }
 
 function send(channel: string, payload?: unknown): void {
@@ -45,29 +47,43 @@ function subscribe<T>(channel: string, cb: (payload: T) => void): () => void {
   }
 }
 
-// Each invoke runs as its own task in Rust, so two quick writes could overtake each other:
-// a pane has one write in flight, and what is typed meanwhile goes as the next write.
-const writing = new Map<string, string[]>()
+// Each invoke runs as its own task in Rust, so calls could overtake each other (a resize
+// before its pane exists, keys out of order). Electron handled IPC in order: a pane's pty and
+// chat calls run one after another here, and keys typed while one waits go as one write.
+const chains = new Map<string, Promise<unknown>>()
+function inOrder<T>(key: string, run: () => Promise<T>): Promise<T> {
+  const next = (chains.get(key) ?? Promise.resolve()).then(run, run)
+  chains.set(key, next)
+  const done = (): void => {
+    if (chains.get(key) === next) chains.delete(key)
+  }
+  next.then(done, done)
+  return next
+}
+
+function paneKey(channel: string, payload: unknown): string | null {
+  const group = channel.split(':')[0]
+  if (group !== 'pty' && group !== 'chat') return null
+  const paneId = (payload as { paneId?: unknown } | null)?.paneId
+  return typeof paneId === 'string' ? `${group}:${paneId}` : null
+}
+
+const pendingWrites = new Map<string, string[]>()
 function writeInOrder(paneId: string, data: string): void {
-  const queued = writing.get(paneId)
-  if (queued) {
-    queued.push(data)
+  const pending = pendingWrites.get(paneId)
+  if (pending) {
+    pending.push(data)
     return
   }
-  writing.set(paneId, [])
-  const flush = (chunk: string): void => {
-    call(IPC.ptyWrite, { paneId, data: chunk })
-      .catch((e: unknown) => console.error(`${IPC.ptyWrite}:`, e))
-      .finally(() => {
-        const next = writing.get(paneId) ?? []
-        if (next.length === 0) writing.delete(paneId)
-        else {
-          writing.set(paneId, [])
-          flush(next.join(''))
-        }
-      })
-  }
-  flush(data)
+  const chunks = [data]
+  pendingWrites.set(paneId, chunks)
+  send(IPC.ptyWrite, {
+    paneId,
+    get data() {
+      pendingWrites.delete(paneId)
+      return chunks.join('')
+    }
+  })
 }
 
 // Renderer errors land in the app's log (there are no DevTools in a release build).

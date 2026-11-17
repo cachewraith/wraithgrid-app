@@ -158,5 +158,7 @@ export function terminalTheme(palette: TerminalPalette, drawn: ThemeFile): IThem
 
 /** Requested font first, bundled JetBrains Mono next, then the system monospace font. */
 export function terminalFontStack(family: string): string {
-  return `'${family}', 'JetBrains Mono', ui-monospace, monospace`
+  // Nerd Font icons (prompts, fastfetch) come from the listed fallbacks: WebKitGTK (Tauri)
+  // doesn't search every system font per glyph the way Chromium does.
+  return `'${family}', 'JetBrains Mono', 'JetBrainsMono Nerd Font Mono', 'Symbols Nerd Font Mono', 'Symbols Nerd Font', ui-monospace, monospace`
 }
