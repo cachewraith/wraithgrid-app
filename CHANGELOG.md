@@ -2,6 +2,8 @@
 
 ## 2026-11-17
 
+- [release] v2.1.0: the 2.0 regressions fixed (chat, window shell, Settings/dialogs back to v1.26), published to the public cachewraith/wraithgrid with its update feeds; Macs stay on 1.26 (files: app-rs/crates/app/Cargo.toml, app-rs/Cargo.lock)
+- [gpui] Palette commands, Add account / Import from New pane, remote New project, Edit-project pins and Mods requests reach the window; Settings/Mods follow outside config changes; Accounts refreshes in place (files: app-rs/crates/app/src/shell.rs, shell/tray.rs, dialogs.rs, mods_view.rs, accounts_view.rs, settings.rs)
 - [gpui] Chats find their CLI when opened before the login-shell PATH probe answers (restored panes said "claude was not found on PATH"); non-claude chats look on PATH (files: app-rs/crates/app/src/runtime.rs, shell.rs, chat_view.rs)
 - [gpui] Chat view back to v1.26: footer no longer squeezes the transcript, floating `/` `@` `$` menus and picker popovers, CLI starts on open, pinned approval bar, stopped/sign-in bars, collapsible tool cards with verbs and states, code/answer Copy, thumbnails, Esc stops, Queue while busy, Full access needs a second click (files: app-rs/crates/app/src/chat_view.rs, chat_view/{transcript,pickers,extras,accounts}.rs, crates/chat/src/present.rs)
 - [gpui] Window shell back to v1.26: top-bar buttons no longer start a window drag, shortcuts paused under dialogs, close-pane asks, single-pane mode, dense grid, SVG icons, one keyboard menu, 34px header with state words, 1px dividers, rounded cards, window title, zoom badge, plan in the sidebar (files: app-rs/crates/app/src/shell.rs, shell/*.rs, shell/icons.rs, shell/menu.rs)
