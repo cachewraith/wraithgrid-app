@@ -7,8 +7,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Listener, Manager};
 use wraithgrid_core::paths::{current_user_data_dir, home_dir, resolve_user_path};
+use wraithgrid_usage::model::{AccountLimits, TurnUsage, UsageWindow};
 use wraithgrid_usage::poll::{UsagePollDeps, UsagePoller, POLL_MS};
 use wraithgrid_usage::store::{PaneOwner, UsageEvent, UsageStore, UsageStoreDeps};
 use wraithgrid_usage::UsageAccount;
@@ -61,6 +62,19 @@ pub fn setup(app: &AppHandle) {
         })
         .expect("usage poll thread");
 
+    // What chat turns used and the limits the CLI reported (usage-store.ts onChatEvent).
+    let chat_app = app.clone();
+    app.listen("chat:event", move |e| {
+        let Ok(msg) = serde_json::from_str::<Value>(e.payload()) else {
+            return;
+        };
+        let (Some(pane_id), Some(event)) = (msg["paneId"].as_str(), usage_event(&msg["event"]))
+        else {
+            return;
+        };
+        record(&chat_app, pane_id, &event);
+    });
+
     // The store's delayed save (1.5 s after a change).
     std::thread::Builder::new()
         .name("usage-save".into())
@@ -88,9 +102,45 @@ fn accounts(app: &AppHandle) -> Vec<UsageAccount> {
         .collect()
 }
 
-/// A chat pane's `limits` or `turnEnd` event, for the chat module to call. A CLI-reported
-/// limits update is also pushed to the window as `usage:limits` by the chat event itself.
-#[allow(dead_code)]
+fn window(v: &Value) -> Option<UsageWindow> {
+    Some(UsageWindow {
+        utilization: v.get("utilization")?.as_f64().filter(|n| n.is_finite())?,
+        resets_at: v.get("resetsAt")?.as_f64().filter(|n| n.is_finite())? as i64,
+    })
+}
+
+/// A ChatEvent (src/shared/chat.ts) usage cares about: `limits` and `turnEnd`.
+fn usage_event(e: &Value) -> Option<UsageEvent> {
+    let num = |v: &Value, k: &str| {
+        v.get(k)
+            .and_then(Value::as_f64)
+            .filter(|n| n.is_finite() && *n >= 0.0)
+    };
+    match e.get("t")?.as_str()? {
+        "limits" => {
+            let l = e.get("limits")?;
+            Some(UsageEvent::Limits(AccountLimits {
+                five_hour: l.get("fiveHour").and_then(window),
+                seven_day: l.get("sevenDay").and_then(window),
+                at: l.get("at")?.as_f64()? as i64,
+            }))
+        }
+        "turnEnd" => Some(UsageEvent::TurnEnd(
+            e.get("usage").filter(|u| u.is_object()).map(|u| TurnUsage {
+                model: u.get("model").and_then(Value::as_str).map(String::from),
+                cost_usd: num(u, "costUsd"),
+                input: num(u, "input").unwrap_or(0.0) as u64,
+                output: num(u, "output").unwrap_or(0.0) as u64,
+                cache_read: num(u, "cacheRead").unwrap_or(0.0) as u64,
+                cache_write: num(u, "cacheWrite").unwrap_or(0.0) as u64,
+            }),
+        )),
+        _ => None,
+    }
+}
+
+/// A chat pane's `limits` or `turnEnd` event into the usage store (also called from the
+/// `chat:event` listener above).
 pub fn record(app: &AppHandle, pane_id: &str, event: &UsageEvent) {
     if let Some(usage) = app.try_state::<Usage>() {
         usage.0.lock().unwrap().on_chat_event(pane_id, event);
