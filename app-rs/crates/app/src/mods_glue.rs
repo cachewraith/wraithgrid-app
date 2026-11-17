@@ -42,11 +42,12 @@ pub fn sync_before_start(config: &Config, account_id: &str) {
     }
 }
 
-/// Settings → Shared instructions and skills: links every account, or takes the links out.
-pub fn apply_shared_mode(config: &Config) -> Result<usize, String> {
-    SharedBrains::new(home_dir())
-        .apply(shared_mode(config), &accounts(config), &log)
-        .map(|r| r.len())
+/// Settings → Shared instructions and skills: links every account, or takes the links out;
+/// what changed in each account, for Settings' report.
+pub fn apply_shared_mode(
+    config: &Config,
+) -> Result<Vec<wraithgrid_mods::shared_config::SharedReportEntry>, String> {
+    SharedBrains::new(home_dir()).apply(shared_mode(config), &accounts(config), &log)
 }
 
 /// The claude binary: the Settings override, else the first on PATH.

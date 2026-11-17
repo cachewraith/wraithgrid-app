@@ -778,42 +778,56 @@ impl Shell {
             &view,
             window,
             |this, _, event: &SettingsEvent, window, cx| match event {
-                SettingsEvent::Changed(settings, claude_path) => {
-                    let (settings, claude_path) = ((**settings).clone(), claude_path.clone());
-                    let s0 = &this.config().settings;
-                    let look_changed = (
-                        s0.theme,
-                        &s0.theme_dark,
-                        &s0.theme_light,
-                        s0.accent,
-                        s0.terminal_palette,
-                    ) != (
-                        settings.theme,
-                        &settings.theme_dark,
-                        &settings.theme_light,
-                        settings.accent,
-                        settings.terminal_palette,
-                    );
-                    this.host.set_cli_access(settings.cli_access);
-                    if settings.shared_mode != this.config().settings.shared_mode {
-                        // Links every account to the shared brain, or takes the links out.
-                        let mut next = this.config().clone();
-                        next.settings.shared_mode = settings.shared_mode;
-                        cx.background_spawn(async move {
-                            if let Err(e) = crate::mods_glue::apply_shared_mode(&next) {
-                                eprintln!("[wraithgrid] shared mode: {e}");
-                            }
-                        })
-                        .detach();
-                    }
-                    this.update(cx, |c| {
-                        c.settings = settings;
-                        c.claude_path = claude_path;
-                    });
-                    if look_changed {
+                SettingsEvent::Changed(patch) => {
+                    // Field-level: only what Settings changed, on the live config.
+                    let s0 = this.config().settings.clone();
+                    this.update(cx, |c| patch(c));
+                    let config = this.config().clone();
+                    let s = &config.settings;
+                    this.host.set_cli_access(s.cli_access);
+                    let look = |s: &wraithgrid_core::config::Settings| {
+                        (
+                            s.theme,
+                            s.theme_dark.clone(),
+                            s.theme_light.clone(),
+                            s.accent,
+                            s.terminal_palette,
+                        )
+                    };
+                    if look(&s0) != look(s) {
                         let resolved =
-                            crate::theme::resolve(this.config(), crate::theme::system_dark(window));
+                            crate::theme::resolve(&config, crate::theme::system_dark(window));
                         crate::theme::apply(&resolved, Some(window), cx);
+                    }
+                    if let Some(view) = this.settings_view.clone() {
+                        view.update(cx, |v, cx| v.sync(&config, cx));
+                    }
+                }
+                SettingsEvent::RestartClaudePanes => {
+                    // Agent panes that started: terminals restart, idle chats start their CLI
+                    // again with the next message (`restartClaudePanes`).
+                    let agents: Vec<String> = this
+                        .config()
+                        .workspaces
+                        .iter()
+                        .flat_map(|w| w.panes.iter())
+                        .filter(|p| !p.shell)
+                        .map(|p| p.id.clone())
+                        .collect();
+                    let mut n = 0;
+                    for id in agents {
+                        if this.terminals.contains_key(&id) {
+                            this.restart_pane(id, cx);
+                            n += 1;
+                        } else if let Some(chat) = this.chats.get(&id).cloned() {
+                            if !chat.read(cx).is_busy() {
+                                chat.update(cx, |c, _| c.stop_session());
+                                n += 1;
+                            }
+                        }
+                    }
+                    if let Some(view) = this.settings_view.clone() {
+                        view.update(cx, |v, cx| v.set_restarted(n, cx));
                     }
                 }
                 SettingsEvent::Machines(e) => {
