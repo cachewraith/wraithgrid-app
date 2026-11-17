@@ -963,7 +963,10 @@ pub fn parse_settings(raw: &Value) -> Res<Settings> {
         chat_only_migrated: o.bool_or("chatOnlyMigrated", false)?,
         chat_model: o.catch_model("chatModel"),
         chat_effort: o.catch_effort("chatEffort"),
-        chat_mode: o.catch_mode("chatMode"),
+        // Full access is only offered per chat, never by default: a saved one is dropped.
+        chat_mode: o
+            .catch_mode("chatMode")
+            .filter(|m| *m != ChatMode::BypassPermissions),
         cli_paths: catch(o.get("cliPaths"), vec![], |v| {
             v.as_object()?
                 .iter()
@@ -1470,6 +1473,16 @@ mod tests {
         assert!(c.settings.cli_paths.is_empty());
         assert_eq!(c.workspaces[0].panes[0].model, None);
         assert_eq!(c.workspaces[0].color, "");
+    }
+
+    #[test]
+    fn full_access_is_never_the_default_mode() {
+        let mut v = minimal();
+        v["settings"] = json!({ "chatMode": "bypassPermissions" });
+        assert_eq!(parse_config(&v, true).unwrap().settings.chat_mode, None);
+        v["settings"] = json!({ "chatMode": "plan" });
+        let c = parse_config(&v, true).unwrap();
+        assert_eq!(c.settings.chat_mode, Some(ChatMode::Plan));
     }
 
     #[test]

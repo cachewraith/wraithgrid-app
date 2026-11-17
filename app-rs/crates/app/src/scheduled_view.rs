@@ -13,7 +13,9 @@ use wraithgrid_core::config::{
 };
 use wraithgrid_core::ids::new_id;
 use wraithgrid_core::types::{ChatEffort, ChatMode};
-use wraithgrid_schedule::{default_once_at, describe_when, fmt_when, parse_local, upcoming};
+use wraithgrid_schedule::{
+    default_once_at, describe_when, fmt_when, is_time, parse_local, upcoming,
+};
 use wraithgrid_usage::format::fmt_until;
 
 pub enum ScheduledEvent {
@@ -719,6 +721,66 @@ impl JobDialog {
         }
     }
 
+    /// What the date, time and hours fields can't take, by field, for the form to show.
+    fn problems(&self, cx: &App) -> Vec<(&'static str, String)> {
+        let mut out = Vec::new();
+        let time_ok = |t: &str| t.is_empty() || is_time(t);
+        match self.kind {
+            Kind::Once => {
+                let at = Self::value(&self.at, cx);
+                match parse_local(&chrono::Local, &at) {
+                    None => out.push(("at", "A date and time like 2026-11-13T09:00.".to_string())),
+                    Some(t) if t <= self.now => {
+                        out.push(("at", "That time has passed.".to_string()))
+                    }
+                    Some(_) => {}
+                }
+            }
+            Kind::Daily | Kind::Weekly => {
+                if !time_ok(&Self::value(&self.time, cx)) {
+                    out.push(("time", "A time like 09:00 (00:00–23:59).".to_string()));
+                }
+            }
+            Kind::Hours => {
+                let every = Self::value(&self.every, cx);
+                if !every.parse::<i64>().is_ok_and(|n| (1..=24).contains(&n)) {
+                    out.push(("every", "A whole number of hours, 1 to 24.".to_string()));
+                }
+                if !time_ok(&Self::value(&self.from, cx)) {
+                    out.push(("from", "A time like 09:00 (00:00–23:59).".to_string()));
+                }
+            }
+            Kind::Reset => {}
+        }
+        out
+    }
+
+    /// Picks the project's folder with the system's folder dialog.
+    fn choose_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let pick = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: None,
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = pick.await else {
+                return;
+            };
+            let Some(dir) = paths.into_iter().next() else {
+                return;
+            };
+            let home = wraithgrid_core::paths::home_dir()
+                .to_string_lossy()
+                .into_owned();
+            let dir = wraithgrid_core::paths::contract_home(&dir.to_string_lossy(), &home);
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.folder.update(cx, |i, cx| i.set_value(dir, window, cx));
+            });
+        })
+        .detach();
+    }
+
     /// The time as the form says it now.
     fn when(&self, cx: &App) -> ScheduleWhen {
         let time = || {
@@ -789,6 +851,7 @@ impl JobDialog {
             _ => true,
         };
         let ok = self.workspace().is_some()
+            && self.problems(cx).is_empty()
             && !self.job.account_id.is_empty()
             && !prompt.is_empty()
             && (model.is_empty() || is_chat_model(&model))
@@ -1031,6 +1094,13 @@ impl Render for JobDialog {
             .collect();
         let ready = self.ready(cx).is_some();
         let needs_folder = self.needs_folder();
+        let problems = self.problems(cx);
+        let problem = |field: &str| {
+            problems
+                .iter()
+                .find(|(f, _)| *f == field)
+                .map(|(_, e)| div().text_xs().text_color(theme.danger).child(e.clone()))
+        };
 
         div()
             .id("job-dialog")
@@ -1069,7 +1139,30 @@ impl Render for JobDialog {
             .child(row().children(accounts))
             .when(needs_folder, |d| {
                 d.child(label("Folder"))
-                    .child(Input::new(&self.folder))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(div().flex_1().child(Input::new(&self.folder)))
+                            .child(
+                                div()
+                                    .id("job-folder-choose")
+                                    .a11y_button("Choose a folder")
+                                    .px_3()
+                                    .py_1()
+                                    .rounded_md()
+                                    .border_1()
+                                    .border_color(theme.border)
+                                    .text_sm()
+                                    .cursor_pointer()
+                                    .hover(|d| d.bg(theme.secondary))
+                                    .child("Choose…")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.choose_folder(window, cx)
+                                    })),
+                            ),
+                    )
                     .child(div().text_xs().text_color(theme.warning).child(
                         "This project has no folder. Pick one: the job's chats start there, and it's saved on the project.",
                     ))
@@ -1081,6 +1174,7 @@ impl Render for JobDialog {
             .when(self.kind == Kind::Once, |d| {
                 d.child(label("Date and time"))
                     .child(div().w(px(220.)).child(Input::new(&self.at)))
+                    .children(problem("at"))
             })
             .when(self.kind == Kind::Weekly, |d| {
                 d.child(label("Days")).child(row().children(day_chips))
@@ -1088,6 +1182,7 @@ impl Render for JobDialog {
             .when(matches!(self.kind, Kind::Weekly | Kind::Daily), |d| {
                 d.child(label("Time"))
                     .child(div().w(px(120.)).child(Input::new(&self.time)))
+                    .children(problem("time"))
             })
             .when(self.kind == Kind::Hours, |d| {
                 d.child(
@@ -1099,8 +1194,9 @@ impl Render for JobDialog {
                                 .flex()
                                 .flex_col()
                                 .gap_1()
-                                .child(label("Every (hours)"))
-                                .child(div().w(px(80.)).child(Input::new(&self.every))),
+                                .child(label("Every (hours, 1–24)"))
+                                .child(div().w(px(80.)).child(Input::new(&self.every)))
+                                .children(problem("every")),
                         )
                         .child(
                             div()
@@ -1108,7 +1204,8 @@ impl Render for JobDialog {
                                 .flex_col()
                                 .gap_1()
                                 .child(label("Starting at"))
-                                .child(div().w(px(120.)).child(Input::new(&self.from))),
+                                .child(div().w(px(120.)).child(Input::new(&self.from)))
+                                .children(problem("from")),
                         ),
                 )
             })
@@ -1177,9 +1274,11 @@ impl Render for JobDialog {
                             .bg(theme.primary)
                             .text_color(theme.primary_foreground)
                             .when(!ready, |d| d.opacity(0.5))
-                            .when(ready, |d| d.cursor_pointer())
-                            .child("Save job")
-                            .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
+                            .when(ready, |d| {
+                                d.cursor_pointer()
+                                    .on_click(cx.listener(|this, _, _, cx| this.save(cx)))
+                            })
+                            .child("Save job"),
                     ),
             )
     }

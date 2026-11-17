@@ -110,6 +110,15 @@ pub struct PreviewView {
     /// A detected command, put in the form at the next draw (setting a value needs the window).
     pending_command: Option<String>,
     attach_error: Option<String>,
+    /// The form's command field was focused once it showed.
+    form_focused: bool,
+    /// Pages loaded here, and where Back/Forward are in them (a system webview doesn't say
+    /// whether it can go back).
+    history: Vec<String>,
+    history_at: usize,
+    /// Back (-1) or Forward (1) pressed: the next load moves in the history, not on.
+    stepping: i8,
+    log_scroll: ScrollHandle,
     _server_rx: Option<Task<()>>,
     _page_rx: Option<Task<()>>,
 }
@@ -127,11 +136,17 @@ impl PreviewView {
         cx.subscribe_in(
             &address,
             window,
-            |this, input, e: &InputEvent, window, cx| {
-                if let InputEvent::PressEnter { .. } = e {
+            |this, input, e: &InputEvent, window, cx| match e {
+                InputEvent::PressEnter { .. } => {
                     let text = input.read(cx).value().trim().to_string();
                     this.go(text, window, cx);
                 }
+                // A half-typed address goes back to the page's own.
+                InputEvent::Blur => {
+                    let at = this.at.clone();
+                    input.update(cx, |i, cx| i.set_value(at, window, cx));
+                }
+                _ => {}
             },
         )
         .detach();
@@ -147,6 +162,13 @@ impl PreviewView {
         });
         for i in [&form_command, &form_url] {
             cx.observe(i, |_, _, cx| cx.notify()).detach();
+            // Enter in either field starts, as the form's submit did.
+            cx.subscribe(i, |this, _, e: &InputEvent, cx| {
+                if let InputEvent::PressEnter { .. } = e {
+                    this.submit_form(cx);
+                }
+            })
+            .detach();
         }
         let mut view = PreviewView {
             focus: cx.focus_handle(),
@@ -172,6 +194,11 @@ impl PreviewView {
             source: None,
             pending_command: None,
             attach_error: None,
+            form_focused: false,
+            history: vec![],
+            history_at: 0,
+            stepping: 0,
+            log_scroll: ScrollHandle::new(),
             _server_rx: None,
             _page_rx: None,
         };
@@ -215,6 +242,9 @@ impl PreviewView {
         self.failed.clear();
         self.url = is_local_url(&self.fixed_url).then(|| self.fixed_url.clone());
         self.state = State::Starting;
+        self.history.clear();
+        self.history_at = 0;
+        self.stepping = 0;
         let (file, args) = shell_launch(
             &self.command,
             cfg!(windows),
@@ -253,6 +283,8 @@ impl PreviewView {
                 self.log.push(line);
                 let over = self.log.len().saturating_sub(500);
                 self.log.drain(..over);
+                // The newest line stays in view.
+                self.log_scroll.scroll_to_bottom();
                 if self.state == State::Starting && self.url.is_some() {
                     self.state = State::Running;
                 }
@@ -348,6 +380,7 @@ impl PreviewView {
                     self.errors.clear();
                     self.failed.clear();
                 }
+                self.moved_to(&url);
                 self.at = url.clone();
                 self.address
                     .update(cx, |i, cx| i.set_value(url, window, cx));
@@ -390,6 +423,48 @@ impl PreviewView {
             let at = self.at.clone();
             self.address.update(cx, |i, cx| i.set_value(at, window, cx));
         }
+    }
+
+    /// A page finished loading: one step back or forward if that was asked, else a new entry
+    /// after the current one.
+    fn moved_to(&mut self, url: &str) {
+        let step = std::mem::take(&mut self.stepping);
+        let to = self.history_at as isize + step as isize;
+        if step != 0 && to >= 0 && self.history.get(to as usize).map(String::as_str) == Some(url) {
+            self.history_at = to as usize;
+            return;
+        }
+        if self.history.get(self.history_at).map(String::as_str) == Some(url) {
+            return; // A reload.
+        }
+        if !self.history.is_empty() {
+            self.history.truncate(self.history_at + 1);
+        }
+        self.history.push(url.to_string());
+        self.history_at = self.history.len() - 1;
+    }
+
+    fn can_go(&self, step: isize) -> bool {
+        let to = self.history_at as isize + step;
+        to >= 0 && (to as usize) < self.history.len()
+    }
+
+    /// Start in the form (its button or Enter): saved for the project, then run.
+    fn submit_form(&mut self, cx: &mut Context<Self>) {
+        let command = self.form_command.read(cx).value().trim().to_string();
+        let url = self.form_url.read(cx).value().trim().to_string();
+        if command.is_empty() || !(url.is_empty() || is_local_url(&url)) {
+            return;
+        }
+        cx.emit(PreviewViewEvent::Save {
+            command: command.clone(),
+            url: url.clone(),
+        });
+        self.command = command;
+        self.fixed_url = url;
+        self.editing = false;
+        self.form_focused = false;
+        self.start(cx);
     }
 
     fn attach(&mut self, cx: &mut Context<Self>) {
@@ -459,6 +534,10 @@ impl Render for PreviewView {
         let muted = |t: String| div().text_xs().text_color(theme.muted_foreground).child(t);
         let mono = crate::terminal::mono(cx);
         if self.editing || (self.state == State::Idle && self.command.is_empty()) {
+            if !self.form_focused {
+                self.form_focused = true;
+                window.focus(&self.form_command.focus_handle(cx), cx);
+            }
             let command = self.form_command.read(cx).value().trim().to_string();
             let url = self.form_url.read(cx).value().trim().to_string();
             let url_ok = url.is_empty() || is_local_url(&url);
@@ -510,28 +589,12 @@ impl Render for PreviewView {
                                 .gap_2()
                                 .child(
                                     button("pv-go", "Start", cx)
-                                        .when(!can, |d| d.opacity(0.5))
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            if !can {
-                                                return;
-                                            }
-                                            let command = this
-                                                .form_command
-                                                .read(cx)
-                                                .value()
-                                                .trim()
-                                                .to_string();
-                                            let url =
-                                                this.form_url.read(cx).value().trim().to_string();
-                                            cx.emit(PreviewViewEvent::Save {
-                                                command: command.clone(),
-                                                url: url.clone(),
-                                            });
-                                            this.command = command;
-                                            this.fixed_url = url;
-                                            this.editing = false;
-                                            this.start(cx);
-                                        })),
+                                        .when(!can, |d| d.opacity(0.5).cursor_default())
+                                        .when(can, |d| {
+                                            d.on_click(
+                                                cx.listener(|this, _, _, cx| this.submit_form(cx)),
+                                            )
+                                        }),
                                 )
                                 .child(button("pv-cancel", "Cancel", cx).on_click(cx.listener(
                                     |this, _, _, cx| {
@@ -539,6 +602,7 @@ impl Render for PreviewView {
                                             cx.emit(PreviewViewEvent::Close);
                                         } else {
                                             this.editing = false;
+                                            this.form_focused = false;
                                             cx.notify();
                                         }
                                     },
@@ -552,8 +616,11 @@ impl Render for PreviewView {
         let problems = self.errors.len() + self.failed.len();
         let log = div()
             .id("pv-log")
+            .role(Role::Log)
+            .aria_label("Server log")
             .max_h(px(220.))
             .overflow_y_scroll()
+            .track_scroll(&self.log_scroll)
             .p_2()
             .bg(theme.secondary)
             .font_family(mono)
@@ -616,6 +683,7 @@ impl Render for PreviewView {
                 let fwd = self.webview.clone();
                 let reload = self.webview.clone();
                 let at = self.at.clone();
+                let (can_back, can_fwd) = (self.can_go(-1), self.can_go(1));
                 d.child(
                     div()
                         .px_2()
@@ -625,24 +693,36 @@ impl Render for PreviewView {
                         .gap_1()
                         .border_b_1()
                         .border_color(theme.border)
-                        .child(button("pv-back", "←", cx).aria_label("Back").on_click(cx.listener(
-                            move |_, _, _, cx| {
-                                if let Some(w) = &back {
-                                    w.update(cx, |w, _| {
-                                        let _ = w.back();
-                                    });
-                                }
-                            },
-                        )))
-                        .child(button("pv-fwd", "→", cx).aria_label("Forward").on_click(cx.listener(
-                            move |_, _, _, cx| {
-                                if let Some(w) = &fwd {
-                                    w.update(cx, |w, _| {
-                                        let _ = w.forward();
-                                    });
-                                }
-                            },
-                        )))
+                        .child(
+                            button("pv-back", "←", cx)
+                                .aria_label("Back")
+                                .when(!can_back, |d| d.opacity(0.4).cursor_default())
+                                .when(can_back, |d| {
+                                    d.on_click(cx.listener(move |this, _, _, cx| {
+                                        if let Some(w) = &back {
+                                            this.stepping = -1;
+                                            w.update(cx, |w, _| {
+                                                let _ = w.back();
+                                            });
+                                        }
+                                    }))
+                                }),
+                        )
+                        .child(
+                            button("pv-fwd", "→", cx)
+                                .aria_label("Forward")
+                                .when(!can_fwd, |d| d.opacity(0.4).cursor_default())
+                                .when(can_fwd, |d| {
+                                    d.on_click(cx.listener(move |this, _, _, cx| {
+                                        if let Some(w) = &fwd {
+                                            this.stepping = 1;
+                                            w.update(cx, |w, _| {
+                                                let _ = w.forward();
+                                            });
+                                        }
+                                    }))
+                                }),
+                        )
                         .child(button("pv-reload", "↻", cx).aria_label("Reload").on_click(cx.listener(
                             move |_, _, _, cx| {
                                 if let Some(w) = &reload {

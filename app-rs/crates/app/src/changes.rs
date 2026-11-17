@@ -49,6 +49,13 @@ pub struct ChangesPanel {
     shown_commit: Option<String>,
     commit_files: Vec<DiffFile>,
     history_error: Option<String>,
+    /// The first history page came back; a next page is loading; the shown commit's files
+    /// came back.
+    history_loaded: bool,
+    more_loading: bool,
+    commit_loaded: bool,
+    /// The first status and diff came back (until then "Loading…", not "not a repository").
+    loaded: bool,
     cwd: PathBuf,
     status: GitStatus,
     files: Vec<DiffFile>,
@@ -117,6 +124,10 @@ impl ChangesPanel {
             shown_commit: None,
             commit_files: vec![],
             history_error: None,
+            history_loaded: false,
+            more_loading: false,
+            commit_loaded: false,
+            loaded: false,
             cwd,
             status: GitStatus::default(),
             files: vec![],
@@ -132,6 +143,7 @@ impl ChangesPanel {
     }
 
     fn apply(&mut self, snap: Snapshot, cx: &mut Context<Self>) {
+        self.loaded = true;
         self.status = snap.status;
         self.files = snap.files;
         self.untracked = snap.untracked;
@@ -219,6 +231,7 @@ impl ChangesPanel {
                 .background_spawn(async move { git_log(&GitCli::default(), &cwd, 0) })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                this.history_loaded = true;
                 match log {
                     Ok(log) => {
                         this.graph = layout_graph(
@@ -240,15 +253,51 @@ impl ChangesPanel {
         cx.notify();
     }
 
+    /// The next page of the history, after the commits shown (`loadMore`).
+    fn load_more(&mut self, cx: &mut Context<Self>) {
+        if self.more_loading {
+            return;
+        }
+        self.more_loading = true;
+        let (cwd, skip) = (self.cwd.clone(), self.commits.len());
+        cx.spawn(async move |this, cx| {
+            let log = cx
+                .background_spawn(async move { git_log(&GitCli::default(), &cwd, skip) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.more_loading = false;
+                match log {
+                    Ok(log) => {
+                        this.commits.extend(log.commits);
+                        this.graph = layout_graph(
+                            &this
+                                .commits
+                                .iter()
+                                .map(GraphCommit::from)
+                                .collect::<Vec<_>>(),
+                        );
+                        this.more = log.more;
+                    }
+                    Err(e) => this.history_error = Some(e),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn show_commit(&mut self, sha: String, cx: &mut Context<Self>) {
         self.shown_commit = Some(sha.clone());
         self.commit_files.clear();
+        self.commit_loaded = false;
         let cwd = self.cwd.clone();
         cx.spawn(async move |this, cx| {
             let shown = cx
                 .background_spawn(async move { git_show(&GitCli::default(), &cwd, &sha) })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                this.commit_loaded = true;
                 match shown {
                     Ok(s) => this.commit_files = parse_patch(&s.patch),
                     Err(e) => this.history_error = Some(e),
@@ -274,6 +323,15 @@ impl Render for ChangesPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let s = &self.status;
+        if !self.loaded {
+            return div()
+                .size_full()
+                .p_4()
+                .text_sm()
+                .text_color(theme.muted_foreground)
+                .child("Loading…")
+                .into_any_element();
+        }
         if !s.repo {
             return div()
                 .size_full()
@@ -639,6 +697,20 @@ impl ChangesPanel {
                 .child(e.clone())
                 .into_any_element();
         }
+        let empty = |text: &'static str| {
+            div()
+                .p_4()
+                .text_sm()
+                .text_color(theme.muted_foreground)
+                .child(text)
+                .into_any_element()
+        };
+        if !self.history_loaded {
+            return empty("Loading…");
+        }
+        if self.commits.is_empty() {
+            return empty("No commits yet.");
+        }
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis() as i64);
@@ -734,15 +806,44 @@ impl ChangesPanel {
                     .children(rows),
             )
             .when(self.more, |d| {
+                let loading = self.more_loading;
                 d.child(
+                    div().p_2().flex().child(
+                        div()
+                            .id("history-more")
+                            .a11y_button("Load more")
+                            .px_2()
+                            .py(px(2.))
+                            .rounded_md()
+                            .border_1()
+                            .border_color(theme.border)
+                            .text_xs()
+                            .when(loading, |d| d.opacity(0.5))
+                            .when(!loading, |d| {
+                                d.cursor_pointer()
+                                    .hover(|d| d.bg(theme.secondary))
+                                    .on_click(cx.listener(|this, _, _, cx| this.load_more(cx)))
+                            })
+                            .child(if loading { "Loading…" } else { "Load more" }),
+                    ),
+                )
+            })
+            .when(self.shown_commit.is_some(), |d| {
+                let body = if !self.commit_loaded {
                     div()
                         .px_2()
                         .text_xs()
                         .text_color(theme.muted_foreground)
-                        .child("Older commits aren't shown yet."),
-                )
-            })
-            .when(!self.commit_files.is_empty(), |d| {
+                        .child("Loading…")
+                } else if self.commit_files.is_empty() {
+                    div()
+                        .px_2()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child("No file changes in this commit.")
+                } else {
+                    div().children(files)
+                };
                 d.child(
                     div()
                         .id("commit-files")
@@ -751,7 +852,7 @@ impl ChangesPanel {
                         .border_t_1()
                         .border_color(theme.border)
                         .py_1()
-                        .children(files),
+                        .child(body),
                 )
             })
             .into_any_element()

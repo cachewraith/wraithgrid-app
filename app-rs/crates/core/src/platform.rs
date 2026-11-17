@@ -233,6 +233,188 @@ pub fn resolve_pane_shell(
     }
 }
 
+/// One shell Settings offers for plain panes (`ShellOption`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShellOption {
+    pub name: String,
+    pub path: String,
+    pub args: Vec<String>,
+}
+
+/// Shells that are not in /etc/shells when installed by cargo, brew, pip or by hand.
+const EXTRA_POSIX_SHELLS: &[&str] = &[
+    "bash", "zsh", "fish", "nu", "pwsh", "xonsh", "elvish", "tcsh", "ksh", "dash",
+];
+
+/// Installed shells for the Settings picker (`listShells`). POSIX: $SHELL, /etc/shells, then
+/// well-known names on PATH, one per name. Windows: PowerShell 7 and 5, cmd, Git Bash, WSL,
+/// nushell.
+pub fn list_shells(
+    os: Os,
+    env: &dyn Fn(&str) -> Option<String>,
+    find: &dyn Fn(&str) -> Option<PathBuf>,
+    exists: &dyn Fn(&Path) -> bool,
+    read_text: &dyn Fn(&Path) -> Option<String>,
+) -> Vec<ShellOption> {
+    let mut out: Vec<ShellOption> = Vec::new();
+    let mut add = |name: &str, file: Option<String>, args: &[&str]| {
+        if let Some(file) = file {
+            if !out.iter().any(|o| o.path == file || o.name == name) {
+                out.push(ShellOption {
+                    name: name.to_string(),
+                    path: file,
+                    args: args.iter().map(|a| a.to_string()).collect(),
+                });
+            }
+        }
+    };
+    let found = |n: &str| find(n).map(|p| p.to_string_lossy().into_owned());
+    if os == Os::Windows {
+        add("PowerShell 7", found("pwsh"), &[]);
+        add("Windows PowerShell", found("powershell"), &[]);
+        add("Command Prompt", env("ComSpec").or_else(|| found("cmd")), &[]);
+        let local = env("LOCALAPPDATA").map(|l| format!("{l}\\Programs"));
+        for base in [env("ProgramFiles"), env("ProgramFiles(x86)"), local]
+            .into_iter()
+            .flatten()
+        {
+            let bash = format!("{}\\Git\\bin\\bash.exe", base.trim_end_matches('\\'));
+            if exists(Path::new(&bash)) {
+                add("Git Bash", Some(bash), &["--login", "-i"]);
+            }
+        }
+        add("WSL", found("wsl"), &[]);
+        add("nushell", found("nu"), &[]);
+        return out;
+    }
+    let mut candidates: Vec<String> = env("SHELL").filter(|s| !s.is_empty()).into_iter().collect();
+    for line in read_text(Path::new("/etc/shells")).unwrap_or_default().lines() {
+        let f = line.trim();
+        if f.starts_with('/') {
+            candidates.push(f.to_string());
+        }
+    }
+    for f in candidates {
+        // Listed on some systems but not shells to work in.
+        let skip = ["nologin", "false", "git-shell", "rbash", "fallback-shell"]
+            .iter()
+            .any(|s| f.ends_with(s));
+        if skip || !exists(Path::new(&f)) {
+            continue;
+        }
+        add(&shell_kind(&f), Some(f.clone()), &[]);
+    }
+    for name in EXTRA_POSIX_SHELLS {
+        add(name, found(name), &[]);
+    }
+    out
+}
+
+/// What Settings shows about the claude binary (`ClaudeDetectResult`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BinaryCheck {
+    pub path: Option<PathBuf>,
+    /// The Settings override, not a PATH lookup.
+    pub overridden: bool,
+    pub version: Option<String>,
+    /// None when it ran.
+    pub error: Option<String>,
+}
+
+/// `detectClaude`: the override (resolved against home) or the first `name` on PATH, and
+/// whether `<bin> --version` answers within 3 s.
+pub fn check_binary(
+    name: &str,
+    override_path: &str,
+    home: &Path,
+    env: &dyn Fn(&str) -> Option<String>,
+    os: Os,
+) -> BinaryCheck {
+    let overridden = !override_path.trim().is_empty();
+    let path = if overridden {
+        Some(crate::paths::resolve_user_path(override_path.trim(), home))
+    } else {
+        find_on_path(name, env, os)
+    };
+    let Some(bin) = path else {
+        return BinaryCheck {
+            path: None,
+            overridden,
+            version: None,
+            error: Some(format!("{name} was not found on PATH")),
+        };
+    };
+    if !is_executable_file(&bin) {
+        return BinaryCheck {
+            path: Some(bin),
+            overridden,
+            version: None,
+            error: Some("Not an executable file".into()),
+        };
+    }
+    let (version, error) = match run_version(&bin, os, env("ComSpec").as_deref()) {
+        Ok(v) => (Some(v).filter(|v| !v.is_empty()), None),
+        Err(e) => (None, Some(e)),
+    };
+    BinaryCheck {
+        path: Some(bin),
+        overridden,
+        version,
+        error,
+    }
+}
+
+fn run_version(bin: &Path, os: Os, comspec: Option<&str>) -> Result<String, String> {
+    let (file, args) = spawn_command_for(os, &bin.to_string_lossy(), &["--version".into()], comspec)?;
+    let mut cmd = Command::new(file);
+    match args {
+        Args::List(a) => {
+            cmd.args(a);
+        }
+        Args::Verbatim(v) => {
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                cmd.raw_arg(v);
+            }
+            #[cfg(not(windows))]
+            cmd.arg(v);
+        }
+    }
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| "`--version` failed".to_string())?;
+    let mut stdout = child.stdout.take().expect("piped");
+    let reader = std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = std::io::Read::read_to_string(&mut stdout, &mut s);
+        s
+    });
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let out = reader.join().unwrap_or_default();
+                return if status.success() {
+                    Ok(out.trim().lines().next().unwrap_or("").to_string())
+                } else {
+                    Err("`--version` failed".into())
+                };
+            }
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("`--version` timed out after 3 s".into());
+            }
+            Err(_) => return Err("`--version` failed".into()),
+        }
+    }
+}
+
 /// Places `claude` is commonly installed that a GUI session's PATH often lacks.
 pub fn extra_bin_dirs(os: Os, home: &str, env: impl Fn(&str) -> Option<String>) -> Vec<String> {
     let join = |a: &str, parts: &[&str]| {
@@ -482,6 +664,30 @@ mod tests {
             Chrome::Overlay
         );
         assert_eq!(detect_desktop(Os::Mac, env(&[])).chrome, Chrome::Mac);
+    }
+
+    #[test]
+    fn lists_shells_once_each() {
+        let env = |k: &str| (k == "SHELL").then(|| "/usr/bin/fish".to_string());
+        let find = |n: &str| (n == "nu" || n == "fish").then(|| PathBuf::from(format!("/opt/{n}")));
+        let exists = |p: &Path| !p.to_string_lossy().contains("nologin");
+        let read = |_: &Path| Some("# shells\n/bin/bash\n/usr/bin/fish\n/sbin/nologin\n".to_string());
+        let names: Vec<String> = list_shells(Os::Linux, &env, &find, &exists, &read)
+            .into_iter()
+            .map(|o| format!("{} {}", o.name, o.path))
+            .collect();
+        assert_eq!(names, ["fish /usr/bin/fish", "bash /bin/bash", "nu /opt/nu"]);
+    }
+
+    #[test]
+    fn checks_a_missing_binary() {
+        let none = |_: &str| None;
+        let c = check_binary("claude-not-here", "", Path::new("/"), &none, Os::Linux);
+        assert_eq!(c.path, None);
+        assert_eq!(c.error.as_deref(), Some("claude-not-here was not found on PATH"));
+        let c = check_binary("claude", "/definitely/not/here", Path::new("/"), &none, Os::Linux);
+        assert!(c.overridden);
+        assert_eq!(c.error.as_deref(), Some("Not an executable file"));
     }
 
     #[test]
