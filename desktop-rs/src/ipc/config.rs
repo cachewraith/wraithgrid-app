@@ -16,7 +16,11 @@ pub fn setup(app: &AppHandle) {
     app.manage(Store(Mutex::new(store)));
 }
 
-pub async fn handle(app: &AppHandle, channel: &str, payload: Value) -> Option<Result<Value, String>> {
+pub async fn handle(
+    app: &AppHandle,
+    channel: &str,
+    payload: Value,
+) -> Option<Result<Value, String>> {
     let store = app.state::<Store>();
     Some(match channel {
         "config:get" => {

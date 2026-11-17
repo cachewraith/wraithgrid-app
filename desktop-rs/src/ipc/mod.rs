@@ -48,7 +48,10 @@ pub async fn route(app: &AppHandle, channel: &str, payload: Value) -> Result<Val
         "mods" => mods::handle(app, channel, payload).await,
         "preview" => preview::handle(app, channel, payload).await,
         "debug" => {
-            eprintln!("renderer: {}", payload.get("message").and_then(Value::as_str).unwrap_or(""));
+            eprintln!(
+                "renderer: {}",
+                payload.get("message").and_then(Value::as_str).unwrap_or("")
+            );
             if let Some(stack) = payload.get("stack").and_then(Value::as_str) {
                 eprintln!("{stack}");
             }
