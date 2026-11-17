@@ -9286,6 +9286,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "chrono",
+ "dunce",
  "embed-resource",
  "futures",
  "gpui-kit",
@@ -9336,6 +9337,7 @@ dependencies = [
 name = "wraithgrid-git"
 version = "0.1.0"
 dependencies = [
+ "dunce",
  "regex",
  "serde",
  "serde_json",

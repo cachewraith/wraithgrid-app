@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 alacritty_terminal = "=0.26.0"
 base64 = "=0.22.1"
+dunce = "=1.0.5"
 chrono = { version = "=0.4.45", default-features = false, features = ["clock", "std"] }
 anyhow.workspace = true
 futures = "=0.3.34"

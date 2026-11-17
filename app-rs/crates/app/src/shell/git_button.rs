@@ -670,11 +670,12 @@ pub(super) struct RemoveWorktreeDialog {
     busy: bool,
 }
 
-/// A Wraithgrid worktree folder: its real path under ~/.wraithgrid/worktrees, else None.
+/// A Wraithgrid worktree folder: its real path under ~/.wraithgrid/worktrees, else None. The
+/// path goes to git, so dunce keeps it plain on Windows (git cannot use std's \\?\C:\ form).
 fn own_worktree(cwd: &str) -> Option<PathBuf> {
     let home = home_dir();
-    let dir = std::fs::canonicalize(resolve_user_path(cwd, &home)).ok()?;
-    let root = std::fs::canonicalize(worktrees_root(&home)).ok()?;
+    let dir = dunce::canonicalize(resolve_user_path(cwd, &home)).ok()?;
+    let root = dunce::canonicalize(worktrees_root(&home)).ok()?;
     is_strictly_inside(&dir, &root).then_some(dir)
 }
 

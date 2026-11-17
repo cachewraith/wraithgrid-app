@@ -54,10 +54,11 @@ impl Git {
     }
 }
 
-/// A temp folder by its real path (macOS /var → /private/var), as git prints it.
+/// A temp folder by its real path (macOS /var → /private/var), as git prints it. dunce keeps
+/// Windows paths plain (C:\…): git cannot use the \\?\ form std's canonicalize returns.
 fn temp() -> (TempDir, PathBuf) {
     let t = TempDir::new().unwrap();
-    let p = fs::canonicalize(t.path()).unwrap();
+    let p = dunce::canonicalize(t.path()).unwrap();
     (t, p)
 }
 

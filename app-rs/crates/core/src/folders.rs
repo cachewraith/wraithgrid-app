@@ -329,9 +329,11 @@ mod tests {
         let l = list_folder("", &home);
         assert_eq!(l.path, "~");
         let ok = l.result.as_ref().unwrap();
-        let names: Vec<&str> = ok.entries.iter().map(|e| e.name.as_str()).collect();
         #[cfg(unix)]
-        assert_eq!(names, [".hid", "b9", "b10", "link", "proj"]);
+        {
+            let names: Vec<&str> = ok.entries.iter().map(|e| e.name.as_str()).collect();
+            assert_eq!(names, [".hid", "b9", "b10", "link", "proj"]);
+        }
         assert!(ok.entries[0].hidden);
         assert!(ok.entries.iter().find(|e| e.name == "proj").unwrap().git);
         assert_eq!(ok.branch, None);
