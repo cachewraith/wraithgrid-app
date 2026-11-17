@@ -16,6 +16,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::a11y::A11y as _;
+use crate::dialogs::{hold_backdrop, ModalFocus};
 use wraithgrid_core::login::{last_line, login_url, AuthStatus, LoginFlow};
 
 const OUTPUT_MAX: usize = 64_000;
@@ -57,6 +58,9 @@ pub struct LoginDialog {
     out: String,
     code: Entity<InputState>,
     child: Running,
+    focus: ModalFocus,
+    /// The code field was focused once its step showed.
+    code_focused: bool,
     _rx: Option<Task<()>>,
 }
 
@@ -90,6 +94,8 @@ impl LoginDialog {
             out: String::new(),
             code,
             child: Arc::new(Mutex::new(None)),
+            focus: ModalFocus::new(),
+            code_focused: false,
             _rx: None,
         };
         dialog.start(cx);
@@ -109,6 +115,8 @@ impl LoginDialog {
         self.cancel();
         self.step = Step::Starting;
         self.out.clear();
+        self.code_focused = false;
+        self.code.update(cx, |i, cx| i.set_disabled(false, cx));
         let mut cmd = self.command(self.flow.login);
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -116,6 +124,7 @@ impl LoginDialog {
         let (tx, mut rx) = futures::channel::mpsc::unbounded::<Out>();
         match cmd.spawn() {
             Ok(mut child) => {
+                let mut readers = Vec::new();
                 for pipe in [
                     child
                         .stdout
@@ -130,7 +139,7 @@ impl LoginDialog {
                 .flatten()
                 {
                     let tx = tx.clone();
-                    std::thread::spawn(move || {
+                    readers.push(std::thread::spawn(move || {
                         let mut pipe = pipe;
                         let mut buf = [0u8; 4096];
                         while let Ok(n) = pipe.read(&mut buf) {
@@ -142,7 +151,7 @@ impl LoginDialog {
                                 break;
                             }
                         }
-                    });
+                    }));
                 }
                 let stdin = child.stdin.take();
                 *self.child.lock().unwrap() = Some((child, stdin));
@@ -156,6 +165,15 @@ impl LoginDialog {
                         }
                     };
                     if done {
+                        // The last lines may still be in the pipes: Exit goes after them, so
+                        // `finish` reads the whole output. A helper the CLI left running can
+                        // hold a pipe open, so this waits 2 s at most.
+                        let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                        while readers.iter().any(|r| !r.is_finished())
+                            && std::time::Instant::now() < until
+                        {
+                            std::thread::sleep(std::time::Duration::from_millis(20));
+                        }
                         let _ = tx.unbounded_send(Out::Exit(None));
                         break;
                     }
@@ -265,6 +283,8 @@ impl LoginDialog {
             let _ = stdin.flush();
         }
         *sent = true;
+        // Sent once: claude reads one code per sign-in.
+        self.code.update(cx, |i, cx| i.set_disabled(true, cx));
         cx.notify();
     }
 
@@ -285,7 +305,21 @@ impl Drop for LoginDialog {
 impl EventEmitter<LoginEvent> for LoginDialog {}
 
 impl Render for LoginDialog {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let focus = self.focus.keep(window, cx);
+        // The code field, once there is one to type into.
+        if let (
+            false,
+            Step::Url {
+                device_code: None,
+                sent: false,
+                ..
+            },
+        ) = (self.code_focused, &self.step)
+        {
+            self.code_focused = true;
+            window.focus(&self.code.focus_handle(cx), cx);
+        }
         let theme = cx.theme().clone();
         let hint = |t: String| div().text_sm().text_color(theme.muted_foreground).child(t);
         let button = |id: &'static str, label: &'static str, primary: bool| {
@@ -401,8 +435,10 @@ impl Render for LoginDialog {
                     let can = !*sent && !self.code.read(cx).value().trim().is_empty();
                     actions.push(
                         button("login-continue", "Continue", true)
-                            .when(!can, |d| d.opacity(0.5))
-                            .on_click(cx.listener(|this, _, _, cx| this.submit(cx)))
+                            .when(!can, |d| d.opacity(0.5).cursor_default())
+                            .when(can, |d| {
+                                d.on_click(cx.listener(|this, _, _, cx| this.submit(cx)))
+                            })
                             .into_any_element(),
                     );
                 }
@@ -450,9 +486,10 @@ impl Render for LoginDialog {
                 );
             }
         }
-        div()
+        let dialog = div()
             .id("login-dialog")
             .a11y_dialog(title.clone())
+            .track_focus(&focus)
             .w(px(440.))
             .p_4()
             .flex()
@@ -475,6 +512,22 @@ impl Render for LoginDialog {
                     .child(title),
             )
             .children(body)
-            .child(div().flex().justify_end().gap_2().children(actions))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child("Esc to cancel"),
+                    )
+                    .children(actions),
+            )
+            .into_any_element();
+        // Signing in must not be lost to a stray click beside the dialog.
+        hold_backdrop(dialog, window)
     }
 }
