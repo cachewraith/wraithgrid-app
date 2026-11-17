@@ -124,6 +124,18 @@ impl AccountsView {
         }
     }
 
+    /// Opened from "No accounts yet" (New pane, New project): the import form, or the add
+    /// form's name field.
+    // Called by the window on `dialogs::OpenAccounts` (shell.rs follow-up).
+    #[allow(dead_code)]
+    pub fn start(&mut self, import: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if import {
+            self.open_import(window, cx);
+        } else {
+            window.focus(&self.name.focus_handle(cx), cx);
+        }
+    }
+
     fn open_import(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let input = cx.new(|cx| InputState::new(window, cx).default_value("~/.claude"));
         let sub = cx.subscribe_in(&input, window, |this, _, e: &InputEvent, _, cx| {
