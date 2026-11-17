@@ -5,6 +5,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod ipc;
+mod panels;
 mod sys;
 
 use serde_json::Value;
@@ -14,6 +15,14 @@ use tauri::AppHandle;
 #[tauri::command]
 async fn ipc(app: AppHandle, channel: String, payload: Option<Value>) -> Result<Value, String> {
     ipc::route(&app, &channel, payload.unwrap_or(Value::Null)).await
+}
+
+/// Calls that must finish before the renderer's next call starts (Electron handled IPC in
+/// order; Tauri runs async commands concurrently): a sync command runs inline, before the
+/// next message is read. Only for quick handlers that don't need the main thread.
+#[tauri::command]
+fn ipc_ordered(app: AppHandle, channel: String, payload: Option<Value>) -> Result<Value, String> {
+    tauri::async_runtime::block_on(ipc::route(&app, &channel, payload.unwrap_or(Value::Null)))
 }
 
 fn main() {
@@ -28,7 +37,7 @@ fn main() {
             ipc::setup(app.handle());
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![ipc])
+        .invoke_handler(tauri::generate_handler![ipc, ipc_ordered])
         .run(tauri::generate_context!())
         .expect("error while running Wraithgrid");
 }

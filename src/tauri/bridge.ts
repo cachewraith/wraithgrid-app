@@ -19,8 +19,13 @@ import type { ChatEventMessage } from '@shared/chat'
 import type { PreviewRequestFailure } from '@shared/preview'
 import type { CloseMode } from '@shared/types'
 
+// Saved config must be in place before whatever the renderer asks next (e.g. preview:start
+// reads the command it just saved): these go through a command that runs in order.
+const ORDERED = new Set<string>([IPC.configSet])
+
 function call<T = unknown>(channel: string, payload?: unknown): Promise<T> {
-  return invoke<T>('ipc', { channel, payload: payload ?? null })
+  const command = ORDERED.has(channel) ? 'ipc_ordered' : 'ipc'
+  return invoke<T>(command, { channel, payload: payload ?? null })
 }
 
 function send(channel: string, payload?: unknown): void {
