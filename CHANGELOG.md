@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-11-17
+
+- [gpui] Chats find their CLI when opened before the login-shell PATH probe answers (restored panes said "claude was not found on PATH"); non-claude chats look on PATH (files: app-rs/crates/app/src/runtime.rs, shell.rs, chat_view.rs)
+- [gpui] Chat view back to v1.26: footer no longer squeezes the transcript, floating `/` `@` `$` menus and picker popovers, CLI starts on open, pinned approval bar, stopped/sign-in bars, collapsible tool cards with verbs and states, code/answer Copy, thumbnails, Esc stops, Queue while busy, Full access needs a second click (files: app-rs/crates/app/src/chat_view.rs, chat_view/{transcript,pickers,extras,accounts}.rs, crates/chat/src/present.rs)
+- [gpui] Window shell back to v1.26: top-bar buttons no longer start a window drag, shortcuts paused under dialogs, close-pane asks, single-pane mode, dense grid, SVG icons, one keyboard menu, 34px header with state words, 1px dividers, rounded cards, window title, zoom badge, plan in the sidebar (files: app-rs/crates/app/src/shell.rs, shell/*.rs, shell/icons.rs, shell/menu.rs)
+- [gpui] Settings/dialogs back to v1.26: field-level saves (Settings no longer reverts zoom/pins/sidebar), no Full access default, dialogs keep focus and close on Esc, theme cards, claude/shell detection with Browse, Mods page (uninstall, marketplaces, folders), palette commands, New pane/project checks (files: app-rs/crates/app/src/settings.rs, dialogs.rs, mods_view.rs, accounts_view.rs, login_dialog.rs, preview_view.rs, changes.rs, scheduled_view.rs, crates/core/src/{config,platform}.rs, crates/mods/src/catalog.rs)
+
 ## 2026-11-16
 
 - [release] v2.0.0: the Rust + GPUI app replaces the Electron app (#166); published to the public cachewraith/wraithgrid with its update feeds, so installed copies update into it. gpui.yml `update_feeds` input, one SHA256SUMS.txt for all OSes (files: app-rs/crates/app/Cargo.toml, app-rs/Cargo.lock, .github/workflows/gpui.yml)
