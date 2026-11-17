@@ -1,0 +1,40 @@
+[package]
+name = "wraithgrid-desktop"
+version = "2.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "Wraithgrid on Tauri: the 1.26 React UI in a native webview, backed by the app-rs crates"
+
+[[bin]]
+name = "wraithgrid-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "=2.7.5", features = [] }
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "=1.0.154", features = ["preserve_order"] }
+tauri = { version = "=2.12.5", features = [] }
+wraithgrid-core = { path = "../app-rs/crates/core" }
+wraithgrid-chat = { path = "../app-rs/crates/chat" }
+wraithgrid-git = { path = "../app-rs/crates/git" }
+wraithgrid-mods = { path = "../app-rs/crates/mods" }
+wraithgrid-remote = { path = "../app-rs/crates/remote" }
+wraithgrid-schedule = { path = "../app-rs/crates/schedule" }
+wraithgrid-themes = { path = "../app-rs/crates/themes" }
+wraithgrid-usage = { path = "../app-rs/crates/usage" }
+
+[features]
+# Serve out/tauri-renderer instead of the Vite dev server (release builds always do).
+custom-protocol = ["tauri/custom-protocol"]
+
+# Its own workspace: Tauri's wry and the GPUI app's webview pin different webkit2gtk versions.
+[workspace]
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
