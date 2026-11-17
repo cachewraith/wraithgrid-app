@@ -18,6 +18,9 @@ anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "=1.0.154", features = ["preserve_order"] }
 tauri = { version = "=2.12.5", features = [] }
+# Native file and folder dialogs (GTK on Linux, not the xdg portal).
+tauri-plugin-dialog = "=2.8.4"
+tokio = { version = "=1.54.1", features = ["sync", "time"] }
 wraithgrid-core = { path = "../app-rs/crates/core" }
 wraithgrid-chat = { path = "../app-rs/crates/chat" }
 wraithgrid-git = { path = "../app-rs/crates/git" }
