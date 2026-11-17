@@ -5,6 +5,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod ipc;
+mod panels;
 
 use serde_json::Value;
 use tauri::AppHandle;
