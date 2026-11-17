@@ -68,12 +68,20 @@ fn restore_gdk_backend(env: &mut BTreeMap<String, String>) {
 /// The same, without waiting for the login shell's answer: the inherited PATH until it came.
 pub fn spawn_env_now() -> BTreeMap<String, String> {
     let mut env: BTreeMap<String, String> = std::env::vars().collect();
-    if let Some(path) = PROCESS_PATH.get() {
-        env.insert(
-            if cfg!(windows) { "Path" } else { "PATH" }.into(),
-            path.clone(),
-        );
-    }
+    // Before the login-shell probe answers, a launcher's PATH often lacks ~/.local/bin and
+    // friends: add the common bin dirs so a pane restored at startup still finds its CLI.
+    let path = PROCESS_PATH.get().cloned().unwrap_or_else(|| {
+        let os = Os::current();
+        let home = home_dir().to_string_lossy().into_owned();
+        let extra = wraithgrid_core::platform::extra_bin_dirs(os, &home, |k| std::env::var(k).ok())
+            .join(&os.path_delimiter().to_string());
+        let inherited = std::env::var("PATH").ok();
+        wraithgrid_core::platform::merge_path(
+            os.path_delimiter(),
+            &[inherited.as_deref(), Some(&extra)],
+        )
+    });
+    env.insert(if cfg!(windows) { "Path" } else { "PATH" }.into(), path);
     restore_gdk_backend(&mut env);
     env
 }

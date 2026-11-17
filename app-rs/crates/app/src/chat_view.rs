@@ -233,6 +233,18 @@ impl ChatView {
 
     /// Starts the CLI, resuming the pane's conversation when it has one.
     fn start(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
+        // Not found when the view was made (the login-shell PATH may not have been in yet):
+        // look again with the PATH as it is now.
+        if self.setup.program.is_none() {
+            let env = crate::runtime::spawn_env_now();
+            let bin = wraithgrid_core::agent_cli::AgentCli::parse(&self.setup.cli)
+                .map_or(self.setup.cli.as_str(), |c| c.spec().bin);
+            self.setup.program = wraithgrid_core::platform::find_on_path(
+                bin,
+                |k| env.get(k).cloned(),
+                wraithgrid_core::pane_env::Os::current(),
+            );
+        }
         let s = &self.setup;
         let program = s
             .program

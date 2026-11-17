@@ -437,6 +437,13 @@ impl Shell {
                     .iter()
                     .find(|(c, p)| *c == cli && !p.trim().is_empty())
                     .map(|(_, p)| wraithgrid_core::paths::resolve_user_path(p.trim(), &home))
+                    .or_else(|| {
+                        wraithgrid_core::platform::find_on_path(
+                            cli.spec().bin,
+                            |k| env.get(k).cloned(),
+                            Os::current(),
+                        )
+                    })
             },
             cwd: wraithgrid_core::paths::resolve_user_path(&pane.cwd, &home),
             env: pane_env,
