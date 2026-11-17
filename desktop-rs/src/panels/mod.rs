@@ -1,5 +1,7 @@
 //! Helpers for the panel channels (git, usage, update, themes, mods, preview).
 
+pub mod dialog;
+pub mod env;
 pub mod project_icons;
 
 /// Opens a web link in the user's browser.
