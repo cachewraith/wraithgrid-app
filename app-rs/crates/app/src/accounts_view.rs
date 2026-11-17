@@ -142,8 +142,6 @@ impl AccountsView {
 
     /// The saved config after a change, shown in place: rows keep their fields (and focus),
     /// so renaming one doesn't rebuild the page.
-    // Called by the window after an account change (shell.rs follow-up).
-    #[allow(dead_code)]
     pub fn set_config(&mut self, config: &Config, window: &mut Window, cx: &mut Context<Self>) {
         let before = self.rows.len();
         let mut old: Vec<Row> = std::mem::take(&mut self.rows);
@@ -180,8 +178,6 @@ impl AccountsView {
 
     /// Opened from "No accounts yet" (New pane, New project): the import form, or the add
     /// form's name field.
-    // Called by the window on `dialogs::OpenAccounts` (shell.rs follow-up).
-    #[allow(dead_code)]
     pub fn start(&mut self, import: bool, window: &mut Window, cx: &mut Context<Self>) {
         if import {
             self.open_import(window, cx);

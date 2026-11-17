@@ -279,8 +279,6 @@ impl SettingsView {
 
     /// The fields still waiting to be saved, for the window to apply before it drops the page
     /// (an event sent from a page being dropped may never arrive).
-    // Called by the window before it closes Settings (shell.rs follow-up).
-    #[allow(dead_code)]
     pub fn take_pending(&mut self) -> Vec<SettingsPatch> {
         self.pending.drain(..).map(|(_, patch, _)| patch).collect()
     }

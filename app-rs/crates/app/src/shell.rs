@@ -34,10 +34,11 @@ use crate::accounts_view::{AccountsEvent, AccountsView};
 use crate::changes::ChangesPanel;
 use crate::chat_view::{ChatSetup, ChatView, ChatViewEvent};
 use crate::dialogs::{
-    ChoiceDialog, ChoiceEvent, NewPaneDialog, NewPaneEvent, NewProjectDialog, NewProjectEvent,
-    Palette, PaletteAction, PaletteEvent, ProjectDialog, ProjectEvent, QuitDialog, QuitEvent,
+    ChoiceDialog, ChoiceEvent, CreateRemoteProject, NewPaneDialog, NewPaneEvent, NewProjectDialog,
+    NewProjectEvent, OpenAccounts, Palette, PaletteAction, PaletteCommand, PaletteEvent,
+    PinFolders, ProjectDialog, ProjectEvent, QuitDialog, QuitEvent,
 };
-use crate::mods_view::{ModsView, ModsViewEvent};
+use crate::mods_view::{ModsRequest, ModsView, ModsViewEvent};
 use crate::project_view::{ProjectPageEvent, ProjectView};
 use crate::runtime::{spawn_env, Router};
 use crate::scheduled_view::{ScheduledEvent, ScheduledView};
@@ -435,6 +436,15 @@ impl Shell {
             let config = self.store.get().clone();
             view.update(cx, |v, cx| v.set_config(config, cx));
         }
+        // Settings and Mods draw from a copy: a change made elsewhere (zoom, pins) shows there.
+        if let Some(view) = self.settings_view.clone() {
+            let config = self.store.get().clone();
+            view.update(cx, |v, cx| v.sync(&config, cx));
+        }
+        if let Some(view) = self.mods_view.clone() {
+            let config = self.store.get().clone();
+            view.update(cx, |v, cx| v.set_config(config, cx));
+        }
         self.refresh_project_view(cx);
         self.refresh_chat_later(cx);
         cx.notify();
@@ -695,6 +705,10 @@ impl Shell {
             },
         )
         .detach();
+        cx.subscribe_in(&dialog, window, |this, _, e: &OpenAccounts, window, cx| {
+            this.open_accounts_for(e.import, window, cx)
+        })
+        .detach();
         self.modal = Some(Modal::NewPane(dialog));
         cx.notify();
     }
@@ -733,6 +747,55 @@ impl Shell {
                                 this.request_close_pane(id, cx);
                             }
                         }
+                    }
+                }
+                this.close_modal(window, cx);
+            },
+        )
+        .detach();
+        cx.subscribe_in(
+            &palette,
+            window,
+            |this, _, command: &PaletteCommand, window, cx| {
+                this.modal = None;
+                match command.clone() {
+                    PaletteCommand::NewProject => return this.open_new_project(window, cx),
+                    PaletteCommand::Team { workspace, start } => {
+                        if start {
+                            this.start_team(workspace, None, false, window, cx)
+                        } else {
+                            this.stop_team(workspace, false, window, cx)
+                        }
+                        // It may ask first.
+                        if this.modal.is_some() {
+                            return;
+                        }
+                    }
+                    PaletteCommand::NewScheduledJob => {
+                        this.open_scheduled(window, cx);
+                        if let Some(view) = this.scheduled_view.clone() {
+                            view.update(cx, |v, cx| v.open_job(None, window, cx));
+                        }
+                        return cx.notify();
+                    }
+                    PaletteCommand::ToggleSidebar => this.update(cx, |c| {
+                        c.settings.sidebar_collapsed = !c.settings.sidebar_collapsed
+                    }),
+                    PaletteCommand::SetTheme { dark } => {
+                        this.update(cx, |c| {
+                            c.settings.theme = if dark {
+                                wraithgrid_core::types::ThemePreference::Dark
+                            } else {
+                                wraithgrid_core::types::ThemePreference::Light
+                            }
+                        });
+                        let resolved =
+                            crate::theme::resolve(this.config(), crate::theme::system_dark(window));
+                        crate::theme::apply(&resolved, Some(window), cx);
+                    }
+                    PaletteCommand::NewPaneAs { account, cwd } => {
+                        let id = this.add_pane(None, Some(account), cwd, vec![], false, true, cx);
+                        this.focused = Some(id);
                     }
                 }
                 this.close_modal(window, cx);
@@ -873,28 +936,7 @@ impl Shell {
                     }
                 }
                 SettingsEvent::RestartClaudePanes => {
-                    // Agent panes that started: terminals restart, idle chats start their CLI
-                    // again with the next message (`restartClaudePanes`).
-                    let agents: Vec<String> = this
-                        .config()
-                        .workspaces
-                        .iter()
-                        .flat_map(|w| w.panes.iter())
-                        .filter(|p| !p.shell)
-                        .map(|p| p.id.clone())
-                        .collect();
-                    let mut n = 0;
-                    for id in agents {
-                        if this.terminals.contains_key(&id) {
-                            this.restart_pane(id, cx);
-                            n += 1;
-                        } else if let Some(chat) = this.chats.get(&id).cloned() {
-                            if !chat.read(cx).is_busy() {
-                                chat.update(cx, |c, _| c.stop_session());
-                                n += 1;
-                            }
-                        }
-                    }
+                    let n = this.restart_agent_panes(cx);
                     if let Some(view) = this.settings_view.clone() {
                         view.update(cx, |v, cx| v.set_restarted(n, cx));
                     }
@@ -985,6 +1027,38 @@ impl Shell {
             },
         )
         .detach();
+        cx.subscribe_in(
+            &dialog,
+            window,
+            |this, dialog, e: &CreateRemoteProject, window, cx| {
+                // Made here, its machine set, then its first chat opens there.
+                match this.create_project(&e.name, &e.folder, e.account.clone(), false, cx) {
+                    Ok(()) => {
+                        let (id, machine) =
+                            (this.config().active_workspace.clone(), e.machine.clone());
+                        this.update(cx, |c| {
+                            if let Some(w) = c.workspaces.iter_mut().find(|w| w.id == id) {
+                                w.machine_id = Some(machine);
+                            }
+                        });
+                        if let (true, Some(account)) = (e.start_chat, e.account.clone()) {
+                            let cwd = e.folder.trim().to_string();
+                            this.add_pane(None, Some(account), cwd, vec![], false, true, cx);
+                        }
+                        this.close_modal(window, cx);
+                    }
+                    Err(err) => dialog.update(cx, |d, cx| {
+                        d.error = Some(err);
+                        cx.notify();
+                    }),
+                }
+            },
+        )
+        .detach();
+        cx.subscribe_in(&dialog, window, |this, _, e: &OpenAccounts, window, cx| {
+            this.open_accounts_for(e.import, window, cx)
+        })
+        .detach();
         self.modal = Some(Modal::NewProject(dialog));
         cx.notify();
     }
@@ -1037,7 +1111,7 @@ impl Shell {
         if self.blocked.is_some() {
             return;
         }
-        self.settings_view = None;
+        self.drop_settings(cx);
         self.usage_view = None;
         self.mods_view = None;
         self.scheduled_view = None;
@@ -1091,10 +1165,9 @@ impl Shell {
                             }
                         }
                         let Some((real, cli)) = doomed else {
-                            return {
-                                this.update(cx, |c| *c = next);
-                                this.open_accounts(window, cx);
-                            };
+                            this.update(cx, |c| *c = next);
+                            let config = this.config().clone();
+                            return view.update(cx, |v, cx| v.set_config(&config, window, cx));
                         };
                         // The shared links out first, so the delete can never reach through
                         // them; then the folder, off the main thread; the account goes once
@@ -1110,7 +1183,8 @@ impl Shell {
                             let _ = this.update_in(cx, |this, window, cx| match res {
                                 Ok(()) => {
                                     this.update(cx, |c| *c = next);
-                                    this.open_accounts(window, cx);
+                                    let config = this.config().clone();
+                                    view.update(cx, |v, cx| v.set_config(&config, window, cx));
                                 }
                                 Err(e) => view.update(cx, |v, cx| {
                                     v.error = Some(format!("Could not delete the config dir: {e}"));
@@ -1161,8 +1235,9 @@ impl Shell {
                 match result {
                     Ok(()) => {
                         this.update(cx, |c| *c = next);
-                        // Shown again from the saved config, rows and all.
-                        this.open_accounts(window, cx);
+                        // Shown in place: a rename keeps the page, its fields and focus.
+                        let config = this.config().clone();
+                        view.update(cx, |v, cx| v.set_config(&config, window, cx));
                     }
                     Err(e) => view.update(cx, |v, cx| {
                         v.error = Some(e);
@@ -1217,6 +1292,11 @@ impl Shell {
                 this.close_modal(window, cx);
             },
         )
+        .detach();
+        cx.subscribe_in(&dialog, window, |this, _, e: &PinFolders, _, cx| {
+            let pins = e.0.clone();
+            this.update(cx, |c| c.settings.pinned_folders = pins);
+        })
         .detach();
         self.modal = Some(Modal::Project(dialog));
         cx.notify();
@@ -1429,7 +1509,7 @@ impl Shell {
         if self.blocked.is_some() {
             return;
         }
-        self.settings_view = None;
+        self.drop_settings(cx);
         self.accounts_view = None;
         self.mods_view = None;
         self.scheduled_view = None;
@@ -1457,7 +1537,7 @@ impl Shell {
         if self.blocked.is_some() {
             return;
         }
-        self.settings_view = None;
+        self.drop_settings(cx);
         self.accounts_view = None;
         self.usage_view = None;
         self.scheduled_view = None;
@@ -1475,6 +1555,19 @@ impl Shell {
             },
         )
         .detach();
+        cx.subscribe_in(
+            &view,
+            window,
+            |this, view, e: &ModsRequest, window, cx| match e {
+                ModsRequest::Config(patch) => this.update(cx, |c| patch(c)),
+                ModsRequest::RestartClaudePanes => {
+                    let n = this.restart_agent_panes(cx);
+                    view.update(cx, |v, cx| v.set_restarted(n, cx));
+                }
+                ModsRequest::AddAccount => this.open_accounts_for(false, window, cx),
+            },
+        )
+        .detach();
         window.focus(&view.focus_handle(cx), cx);
         self.mods_view = Some(view);
         cx.notify();
@@ -1484,7 +1577,7 @@ impl Shell {
         if self.blocked.is_some() {
             return;
         }
-        self.settings_view = None;
+        self.drop_settings(cx);
         self.accounts_view = None;
         self.usage_view = None;
         self.mods_view = None;
@@ -1627,7 +1720,7 @@ impl Shell {
         if self.blocked.is_some() {
             return;
         }
-        self.settings_view = None;
+        self.drop_settings(cx);
         self.accounts_view = None;
         self.usage_view = None;
         self.mods_view = None;
@@ -2310,6 +2403,51 @@ impl Shell {
             cx.notify();
         }
         self.focus_pane_view(pane_id, window, cx);
+    }
+
+    /// Settings goes away: a field still waiting for its save is saved first (an event from
+    /// a page being dropped may never arrive).
+    fn drop_settings(&mut self, cx: &mut Context<Self>) {
+        if let Some(view) = self.settings_view.take() {
+            for patch in view.update(cx, |v, _| v.take_pending()) {
+                self.update(cx, |c| patch(c));
+            }
+        }
+    }
+
+    /// "Restart claude panes" (Settings, Mods): agent panes that started; terminals restart,
+    /// idle chats start their CLI again with the next message (`restartClaudePanes`).
+    fn restart_agent_panes(&mut self, cx: &mut Context<Self>) -> usize {
+        let agents: Vec<String> = self
+            .config()
+            .workspaces
+            .iter()
+            .flat_map(|w| w.panes.iter())
+            .filter(|p| !p.shell)
+            .map(|p| p.id.clone())
+            .collect();
+        let mut n = 0;
+        for id in agents {
+            if self.terminals.contains_key(&id) {
+                self.restart_pane(id, cx);
+                n += 1;
+            } else if let Some(chat) = self.chats.get(&id).cloned() {
+                if !chat.read(cx).is_busy() {
+                    chat.update(cx, |c, _| c.stop_session());
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
+    /// Opened from "No accounts yet" or Mods: Accounts with its import or add form ready.
+    fn open_accounts_for(&mut self, import: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.modal = None;
+        self.open_accounts(window, cx);
+        if let Some(view) = self.accounts_view.clone() {
+            view.update(cx, |v, cx| v.start(import, window, cx));
+        }
     }
 
     /// Adds a pane to the active project next to the focused one (`addPaneToActive`).

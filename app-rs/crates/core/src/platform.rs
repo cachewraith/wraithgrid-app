@@ -272,7 +272,11 @@ pub fn list_shells(
     if os == Os::Windows {
         add("PowerShell 7", found("pwsh"), &[]);
         add("Windows PowerShell", found("powershell"), &[]);
-        add("Command Prompt", env("ComSpec").or_else(|| found("cmd")), &[]);
+        add(
+            "Command Prompt",
+            env("ComSpec").or_else(|| found("cmd")),
+            &[],
+        );
         let local = env("LOCALAPPDATA").map(|l| format!("{l}\\Programs"));
         for base in [env("ProgramFiles"), env("ProgramFiles(x86)"), local]
             .into_iter()
@@ -288,7 +292,10 @@ pub fn list_shells(
         return out;
     }
     let mut candidates: Vec<String> = env("SHELL").filter(|s| !s.is_empty()).into_iter().collect();
-    for line in read_text(Path::new("/etc/shells")).unwrap_or_default().lines() {
+    for line in read_text(Path::new("/etc/shells"))
+        .unwrap_or_default()
+        .lines()
+    {
         let f = line.trim();
         if f.starts_with('/') {
             candidates.push(f.to_string());
@@ -365,7 +372,8 @@ pub fn check_binary(
 }
 
 fn run_version(bin: &Path, os: Os, comspec: Option<&str>) -> Result<String, String> {
-    let (file, args) = spawn_command_for(os, &bin.to_string_lossy(), &["--version".into()], comspec)?;
+    let (file, args) =
+        spawn_command_for(os, &bin.to_string_lossy(), &["--version".into()], comspec)?;
     let mut cmd = Command::new(file);
     match args {
         Args::List(a) => {
@@ -671,12 +679,16 @@ mod tests {
         let env = |k: &str| (k == "SHELL").then(|| "/usr/bin/fish".to_string());
         let find = |n: &str| (n == "nu" || n == "fish").then(|| PathBuf::from(format!("/opt/{n}")));
         let exists = |p: &Path| !p.to_string_lossy().contains("nologin");
-        let read = |_: &Path| Some("# shells\n/bin/bash\n/usr/bin/fish\n/sbin/nologin\n".to_string());
+        let read =
+            |_: &Path| Some("# shells\n/bin/bash\n/usr/bin/fish\n/sbin/nologin\n".to_string());
         let names: Vec<String> = list_shells(Os::Linux, &env, &find, &exists, &read)
             .into_iter()
             .map(|o| format!("{} {}", o.name, o.path))
             .collect();
-        assert_eq!(names, ["fish /usr/bin/fish", "bash /bin/bash", "nu /opt/nu"]);
+        assert_eq!(
+            names,
+            ["fish /usr/bin/fish", "bash /bin/bash", "nu /opt/nu"]
+        );
     }
 
     #[test]
@@ -684,8 +696,17 @@ mod tests {
         let none = |_: &str| None;
         let c = check_binary("claude-not-here", "", Path::new("/"), &none, Os::Linux);
         assert_eq!(c.path, None);
-        assert_eq!(c.error.as_deref(), Some("claude-not-here was not found on PATH"));
-        let c = check_binary("claude", "/definitely/not/here", Path::new("/"), &none, Os::Linux);
+        assert_eq!(
+            c.error.as_deref(),
+            Some("claude-not-here was not found on PATH")
+        );
+        let c = check_binary(
+            "claude",
+            "/definitely/not/here",
+            Path::new("/"),
+            &none,
+            Os::Linux,
+        );
         assert!(c.overridden);
         assert_eq!(c.error.as_deref(), Some("Not an executable file"));
     }

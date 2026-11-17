@@ -23,7 +23,7 @@ impl Shell {
         self.flush_chats(cx);
         // Screens and dialogs belong to the window that goes.
         self.modal = None;
-        self.settings_view = None;
+        self.drop_settings(cx);
         self.accounts_view = None;
         self.usage_view = None;
         self.mods_view = None;

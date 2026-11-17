@@ -38,8 +38,6 @@ pub enum ModsViewEvent {
 
 /// What the page asks the window for, beyond closing (a separate event, so the window's
 /// `ModsViewEvent` handler stays as it is).
-// The window reads it once it subscribes to this event (shell.rs follow-up).
-#[allow(dead_code)]
 pub enum ModsRequest {
     /// Mod folders changed (`settings.modDirs`): apply and save.
     Config(SettingsPatch),
@@ -190,16 +188,12 @@ impl ModsView {
     }
 
     /// The config after the window applied a change.
-    // Called by the window (shell.rs follow-up).
-    #[allow(dead_code)]
     pub fn set_config(&mut self, config: Config, cx: &mut Context<Self>) {
         self.config = config;
         cx.notify();
     }
 
     /// How many panes "Restart claude panes" restarted.
-    // Called by the window on `ModsRequest::RestartClaudePanes` (shell.rs follow-up).
-    #[allow(dead_code)]
     pub fn set_restarted(&mut self, n: usize, cx: &mut Context<Self>) {
         self.restarted = Some(n);
         cx.notify();

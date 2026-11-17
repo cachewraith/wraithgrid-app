@@ -102,15 +102,11 @@ pub(crate) fn hold_backdrop(content: AnyElement, window: &Window) -> AnyElement 
 
 /// Opened from "No accounts yet" (New pane, New project): Accounts, with its import form
 /// (`import`) or its add form ready (`setAccountsMode`).
-// The window reads it once it subscribes to this event (shell.rs follow-up).
-#[allow(dead_code)]
 pub struct OpenAccounts {
     pub import: bool,
 }
 
 /// The folder picker's pins changed: save them (`settings.pinnedFolders`).
-// The window reads it once it subscribes to this event (shell.rs follow-up).
-#[allow(dead_code)]
 pub struct PinFolders(pub Vec<String>);
 
 /// A dialog's title row with its ✕ (`dlg-hd`).
@@ -1741,8 +1737,6 @@ pub enum NewProjectEvent {
 
 /// New project, set to run on another machine ("Runs on"): the window makes the project,
 /// sets its machine, then opens the first chat there if asked.
-// The window reads it once it subscribes to this event (shell.rs follow-up).
-#[allow(dead_code)]
 pub struct CreateRemoteProject {
     pub name: String,
     pub folder: String,
