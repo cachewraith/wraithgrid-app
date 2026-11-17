@@ -20,7 +20,10 @@ pub async fn file(
     dir: &Path,
     pick: Pick<'_>,
 ) -> Option<PathBuf> {
-    if app.try_state::<tauri_plugin_dialog::Dialog<Wry>>().is_none() {
+    if app
+        .try_state::<tauri_plugin_dialog::Dialog<Wry>>()
+        .is_none()
+    {
         let _ = app.plugin(tauri_plugin_dialog::init());
     }
     let mut builder = app

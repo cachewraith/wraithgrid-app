@@ -23,10 +23,18 @@ pub struct DevServers(Mutex<HashMap<String, DevServer>>);
 
 pub fn setup(app: &AppHandle) {
     app.manage(DevServers::default());
+    // Dev servers end with the window (src/main/app.ts stopAll on quit).
+    if let Some(win) = app.get_webview_window("main") {
+        let app = app.clone();
+        win.on_window_event(move |e| {
+            if matches!(e, tauri::WindowEvent::Destroyed) {
+                stop_all(&app);
+            }
+        });
+    }
 }
 
 /// Stops every dev server (quit).
-#[allow(dead_code)]
 pub fn stop_all(app: &AppHandle) {
     if let Some(s) = app.try_state::<DevServers>() {
         s.0.lock().unwrap().clear();
@@ -97,7 +105,17 @@ pub async fn handle(
                 eprintln!("wraithgrid: refused preview:start: invalid arguments");
                 return Some(Ok(fail("Could not start the dev server")));
             };
-            let Some((command, cwd)) = preview_pane(&cfg(), &pane_id) else {
+            // The renderer saves a new command with config:set just before this call; Tauri
+            // runs invokes concurrently, so give that save a moment to land.
+            let mut found = preview_pane(&cfg(), &pane_id);
+            for _ in 0..10 {
+                if found.as_ref().is_none_or(|(c, _)| !c.is_empty()) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                found = preview_pane(&cfg(), &pane_id);
+            }
+            let Some((command, cwd)) = found else {
                 return Some(Ok(fail("Not a preview on this computer.")));
             };
             if command.is_empty() {
