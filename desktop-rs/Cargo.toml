@@ -1,6 +1,6 @@
 [package]
 name = "wraithgrid-desktop"
-version = "2.2.0"
+version = "2.2.1"
 edition = "2021"
 license = "MIT"
 publish = false
@@ -16,6 +16,7 @@ tauri-build = { version = "=2.7.5", features = [] }
 
 [dependencies]
 anyhow = "1"
+dunce = "=1.0.5"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "=1.0.154", features = ["preserve_order"] }
 tauri = { version = "=2.12.5", features = ["tray-icon"] }

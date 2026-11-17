@@ -166,10 +166,11 @@ fn delete_dir(app: &AppHandle, dir: &str) -> Value {
     if !is_strictly_inside(&target, &home) {
         return fail("Refusing to delete a folder outside your home directory");
     }
-    let Ok(real) = std::fs::canonicalize(&target) else {
+    // dunce: plain C:\ paths on Windows, so `unshare` matches the stored folder paths.
+    let Ok(real) = dunce::canonicalize(&target) else {
         return ok(); // Already gone.
     };
-    let real_home = std::fs::canonicalize(&home).unwrap_or(home.clone());
+    let real_home = dunce::canonicalize(&home).unwrap_or(home.clone());
     if !is_strictly_inside(&real, &real_home) {
         return fail("Refusing to delete a folder outside your home directory");
     }

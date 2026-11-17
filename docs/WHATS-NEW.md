@@ -1,4 +1,17 @@
-# What's new in 2.2.0: the 1.26 look is back
+# What's new in 2.2.1: Windows fixes
+
+*v2.2.1 · 2026-11-17*
+
+A small fix release for Windows.
+
+| Fix | What changed |
+|---|---|
+| Remove worktree | Removing a Wraithgrid worktree works on Windows again; git could not use the folder path the app gave it |
+| Delete account folder | Deleting an account's folder on Windows drops its shared links first, as on Linux and macOS |
+
+---
+
+## Previously, in 2.2.0: the 1.26 look is back
 
 *v2.2.0 · 2026-11-17*
 
