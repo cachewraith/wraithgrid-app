@@ -21,7 +21,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$here/../../.." && pwd)
 out="$repo/app-rs/target/dist"
 work="$repo/app-rs/target/package/macos"
-version=$(grep -m1 '^version' "$repo/app-rs/crates/app/Cargo.toml" | sed -E 's/.*"(.*)".*/\1/')
+version=$(grep -m1 '^version' "$repo/desktop-rs/Cargo.toml" | sed -E 's/.*"(.*)".*/\1/')
 host="$repo/host-rs/target/release/wraithgrid-host"
 identity=${MACOS_SIGN_IDENTITY:--}
 [[ -x $host ]] || { echo "build the host first: scripts/build-mac-host.sh" >&2; exit 1; }
@@ -98,11 +98,11 @@ for arch in "${archs[@]}"; do
     x64) triple=x86_64-apple-darwin cpu=x86_64 ;;
     *) echo "unknown arch $arch (arm64, x64)" >&2; exit 1 ;;
   esac
-  bin="$repo/app-rs/target/$triple/release/wraithgrid"
+  bin="$repo/desktop-rs/target/$triple/release/wraithgrid"
   if [[ ! -x $bin && $(uname -m) == "$cpu" ]]; then
-    bin="$repo/app-rs/target/release/wraithgrid"
+    bin="$repo/desktop-rs/target/release/wraithgrid"
   fi
-  [[ -x $bin ]] || { echo "build the app first: cargo build --release --target $triple -p wraithgrid" >&2; exit 1; }
+  [[ -x $bin ]] || { echo "build the app first: cargo build --release --target $triple --manifest-path desktop-rs/Cargo.toml" >&2; exit 1; }
   lipo "$bin" -verify_arch "$cpu" || { echo "$bin is not $cpu" >&2; exit 1; }
   lipo "$host" -verify_arch "$cpu" || { echo "$host lacks $cpu: run scripts/build-mac-host.sh" >&2; exit 1; }
   bundle "$arch" "$bin"

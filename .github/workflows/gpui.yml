@@ -5,9 +5,9 @@ name: gpui
 on:
   push:
     branches: [main]
-    paths: ['gpui-spike/**', 'app-rs/**', '.github/workflows/gpui.yml']
+    paths: ['gpui-spike/**', 'app-rs/**', 'desktop-rs/**', 'src/**', '.github/workflows/gpui.yml']
   pull_request:
-    paths: ['gpui-spike/**', 'app-rs/**', '.github/workflows/gpui.yml']
+    paths: ['gpui-spike/**', 'app-rs/**', 'desktop-rs/**', 'src/**', '.github/workflows/gpui.yml']
   workflow_dispatch:
     inputs:
       release_tag:
@@ -100,8 +100,33 @@ jobs:
           cargo build --release --locked -p wraithgrid
           ls -l target/release/wraithgrid*
 
-  # The GPUI app's Linux packages, named and laid out as the Electron ones (#166 phase 6), on
+  # The Tauri app's Linux packages, named and laid out as the Electron ones (#166 phase 6), on
   # Ubuntu 22.04's glibc so they run on newer distros too.
+  # The Tauri app (desktop-rs): the 1.26 React UI on a Rust backend, the app that ships.
+  desktop-rs:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Linux libraries (Tauri)
+        run: >
+          sudo apt-get update && sudo apt-get install -y
+          libgtk-3-dev libwebkit2gtk-4.1-dev libsoup-3.0-dev libayatana-appindicator3-dev librsvg2-dev
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: package.json
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - name: Renderer (the 1.26 React UI the Tauri app embeds)
+        shell: bash
+        run: bun install --frozen-lockfile && bun run tauri:renderer
+      - name: cargo fmt, clippy, test
+        working-directory: desktop-rs
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets --locked -- -D warnings
+          cargo test --locked
+
   app-rs-linux-packages:
     runs-on: ubuntu-22.04
     permissions:
@@ -112,18 +137,26 @@ jobs:
         run: |
           sudo apt-get update
           # desktop-file-utils: appimagetool refuses to run without desktop-file-validate.
-          sudo apt-get install -y libxkbcommon-x11-dev libwayland-dev libvulkan-dev libx11-xcb-dev \
-            libxcb1-dev libfontconfig-dev libfreetype-dev libzstd-dev libssl-dev libasound2-dev \
-            libgtk-3-dev libwebkit2gtk-4.1-dev libsoup-3.0-dev \
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libsoup-3.0-dev \
+            libayatana-appindicator3-dev librsvg2-dev libssl-dev zstd \
             ruby ruby-dev rpm libarchive-tools imagemagick desktop-file-utils
           sudo gem install --no-document fpm -v 1.16.0
           curl -fsSL -o /usr/local/bin/appimagetool \
             https://github.com/AppImage/appimagetool/releases/download/1.9.0/appimagetool-x86_64.AppImage
           chmod +x /usr/local/bin/appimagetool
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: package.json
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - name: Renderer (the 1.26 React UI the Tauri app embeds)
+        shell: bash
+        run: bun install --frozen-lockfile && bun run tauri:renderer
       - name: Build the host and the app
         run: |
           cargo build --release --locked --manifest-path host-rs/Cargo.toml
-          cargo build --release --locked --manifest-path app-rs/Cargo.toml -p wraithgrid
+          cargo build --release --locked --manifest-path desktop-rs/Cargo.toml
       - name: Package
         env:
           APPIMAGE_EXTRACT_AND_RUN: '1'
@@ -148,7 +181,7 @@ jobs:
           path: app-rs/target/dist/*
           retention-days: 14
 
-  # The GPUI app's Windows installer, as electron-builder's NSIS one (same name, folder,
+  # The Tauri app's Windows installer, as electron-builder's NSIS one (same name, folder,
   # registry keys and uninstaller), with latest.yml so Electron installs update into it.
   # Artifacts only: release.yml still ships the Electron builds. Unsigned (see package.sh).
   app-rs-windows-package:
@@ -165,10 +198,19 @@ jobs:
           if ! command -v makensis >/dev/null && [[ ! -f "/c/Program Files (x86)/NSIS/makensis.exe" ]]; then
             choco install nsis -y --no-progress
           fi
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: package.json
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - name: Renderer (the 1.26 React UI the Tauri app embeds)
+        shell: bash
+        run: bun install --frozen-lockfile && bun run tauri:renderer
       - name: Build the host and the app
         run: |
           cargo build --release --locked --manifest-path host-rs/Cargo.toml
-          cargo build --release --locked --manifest-path app-rs/Cargo.toml -p wraithgrid
+          cargo build --release --locked --manifest-path desktop-rs/Cargo.toml
       - name: Package
         run: app-rs/packaging/windows/package.sh
       - name: Upload to the release
@@ -191,7 +233,7 @@ jobs:
           path: app-rs/target/dist/*
           retention-days: 14
 
-  # The GPUI app's macOS packages (Apple Silicon and Intel, built on one arm64 runner), named
+  # The Tauri app's macOS packages (Apple Silicon and Intel, built on one arm64 runner), named
   # and laid out as electron-builder's, with latest-mac.yml. Artifacts only; ad-hoc signed like
   # the Electron builds (signing/notarizing env names are in package.sh).
   app-rs-macos-packages:
@@ -200,6 +242,15 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: package.json
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - name: Renderer (the 1.26 React UI the Tauri app embeds)
+        shell: bash
+        run: bun install --frozen-lockfile && bun run tauri:renderer
       - name: Build the host (universal) and the app per CPU
         env:
           MACOSX_DEPLOYMENT_TARGET: '12.0'
@@ -207,7 +258,7 @@ jobs:
           rustup target add aarch64-apple-darwin x86_64-apple-darwin
           scripts/build-mac-host.sh
           for t in aarch64-apple-darwin x86_64-apple-darwin; do
-            cargo build --release --locked --manifest-path app-rs/Cargo.toml -p wraithgrid --target "$t"
+            cargo build --release --locked --manifest-path desktop-rs/Cargo.toml --target "$t"
           done
       - name: Package
         run: app-rs/packaging/macos/package.sh x64 arm64

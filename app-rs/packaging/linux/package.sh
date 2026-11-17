@@ -7,14 +7,15 @@ set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$here/../../.." && pwd)
 out="$repo/app-rs/target/dist"
-version=$(grep -m1 '^version' "$repo/app-rs/crates/app/Cargo.toml" | sed -E 's/.*"(.*)".*/\1/')
+version=$(grep -m1 '^version' "$repo/desktop-rs/Cargo.toml" | sed -E 's/.*"(.*)".*/\1/')
 arch=$(uname -m)
 mkdir -p "$out"
 
 # Run-time libraries of the binary (readelf -d … NEEDED), by each distro's package names.
-deb_deps=(libxkbcommon0 libxkbcommon-x11-0 libwayland-client0 libwayland-cursor0 libwayland-egl1 libvulkan1 libfontconfig1 libfreetype6 libx11-xcb1 libxcb1 xdg-utils)
-rpm_deps=(libxkbcommon libxkbcommon-x11 libwayland-client libwayland-cursor libwayland-egl vulkan-loader fontconfig freetype libX11-xcb libxcb xdg-utils)
-pacman_deps=(libxkbcommon libxkbcommon-x11 wayland vulkan-icd-loader fontconfig freetype2 libxcb xdg-utils)
+# The tray icon also uses libayatana-appindicator3 when present (loaded at run time).
+deb_deps=(libwebkit2gtk-4.1-0 libgtk-3-0 libsoup-3.0-0 libdbus-1-3 xdg-utils)
+rpm_deps=(webkit2gtk4.1 gtk3 libsoup3 dbus-libs xdg-utils)
+pacman_deps=(webkit2gtk-4.1 gtk3 libsoup3 dbus xdg-utils)
 
 fpm_build() {
   local type=$1 file=$2; shift 2

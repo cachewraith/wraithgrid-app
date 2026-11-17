@@ -1,13 +1,14 @@
 [package]
 name = "wraithgrid-desktop"
-version = "2.1.0"
+version = "2.2.0"
 edition = "2021"
 license = "MIT"
 publish = false
 description = "Wraithgrid on Tauri: the 1.26 React UI in a native webview, backed by the app-rs crates"
 
 [[bin]]
-name = "wraithgrid-desktop"
+# The name the packages, the .desktop file and the updater expect.
+name = "wraithgrid"
 path = "src/main.rs"
 
 [build-dependencies]
@@ -37,7 +38,9 @@ notify-rust = "=4.18.2"
 gtk = "=0.18.2"
 
 [features]
-# Serve out/tauri-renderer instead of the Vite dev server (release builds always do).
+# Serve the bundled out/tauri-renderer; `--no-default-features` uses the Vite dev server
+# (`bun run tauri:dev`) instead.
+default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
 
 # Its own workspace: Tauri's wry and the GPUI app's webview pin different webkit2gtk versions.

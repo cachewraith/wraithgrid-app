@@ -16,10 +16,10 @@ here=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$here/../../.." && pwd)
 out="$repo/app-rs/target/dist"
 stage="$repo/app-rs/target/package/windows"
-version=$(grep -m1 '^version' "$repo/app-rs/crates/app/Cargo.toml" | sed -E 's/.*"(.*)".*/\1/')
-app="$repo/app-rs/target/release/wraithgrid.exe"
+version=$(grep -m1 '^version' "$repo/desktop-rs/Cargo.toml" | sed -E 's/.*"(.*)".*/\1/')
+app="$repo/desktop-rs/target/release/wraithgrid.exe"
 host="$repo/host-rs/target/release/wraithgrid-host.exe"
-[[ -f $app ]] || { echo "build the app first: cargo build --release -p wraithgrid" >&2; exit 1; }
+[[ -f $app ]] || { echo "build the app first: bun run tauri:renderer && cargo build --release --manifest-path desktop-rs/Cargo.toml" >&2; exit 1; }
 [[ -f $host ]] || { echo "build the host first: cargo build --release in host-rs" >&2; exit 1; }
 
 makensis=$(command -v makensis || true)

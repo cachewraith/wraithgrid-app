@@ -1,4 +1,23 @@
-# What's new in 2.1.0: 2.0 made right
+# What's new in 2.2.0: the 1.26 look is back
+
+*v2.2.0 · 2026-11-17*
+
+Wraithgrid now draws its window with the same interface as 1.26, on a Rust core: the sidebar, panes, chats, Settings and every screen look and work exactly as they did before 2.0, while terminals, chats, git, usage and updates run in Rust.
+
+| New | What changed |
+|---|---|
+| 1.26 interface | The window is 1.26's own interface again: chat cards, tool rows, pickers, theme cards, the Changes panel and the usage page, pixel for pixel |
+| Terminals | Terminal panes are xterm again, as in 1.26, on the Rust pty host; Nerd Font icons in prompts show without setting a Nerd Font |
+| Preview | The web preview runs inside the app on every desktop, Wayland included |
+
+| Fix | What changed |
+|---|---|
+| Keys in order | Typing fast or pasting into a terminal or chat always arrives in order |
+| claude found | Chats and terminals find claude and the other CLIs on your login shell's PATH, also when Wraithgrid starts from a launcher |
+
+---
+
+## Previously, in 2.1.0: 2.0 made right
 
 *v2.1.0 · 2026-11-17*
 

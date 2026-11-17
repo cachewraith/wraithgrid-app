@@ -8,9 +8,9 @@ root=$1
 type=$2
 here=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$here/../../.." && pwd)
-app="$repo/app-rs/target/release/wraithgrid"
+app="$repo/desktop-rs/target/release/wraithgrid"
 host="$repo/host-rs/target/release/wraithgrid-host"
-[[ -x $app ]] || { echo "build the app first: cargo build --release -p wraithgrid" >&2; exit 1; }
+[[ -x $app ]] || { echo "build the app first: bun run tauri:renderer && cargo build --release --manifest-path desktop-rs/Cargo.toml" >&2; exit 1; }
 [[ -x $host ]] || { echo "build the host first: cargo build --release in host-rs" >&2; exit 1; }
 
 rm -rf "$root"
