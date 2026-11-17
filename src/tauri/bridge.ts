@@ -40,6 +40,31 @@ function subscribe<T>(channel: string, cb: (payload: T) => void): () => void {
   }
 }
 
+// Each invoke runs as its own task in Rust, so two quick writes could overtake each other:
+// a pane has one write in flight, and what is typed meanwhile goes as the next write.
+const writing = new Map<string, string[]>()
+function writeInOrder(paneId: string, data: string): void {
+  const queued = writing.get(paneId)
+  if (queued) {
+    queued.push(data)
+    return
+  }
+  writing.set(paneId, [])
+  const flush = (chunk: string): void => {
+    call(IPC.ptyWrite, { paneId, data: chunk })
+      .catch((e: unknown) => console.error(`${IPC.ptyWrite}:`, e))
+      .finally(() => {
+        const next = writing.get(paneId) ?? []
+        if (next.length === 0) writing.delete(paneId)
+        else {
+          writing.set(paneId, [])
+          flush(next.join(''))
+        }
+      })
+  }
+  flush(data)
+}
+
 // Renderer errors land in the app's log (there are no DevTools in a release build).
 window.addEventListener('error', (e) =>
   send('debug:log', { message: `${e.message} at ${e.filename}:${e.lineno}`, stack: e.error?.stack })
@@ -60,7 +85,7 @@ function droppedPath(file: File): string {
 const api: WraithApi = {
   pty: {
     create: (args) => call(IPC.ptyCreate, args),
-    write: (paneId, data) => send(IPC.ptyWrite, { paneId, data }),
+    write: (paneId, data) => writeInOrder(paneId, data),
     resize: (paneId, cols, rows) => send(IPC.ptyResize, { paneId, cols, rows }),
     kill: (paneId) => send(IPC.ptyKill, { paneId }),
     onData: (cb) => subscribe<PtyDataEvent>(IPC.ptyData, cb),

@@ -93,7 +93,6 @@ impl Chats {
 }
 
 pub fn setup(app: &AppHandle) {
-    env::start_probe();
     app.manage(Chats {
         sessions: Mutex::new(HashMap::new()),
         gens: Mutex::new(HashMap::new()),
