@@ -11,7 +11,7 @@
 
 use std::time::Duration;
 
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{self, Input, InputEvent, InputState};
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -1553,10 +1553,21 @@ impl Render for Palette {
                         this.select(0, cx);
                     }
                     "escape" => cx.emit(PaletteEvent::Cancel),
-                    "down" if count > 0 => this.select((selected + 1).min(count - 1), cx),
-                    "up" if count > 0 => this.select(selected.saturating_sub(1), cx),
                     "enter" => this.run(cx),
                     _ => return,
+                }
+                cx.stop_propagation();
+            }))
+            // The search field takes up and down as actions (they never arrive as keys).
+            .capture_action(cx.listener(move |this, _: &input::MoveDown, _, cx| {
+                if count > 0 {
+                    this.select((selected + 1).min(count - 1), cx);
+                }
+                cx.stop_propagation();
+            }))
+            .capture_action(cx.listener(move |this, _: &input::MoveUp, _, cx| {
+                if count > 0 {
+                    this.select(selected.saturating_sub(1), cx);
                 }
                 cx.stop_propagation();
             }))
