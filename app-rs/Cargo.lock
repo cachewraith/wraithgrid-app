@@ -9310,6 +9310,7 @@ name = "wraithgrid-chat"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "image",
  "libc",
  "regex",
  "serde",
