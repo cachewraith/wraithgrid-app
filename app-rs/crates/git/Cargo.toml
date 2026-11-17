@@ -10,5 +10,6 @@ regex.workspace = true
 serde.workspace = true
 
 [dev-dependencies]
+dunce = "=1.0.5"
 serde_json.workspace = true
 tempfile = "=3.27.0"
