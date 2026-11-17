@@ -53,7 +53,10 @@ struct Row {
     color: Hsla,
     signed_in: bool,
     imported: bool,
+    /// Panes of this account in every project.
+    panes: usize,
     rename: Entity<InputState>,
+    _rename: Subscription,
 }
 
 pub struct AccountsView {
@@ -69,46 +72,26 @@ pub struct AccountsView {
     import: Option<Entity<InputState>>,
     pub error: Option<String>,
     folders: folders::Folders,
+    /// Accounts share one brain per provider (`sharedMode: overall`).
+    shared: bool,
     _subscriptions: Vec<Subscription>,
 }
 
 impl AccountsView {
     pub fn new(config: &Config, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let name = cx.new(|cx| InputState::new(window, cx).placeholder("e.g. work"));
-        let mut subs = vec![
+        let subs = vec![
             cx.subscribe_in(&name, window, |this, _, e: &InputEvent, _, cx| {
                 if let InputEvent::PressEnter { .. } = e {
                     this.add(cx);
                 }
             }),
         ];
-        let mut rows = Vec::new();
-        for a in &config.accounts {
-            let rename = cx.new(|cx| InputState::new(window, cx).default_value(a.name.clone()));
-            let id = a.id.clone();
-            subs.push(
-                cx.subscribe_in(&rename, window, move |_, input, e: &InputEvent, _, cx| {
-                    // Saved on Enter or when the field loses focus.
-                    if matches!(e, InputEvent::PressEnter { .. } | InputEvent::Blur) {
-                        let name = input.read(cx).value().to_string();
-                        cx.emit(AccountsEvent::Rename {
-                            id: id.clone(),
-                            name,
-                        });
-                    }
-                }),
-            );
-            rows.push(Row {
-                id: a.id.clone(),
-                name: a.name.clone(),
-                cli: a.cli,
-                config_dir: a.config_dir.clone(),
-                color: crate::shell::parse_hex(&a.color).unwrap_or(rgb(0x7c5cff).into()),
-                signed_in: a.signed_in,
-                imported: a.imported,
-                rename,
-            });
-        }
+        let rows = config
+            .accounts
+            .iter()
+            .map(|a| Self::row(config, a, window, cx))
+            .collect();
         AccountsView {
             focus: cx.focus_handle(),
             rows,
@@ -120,8 +103,79 @@ impl AccountsView {
             import: None,
             error: None,
             folders: folders::Folders::new(config),
+            shared: config.settings.shared_mode == wraithgrid_core::types::SharedMode::Overall,
             _subscriptions: subs,
         }
+    }
+
+    fn row(
+        config: &Config,
+        a: &wraithgrid_core::config::Account,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Row {
+        let rename = cx.new(|cx| InputState::new(window, cx).default_value(a.name.clone()));
+        let id = a.id.clone();
+        let sub = cx.subscribe_in(&rename, window, move |_, input, e: &InputEvent, _, cx| {
+            // Saved on Enter or when the field loses focus.
+            if matches!(e, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                let name = input.read(cx).value().to_string();
+                cx.emit(AccountsEvent::Rename {
+                    id: id.clone(),
+                    name,
+                });
+            }
+        });
+        Row {
+            id: a.id.clone(),
+            name: a.name.clone(),
+            cli: a.cli,
+            config_dir: a.config_dir.clone(),
+            color: crate::shell::parse_hex(&a.color).unwrap_or(rgb(0x7c5cff).into()),
+            signed_in: a.signed_in,
+            imported: a.imported,
+            panes: panes_of(config, &a.id),
+            rename,
+            _rename: sub,
+        }
+    }
+
+    /// The saved config after a change, shown in place: rows keep their fields (and focus),
+    /// so renaming one doesn't rebuild the page.
+    // Called by the window after an account change (shell.rs follow-up).
+    #[allow(dead_code)]
+    pub fn set_config(&mut self, config: &Config, window: &mut Window, cx: &mut Context<Self>) {
+        let before = self.rows.len();
+        let mut old: Vec<Row> = std::mem::take(&mut self.rows);
+        for a in &config.accounts {
+            match old.iter().position(|r| r.id == a.id) {
+                Some(i) => {
+                    let mut r = old.remove(i);
+                    if r.name != a.name && !r.rename.focus_handle(cx).is_focused(window) {
+                        let name = a.name.clone();
+                        r.rename.update(cx, |i, cx| i.set_value(name, window, cx));
+                    }
+                    r.name = a.name.clone();
+                    r.cli = a.cli;
+                    r.config_dir = a.config_dir.clone();
+                    r.color = crate::shell::parse_hex(&a.color).unwrap_or(rgb(0x7c5cff).into());
+                    r.signed_in = a.signed_in;
+                    r.imported = a.imported;
+                    r.panes = panes_of(config, &a.id);
+                    self.rows.push(r);
+                }
+                None => self.rows.push(Self::row(config, a, window, cx)),
+            }
+        }
+        // One was added or imported: its form is done.
+        if self.rows.len() > before {
+            self.import = None;
+            self.name.update(cx, |i, cx| i.set_value("", window, cx));
+        }
+        self.color = wraithgrid_core::accounts::next_free_color(&config.accounts);
+        self.shared = config.settings.shared_mode == wraithgrid_core::types::SharedMode::Overall;
+        self.error = None;
+        self.set_folders(config, cx);
     }
 
     /// Opened from "No accounts yet" (New pane, New project): the import form, or the add
@@ -266,6 +320,27 @@ impl AccountsView {
     }
 }
 
+/// How many panes, in every project, belong to an account.
+fn panes_of(config: &Config, id: &str) -> usize {
+    config
+        .workspaces
+        .iter()
+        .flat_map(|w| w.panes.iter())
+        .filter(|p| p.account_id.as_deref() == Some(id))
+        .count()
+}
+
+/// What "Overall" sharing gives an account of each provider (main's SHARE_SPECS).
+fn shared_note(cli: AgentCli) -> Option<&'static str> {
+    match cli {
+        AgentCli::Claude => Some("Shares the claude brain (CLAUDE.md, skills, plugins)"),
+        AgentCli::Codex => Some("Shares the codex brain (AGENTS.md, skills, prompts)"),
+        AgentCli::Gemini => Some("Shares the gemini brain (GEMINI.md, commands, skills)"),
+        AgentCli::Copilot => Some("Shares the copilot brain (instructions, agents, skills)"),
+        _ => None,
+    }
+}
+
 impl EventEmitter<AccountsEvent> for AccountsView {}
 
 impl Focusable for AccountsView {
@@ -293,6 +368,7 @@ impl Render for AccountsView {
         };
         let folders = (!self.rows.is_empty()).then(|| self.folders_section(window, cx));
         let import = self.import_form(cx);
+        let shared = self.shared;
         let rows = self.rows.iter().map(|r| {
             let (login, mark, remove, really) =
                 (r.id.clone(), r.id.clone(), r.id.clone(), r.id.clone());
@@ -322,6 +398,16 @@ impl Render for AccountsView {
                         .child(
                             div()
                                 .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(match r.panes {
+                                    0 => "no panes".to_string(),
+                                    1 => "1 pane".to_string(),
+                                    n => format!("{n} panes"),
+                                }),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
                                 .text_color(if r.signed_in {
                                     theme.success
                                 } else {
@@ -345,6 +431,9 @@ impl Render for AccountsView {
                             r.config_dir.clone()
                         }),
                 )
+                .when_some(shared_note(r.cli).filter(|_| shared), |d, note| {
+                    d.child(div().text_xs().text_color(theme.muted_foreground).child(note))
+                })
                 .child(
                     div()
                         .flex()
@@ -382,8 +471,13 @@ impl Render for AccountsView {
                         })
                         .when(confirming, |d| {
                             d.child(div().text_xs().text_color(theme.danger).child(format!(
-                                "Remove {}? Its panes close.",
-                                r.name
+                                "Remove {}? {}",
+                                r.name,
+                                match r.panes {
+                                    0 => "No panes use this account.".to_string(),
+                                    1 => "1 pane uses this account and will close.".to_string(),
+                                    n => format!("{n} panes use this account and will close."),
+                                }
                             )))
                             .child(
                                 div()
