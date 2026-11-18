@@ -1,4 +1,16 @@
-# What's new in 2.2.1: Windows fixes
+# What's new in 2.2.2: window buttons on Windows and macOS
+
+*v2.2.2 · 2026-11-18*
+
+A small fix release.
+
+| Fix | What changed |
+|---|---|
+| Window buttons | Minimize, maximize and close are back at the end of the top bar on Windows and macOS; since 2.2.0 the window had no buttons there, so it could only be closed from the taskbar or the keyboard |
+
+---
+
+## Previously, in 2.2.1: Windows fixes
 
 *v2.2.1 · 2026-11-17*
 

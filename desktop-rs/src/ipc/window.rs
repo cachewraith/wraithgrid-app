@@ -272,12 +272,13 @@ fn quit(app: &AppHandle, intent: Intent) {
     app.exit(0);
 }
 
+/// What the page should draw. This window is frameless on every OS (`decorations: false`),
+/// so unlike Electron's (Windows overlay, macOS traffic lights) no OS buttons exist: Windows
+/// and macOS get our own minimize/maximize/close. Tiling compositors keep close only.
 fn chrome_name(c: Chrome) -> &'static str {
     match c {
-        Chrome::Custom => "custom",
-        Chrome::Overlay => "overlay",
+        Chrome::Custom | Chrome::Overlay | Chrome::Mac => "custom",
         Chrome::Tiling => "tiling",
-        Chrome::Mac => "mac",
     }
 }
 
@@ -348,4 +349,17 @@ fn open_url(url: &str) -> bool {
         ("xdg-open", vec![url])
     };
     std::process::Command::new(cmd).args(args).spawn().is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frameless_window_draws_its_own_buttons_on_every_os() {
+        assert_eq!(chrome_name(Chrome::Overlay), "custom");
+        assert_eq!(chrome_name(Chrome::Mac), "custom");
+        assert_eq!(chrome_name(Chrome::Custom), "custom");
+        assert_eq!(chrome_name(Chrome::Tiling), "tiling");
+    }
 }

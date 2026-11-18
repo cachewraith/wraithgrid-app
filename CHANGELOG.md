@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-11-18
+
+- [release] v2.2.2: the Tauri window (frameless on every OS) draws its own minimize/maximize/close on Windows and macOS; `app:info` reported Electron's `overlay`/`mac` chrome there, so the page hid its buttons and the window had none (tiling compositors keep close only) (files: desktop-rs/src/ipc/window.rs, desktop-rs/Cargo.toml, desktop-rs/tauri.conf.json, docs/WHATS-NEW.md)
+
 ## 2026-11-17
 
 - [release] v2.2.1: Windows paths stay plain (dunce) where they reach git or the shared-config unlinker: Remove worktree works on Windows, deleting an account folder unshares it first; CI green on every OS (Windows git tests, a cfg(unix)-only test variable, tauri.conf.json formatting) (files: desktop-rs/src/ipc/{git,misc}.rs, desktop-rs/Cargo.toml, desktop-rs/tauri.conf.json, app-rs/crates/app/src/shell/git_button.rs, app-rs/crates/git/tests/real_git.rs, app-rs/crates/core/src/folders.rs, docs/WHATS-NEW.md)
