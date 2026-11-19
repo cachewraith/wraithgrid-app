@@ -71,7 +71,7 @@ test('codex: sign in from the dialog, then chat with approvals, stop, model and 
     const side = win.getByRole('complementary', { name: 'Sidebar' })
     await side.getByRole('button', { name: /Switch account/ }).click()
     await win.getByRole('menuitem', { name: 'Manage accounts' }).click()
-    await win.locator('.tr', { hasText: 'cx' }).getByRole('button', { name: 'Login' }).click()
+    await win.locator('.acc-tr', { hasText: 'cx' }).getByRole('button', { name: 'Sign in' }).click()
     const login = win.getByRole('dialog', { name: 'Sign in to ChatGPT (Codex) as cx' })
     await expect(login.getByLabel('One-time code')).toHaveText('FAKE-C0DE1')
     await expect(login.getByRole('button', { name: 'Open sign-in page' })).toBeVisible()

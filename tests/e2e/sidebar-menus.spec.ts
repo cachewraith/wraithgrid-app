@@ -42,8 +42,8 @@ test('right-click edits folders and workspaces; the sidebar collapses smoothly',
     // Folder (on the Accounts page): rename from the menu.
     await side.getByRole('button', { name: /Switch account/ }).click()
     await win.getByRole('menuitem', { name: 'Manage accounts' }).click()
-    const org = win.getByLabel('Account folders')
-    await org.locator('.fold-hd', { hasText: 'Folder 1' }).click({ button: 'right' })
+    const org = win.getByRole('table', { name: 'Accounts' })
+    await org.locator('.acc-grp-hd', { hasText: 'Folder 1' }).click({ button: 'right' })
     const folderMenu = win.getByRole('menu', { name: 'Folder Folder 1' })
     await expect(folderMenu.getByRole('menuitem').first()).toBeFocused()
     await folderMenu.getByRole('menuitem', { name: 'Rename' }).click()
@@ -52,7 +52,7 @@ test('right-click edits folders and workspaces; the sidebar collapses smoothly',
     await expect.poll(() => saved().accountFolders[0].name).toBe('Clients')
 
     // Escape closes a menu without doing anything.
-    await org.locator('.fold-hd', { hasText: 'Clients' }).click({ button: 'right' })
+    await org.locator('.acc-grp-hd', { hasText: 'Clients' }).click({ button: 'right' })
     await win.keyboard.press('Escape')
     await expect(win.getByRole('menu')).toHaveCount(0)
 

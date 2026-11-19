@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-11-19
+
+- [accounts] Accounts page is one table grouped by folder (the separate folder box is gone; drag rows onto folder headings), with a Provider column, search, a provider filter, a labelled ⋯ menu and a details panel (name, color, folder, config dir, remove); Add account is a 3-step dialog (provider → sign in or reuse an existing login → name from the email) that keeps nothing until the last step, replacing the inline Add/Import forms (files: src/renderer/components/{AccountsView,AddAccountDialog,LoginDialog,NewPaneDialog}.tsx, src/renderer/app/{store.ts,App.tsx}, src/renderer/styles/ui.css, tests/e2e/{account-folders,sidebar-menus,shared}.spec.ts; removed SidebarAccounts.tsx)
+
 ## 2026-11-18
 
 - [release] v2.2.2: the Tauri window (frameless on every OS) draws its own minimize/maximize/close on Windows and macOS; `app:info` reported Electron's `overlay`/`mac` chrome there, so the page hid its buttons and the window had none (tiling compositors keep close only) (files: desktop-rs/src/ipc/window.rs, desktop-rs/Cargo.toml, desktop-rs/tauri.conf.json, docs/WHATS-NEW.md)

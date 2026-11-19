@@ -17,7 +17,8 @@ test('overall mode gives each provider one shared brain', async () => {
   const brain = path.join(home, '.wraithgrid/shared/claude')
   const codexBrain = path.join(home, '.wraithgrid/shared/codex')
   const work = path.join(home, '.wraithgrid/accounts/work')
-  const late = path.join(home, '.wraithgrid/accounts/late')
+  // Add account makes the folder before the sign-in, named after the provider.
+  const late = path.join(home, '.wraithgrid/accounts/claude')
   const cx = path.join(home, '.wraithgrid/accounts/cx')
   fs.mkdirSync(path.join(personal, 'skills', 'deploy'), { recursive: true })
   fs.writeFileSync(path.join(personal, 'CLAUDE.md'), '# one set of rules\n')
@@ -83,9 +84,16 @@ test('overall mode gives each provider one shared brain', async () => {
     await win.locator('.top .btn.gh').click()
     await win.getByRole('button', { name: /Switch account/ }).click()
     await win.getByRole('menuitem', { name: 'New account' }).click()
-    await win.locator('#acc-name').fill('late')
-    await win.getByRole('button', { name: 'Add account', exact: true }).last().click()
-    await win.locator('.tr', { hasText: 'late' }).getByRole('button', { name: 'Login' }).click()
+    const add = win.getByRole('dialog', { name: 'Add account' })
+    await expect(add.getByRole('radio', { name: /Claude Code/ })).toBeChecked()
+    await add.getByRole('button', { name: 'Continue' }).click()
+    // ~/.claude is not an account yet, so it is offered for reuse; a new login is picked.
+    const method = win.getByRole('dialog', { name: 'Claude Code login' })
+    await expect(
+      method.getByRole('radio', { name: /Reuse the login in ~\/\.claude/ })
+    ).toBeVisible()
+    await expect(method.getByRole('radio', { name: /Sign in with a new login/ })).toBeChecked()
+    await method.getByRole('button', { name: 'Continue' }).click()
     await expect
       .poll(
         () =>
@@ -93,7 +101,7 @@ test('overall mode gives each provider one shared brain', async () => {
           fs.readlinkSync(path.join(late, 'CLAUDE.md'))
       )
       .toBe(path.join(brain, 'CLAUDE.md'))
-    const login = win.getByRole('dialog', { name: 'Sign in to Claude as late' })
+    const login = win.getByRole('dialog', { name: 'Sign in to Claude' })
     await expect(login.getByRole('button', { name: 'Open sign-in page' })).toBeVisible()
     await login.getByLabel('Sign-in code').fill('wrong')
     await login.getByRole('button', { name: 'Continue' }).click()
@@ -101,12 +109,15 @@ test('overall mode gives each provider one shared brain', async () => {
     await login.getByRole('button', { name: 'Try again' }).click()
     await login.getByLabel('Sign-in code').fill('good-code')
     await login.getByLabel('Sign-in code').press('Enter')
-    const done = win.getByRole('dialog', { name: 'late is signed in' })
-    await expect(done).toContainText('Signed in as late@example.com · max')
-    await done.getByRole('button', { name: 'Done' }).click()
-    await expect(
-      win.locator('.tr', { hasText: 'late' }).getByRole('button', { name: 'Login' })
-    ).toHaveCount(0)
+    // Signed in: the name comes from the email, and only now is the account kept.
+    const named = win.getByRole('dialog', { name: 'Signed in as late@example.com' })
+    await expect(named).toContainText('Claude Code · max')
+    await expect(named.getByLabel('Name', { exact: true })).toHaveValue('late')
+    await named.getByRole('button', { name: 'Add account', exact: true }).click()
+    await expect(named).toHaveCount(0)
+    const row = win.locator('.acc-tr', { hasText: 'late' })
+    await expect(row.locator('.acc-st')).toHaveText('Signed in')
+    await expect(row.getByRole('button', { name: 'Sign in' })).toHaveCount(0)
 
     // Each account its own: links go, and work gets its own CLAUDE.md back.
     await win.getByRole('button', { name: 'More' }).click()

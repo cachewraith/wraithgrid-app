@@ -31,6 +31,7 @@
 - Claude mascot ("pet") not animating in panes: needs a repro from the user (which animation, when)
 
 ## Next
+- Add account follow-ups: mark CLIs not on PATH in the provider step (needs a detect IPC in main + desktop-rs); move/rename the account folder when the account is renamed (it keeps the provider name, e.g. `accounts/claude`); reuse login for gemini/copilot/cursor once their home dirs are checked
 - Shared brain: verify gemini (GEMINI_CLI_HOME/.gemini: GEMINI.md, commands, skills) and copilot (COPILOT_HOME: copilot-instructions.md, agents, skills) with the real CLIs; cursor has no documented global file yet
 - Mods: mark which catalog entries change claude's screen (the catalog doesn't say); try Update on a real downloaded mod and a real multi-mod claudemod.com repo
 - Mods (2026-10-19): try Update/Uninstall/marketplace add-remove and a claudemod.com Download with real accounts (fake CLI only so far); `plugin update` of a command-source mod needs `--accept-command`, shown as claude's error

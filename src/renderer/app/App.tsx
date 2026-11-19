@@ -158,7 +158,13 @@ function Modals() {
   if (!modal) return null
   switch (modal.kind) {
     case 'newPane':
-      return <NewPaneDialog slotId={modal.slotId} branchFrom={modal.branchFrom ?? null} />
+      return (
+        <NewPaneDialog
+          slotId={modal.slotId}
+          branchFrom={modal.branchFrom ?? null}
+          presetAccount={modal.accountId ?? null}
+        />
+      )
     case 'shortcuts':
       return <ShortcutsSheet />
     case 'workspaces':

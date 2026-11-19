@@ -130,9 +130,11 @@ export interface PaneRuntime {
 /** `project`: the active workspace's chats and history (the sidebar's project click). */
 export type View = 'grid' | 'project' | 'accounts' | 'mods' | 'settings' | 'usage' | 'scheduled'
 export type AccountsMode = 'list' | 'add' | 'import'
+export type AccountResult = { ok: true; id: string } | { ok: false; error: string }
 export type Modal =
   /** `branchFrom`: a pane whose repo the new pane gets a branch of (a worktree, #162). */
-  | { kind: 'newPane'; slotId: string | null; branchFrom?: string }
+  /** `accountId`: open with this account picked (the Accounts page's "Open a pane"). */
+  | { kind: 'newPane'; slotId: string | null; branchFrom?: string; accountId?: string }
   | { kind: 'shortcuts' }
   | { kind: 'workspaces' }
   | { kind: 'newProject' }
@@ -392,7 +394,12 @@ export interface AppState {
 
   // accounts
   addAccount(name: string, color: string, cli?: AgentCli): Promise<string | null>
-  importAccount(dir: string): string | null
+  /** Makes a config dir and adds the account (not signed in yet for claude); its id or why not. */
+  createAccount(name: string, cli: AgentCli): Promise<AccountResult>
+  /** An existing config dir as an account of `cli`; it is used in place, never copied. */
+  importAccount(dir: string, cli?: AgentCli): AccountResult
+  /** Name, color or folder of one account; a blank name is ignored. */
+  updateAccount(id: string, patch: Partial<Pick<Account, 'name' | 'color' | 'folderId'>>): void
   renameAccount(id: string, name: string): void
   /** null moves the account out of any folder. */
   moveAccountToFolder(id: string, folderId: string | null): void
@@ -2373,22 +2380,29 @@ export function createAppStore({
       // ---- accounts ------------------------------------------------------------
 
       async addAccount(name, color, cli = 'claude') {
+        const res = await get().createAccount(name, cli)
+        if (!res.ok) return res.error
+        get().updateAccount(res.id, { color })
+        return null
+      },
+
+      async createAccount(name, cli) {
         const trimmed = name.trim().slice(0, 64)
-        if (!trimmed) return 'Enter a name.'
+        if (!trimmed) return { ok: false, error: 'Enter a name.' }
         const s = get()
         if (s.config.accounts.some((a) => a.name.toLowerCase() === trimmed.toLowerCase())) {
-          return 'An account with that name already exists.'
+          return { ok: false, error: 'An account with that name already exists.' }
         }
         const taken = new Set(s.config.accounts.map((a) => baseName(a.configDir)))
         const slug = uniqueSlug(slugify(trimmed), taken)
         const res = await api.account.createDir(slug)
-        if (!res.ok) return res.error
+        if (!res.ok) return { ok: false, error: res.error }
         const account: Account = {
           id: newId('a'),
           name: trimmed,
           cli,
           configDir: res.dir,
-          color,
+          color: nextFreeColor(get().config.accounts),
           // gemini and agy ask to sign in on their first launch; the /login banner is claude's.
           signedIn: cli !== 'claude',
           imported: false,
@@ -2400,22 +2414,22 @@ export function createAppStore({
           accounts: [...c.accounts, account],
           settings: { ...c.settings, defaultAccountId: c.settings.defaultAccountId ?? account.id }
         }))
-        return null
+        return { ok: true, id: account.id }
       },
 
-      importAccount(dir) {
+      importAccount(dir, cli = 'claude') {
         const trimmed = dir.trim()
-        if (!trimmed) return 'Choose a folder.'
+        if (!trimmed) return { ok: false, error: 'Choose a folder.' }
         const s = get()
         if (s.config.accounts.some((a) => a.configDir === trimmed)) {
-          return 'That folder is already an account.'
+          return { ok: false, error: 'That folder is already an account.' }
         }
         const base = slugify(baseName(trimmed).replace(/^\.+/, '')) || 'imported'
         const name = uniqueSlug(base, new Set(s.config.accounts.map((a) => a.name)))
         const account: Account = {
           id: newId('a'),
           name,
-          cli: 'claude',
+          cli,
           configDir: trimmed,
           color: nextFreeColor(s.config.accounts),
           signedIn: true,
@@ -2428,7 +2442,28 @@ export function createAppStore({
           accounts: [...c.accounts, account],
           settings: { ...c.settings, defaultAccountId: c.settings.defaultAccountId ?? account.id }
         }))
-        return null
+        return { ok: true, id: account.id }
+      },
+
+      updateAccount(id, patch) {
+        const name = patch.name?.trim().slice(0, 64)
+        get().updateConfig((c) => ({
+          ...c,
+          accounts: c.accounts.map((a) => {
+            if (a.id !== id) return a
+            const folderId =
+              patch.folderId === undefined ||
+              (patch.folderId && !c.accountFolders.some((f) => f.id === patch.folderId))
+                ? a.folderId
+                : patch.folderId
+            return {
+              ...a,
+              name: name || a.name,
+              color: patch.color ?? a.color,
+              folderId
+            }
+          })
+        }))
       },
 
       moveAccountToFolder(id, folderId) {
