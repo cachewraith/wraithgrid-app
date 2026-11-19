@@ -1,4 +1,16 @@
-# What's new in 2.2.2: window buttons on Windows and macOS
+# What's new in 2.3.0: a clearer Accounts page, and replies you can see
+
+*v2.3.0 · 2026-11-19*
+
+| Change | What it does |
+|---|---|
+| Accounts page | One list of every account, grouped by your folders (drag a row onto a folder heading to move it), with a Provider column, search, a provider filter, and a details panel for the account you click: name, color, folder, its config folder, Remove |
+| Add account | Three short steps: pick the provider, sign in (or reuse the login your terminal already has in `~/.claude` or `~/.codex`, or any folder), then confirm a name filled in from your email. Leaving early adds nothing |
+| Reply quotes | A message that replies to part of the chat shows each quote as its own card ("Replying to"), three lines until Show more; **Show in chat** scrolls to where the quote came from. Quoted code shows as code |
+
+---
+
+## Previously, in 2.2.2: window buttons on Windows and macOS
 
 *v2.2.2 · 2026-11-18*
 
