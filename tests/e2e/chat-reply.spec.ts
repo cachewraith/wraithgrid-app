@@ -5,6 +5,7 @@ import path from 'node:path'
 import { _electron as electron, expect, test } from '@playwright/test'
 
 const ROOT = path.resolve(__dirname, '../..')
+const SHOTS = process.env.WRAITHGRID_E2E_SHOTS
 test.skip(process.platform === 'win32', 'POSIX-only fixture')
 
 test('select → Reply quotes the selection; several quotes, ×, the shortcut, code fenced', async () => {
@@ -99,7 +100,8 @@ test('select → Reply quotes the selection; several quotes, ×, the shortcut, c
     await replyBtn.click()
     await expect(quotes).toHaveCount(2)
     const card = quotes.nth(1).locator('.cc-quote-t')
-    await expect(card).toHaveText('```js\nconst a = 1\n```')
+    await expect(card.locator('.cc-quote-hd')).toHaveText('Replying to')
+    await expect(card.locator('.cc-quote-body')).toHaveText('```js\nconst a = 1\n```')
     await card.click()
     await expect(card).toHaveAttribute('aria-expanded', 'true')
 
@@ -110,7 +112,18 @@ test('select → Reply quotes the selection; several quotes, ×, the shortcut, c
     const sent = win.locator('section.pane .cmsg.user').last()
     await expect(sent.locator('.cmsg-quote')).toHaveCount(2)
     await expect(sent.locator('.cmsg-quote').first()).toContainText('first prompt')
-    await expect(sent.locator('.cmsg-quote').nth(1)).toHaveText('```js\nconst a = 1\n```')
+    // A quoted code block shows as code; the CLI still gets the fence.
+    await expect(sent.locator('.cmsg-quote-tx').nth(1)).toHaveText('const a = 1')
+    await expect(sent.locator('.cmsg-quote-hd').nth(1)).toContainText('Replying to · js')
+    // Each quote is its own card, and "Show in chat" marks the message it came from.
+    await expect(sent.locator('.cmsg-quote-hd').first()).toContainText('Replying to')
+    await sent.locator('.cmsg-quote').first().hover()
+    await sent.getByRole('button', { name: 'Show in chat' }).first().click()
+    await expect(agent.first()).toHaveClass(/quote-hit/)
+    if (SHOTS) {
+      await sent.scrollIntoViewIfNeeded()
+      await win.screenshot({ path: path.join(SHOTS, 'chat-reply.png') })
+    }
     await expect(sent).toContainText('why this?')
     // What the CLI got (echoed back): the markdown blockquote, then the text.
     await expect(agent.last()).toContainText('> Hello from fake claude: first prompt')

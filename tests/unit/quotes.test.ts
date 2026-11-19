@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 import {
   fenceCode,
   makeQuote,
+  quoteSnippet,
+  quotedCode,
   quoteBlock,
   splitQuotes,
   withQuotes
@@ -57,5 +59,17 @@ describe('reply quotes (#164)', () => {
     })
     expect(splitQuotes('no quote > here')).toEqual({ quotes: [], rest: 'no quote > here' })
     expect(splitQuotes('> only')).toEqual({ quotes: ['only'], rest: '' })
+  })
+  it('finds a quote by its first line with words', () => {
+    expect(quoteSnippet('```js\nconst   a = 1\n```')).toBe('const a = 1')
+    expect(quoteSnippet('\n  Version: 0.5.0 → 0.6.0, a minor bump', 20)).toBe(
+      'Version: 0.5.0 → 0.6'
+    )
+    expect(quoteSnippet('```\n```')).toBe('')
+  })
+  it('shows a quoted code block as code', () => {
+    expect(quotedCode('```js\nconst a = 1\n```')).toEqual({ code: 'const a = 1', lang: 'js' })
+    expect(quotedCode('````\na ``` b\n````')).toEqual({ code: 'a ``` b', lang: '' })
+    expect(quotedCode('see\n```js\nx\n```')).toBeNull()
   })
 })

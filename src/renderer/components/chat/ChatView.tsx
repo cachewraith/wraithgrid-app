@@ -14,7 +14,7 @@ import { useActions, useApp, useServices } from '../../app/services'
 import { accountById, findPane } from '../../app/store'
 import { pendingApproval, type ChatItem, type ChatThread } from '../../lib/chat-thread'
 import { buildSlashItems, leadingCommand, splitMentions, type SlashItem } from '../../lib/slash'
-import { IconArrowDown, IconClock, IconRestart } from '../icons'
+import { IconArrowDown, IconClock, IconReply, IconRestart } from '../icons'
 import { fmtUntil } from '../../lib/usage-format'
 import { fmtWhen } from '@shared/schedule'
 import { useShallow } from 'zustand/react/shallow'
@@ -37,7 +37,7 @@ import { promptHistory } from '../../lib/prompt-history'
 import { ImageViewer } from './ImageViewer'
 import { QuestionCard } from './QuestionCard'
 import { ReplyButton } from './ReplyButton'
-import { splitQuotes } from '../../lib/quotes'
+import { quoteSnippet, quotedCode, splitQuotes } from '../../lib/quotes'
 import { ApprovalBar, ToolCard } from './ToolCard'
 
 interface Props {
@@ -780,6 +780,63 @@ const ChatFoot = memo(function ChatFoot({
   )
 })
 
+/** Lines past which a sent quote is cut until "Show more". */
+const QUOTE_LINES = 3
+
+/** The earlier message a quote came from: the latest one above `from` that contains its text. */
+function quoteSource(from: HTMLElement, text: string): HTMLElement | null {
+  const snippet = quoteSnippet(text).toLowerCase()
+  const chat = from.closest('.chat')
+  const own = from.closest('.cmsg')
+  if (!snippet || !chat) return null
+  const all = [...chat.querySelectorAll<HTMLElement>('.cmsg')]
+  const before = own ? all.slice(0, all.indexOf(own as HTMLElement)) : all
+  return (
+    before
+      .reverse()
+      .find((m) => (m.textContent ?? '').replace(/\s+/g, ' ').toLowerCase().includes(snippet)) ??
+    null
+  )
+}
+
+/**
+ * What a sent message replies to (#164): a card above its text, a few lines until "Show more",
+ * and "Show in chat" scrolls to the message it came from and marks it for a moment.
+ */
+function QuoteCard({ text }: { text: string }) {
+  const ref = useRef<HTMLDivElement>(null)
+  const [open, setOpen] = useState(false)
+  const code = quotedCode(text)
+  const shown = code ? code.code : text
+  const long = shown.split('\n').length > QUOTE_LINES || shown.length > 240
+  const jump = (): void => {
+    const el = ref.current && quoteSource(ref.current, text)
+    if (!el) return
+    el.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    el.classList.remove('quote-hit')
+    void el.offsetWidth // restart the mark when it is clicked again
+    el.classList.add('quote-hit')
+    window.setTimeout(() => el.classList.remove('quote-hit'), 1600)
+  }
+  return (
+    <div ref={ref} className={`cmsg-quote${open ? ' open' : ''}`}>
+      <div className="cmsg-quote-hd">
+        <IconReply small />
+        <span>Replying to{code?.lang ? ` · ${code.lang}` : ''}</span>
+        <button className="cmsg-quote-go" onClick={jump} title="Scroll to where this came from">
+          Show in chat
+        </button>
+      </div>
+      <blockquote className={`cmsg-quote-tx${code ? ' code' : ''}`}>{shown}</blockquote>
+      {long ? (
+        <button className="cmsg-quote-more" aria-expanded={open} onClick={() => setOpen(!open)}>
+          {open ? 'Show less' : 'Show more'}
+        </button>
+      ) : null}
+    </div>
+  )
+}
+
 /**
  * A message that starts with `/command` shows the command as a chip; `@path` mentions too (#159);
  * quotes it replies to (#164) as blockquotes above it.
@@ -791,9 +848,7 @@ function UserText({ text: whole }: { text: string }) {
   return (
     <>
       {quotes.map((q, i) => (
-        <blockquote key={i} className="cmsg-quote">
-          {q}
-        </blockquote>
+        <QuoteCard key={i} text={q} />
       ))}
       {cmd ? <span className="cmd-chip">/{cmd.name}</span> : null}
       {cmd && rest ? ' ' : null}

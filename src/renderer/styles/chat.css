@@ -171,17 +171,96 @@
   color: var(--fa);
   margin-bottom: 2px;
 }
-/* A quote the message replied to (#164). */
+/* A quote the message replied to (#164): its own card on top of the bubble, apart from the text. */
 .cmsg-quote {
   margin: 2px 0 8px;
-  padding: 1px 0 1px 10px;
-  border-left: 3px solid var(--line2);
+  padding: 6px 10px 7px;
+  border-left: 2px solid var(--acc);
+  border-radius: calc(4px * var(--rs, 1)) calc(10px * var(--rs, 1)) calc(10px * var(--rs, 1))
+    calc(4px * var(--rs, 1));
+  background: color-mix(in srgb, var(--bg) 55%, transparent);
+  white-space: normal;
+}
+.cmsg-quote + .cmsg-quote {
+  margin-top: -2px;
+}
+.cmsg-quote-hd {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 3px;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--acct, var(--acc));
+}
+.cmsg-quote-hd .i {
+  width: 11px;
+  height: 11px;
+}
+.cmsg-quote-go,
+.cmsg-quote-more {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 11.5px;
+  color: var(--fa);
+  cursor: pointer;
+}
+.cmsg-quote-go {
+  margin-left: auto;
+  opacity: 0;
+  transition: opacity var(--ui-time, 0.15s);
+}
+.cmsg-quote:hover .cmsg-quote-go,
+.cmsg-quote-go:focus-visible {
+  opacity: 1;
+}
+.cmsg-quote-go:hover,
+.cmsg-quote-more:hover {
+  color: var(--tx);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.cmsg-quote-tx {
+  margin: 0;
   color: var(--mu);
-  font-size: 0.95em;
+  font-size: 0.93em;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
   display: -webkit-box;
   -webkit-box-orient: vertical;
-  -webkit-line-clamp: 8;
+  -webkit-line-clamp: 3;
   overflow: hidden;
+}
+.cmsg-quote-tx.code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.cmsg-quote.open .cmsg-quote-tx {
+  display: block;
+  max-height: 320px;
+  overflow: auto;
+}
+.cmsg-quote-more {
+  margin-top: 2px;
+}
+/* "Show in chat" marks the message the quote came from for a moment. */
+.cmsg.quote-hit {
+  animation: quote-hit 1.6s var(--ui-ease, ease-out);
+  border-radius: calc(10px * var(--rs, 1));
+}
+@keyframes quote-hit {
+  0%,
+  35% {
+    background: color-mix(in srgb, var(--acc) 16%, transparent);
+    box-shadow: 0 0 0 6px color-mix(in srgb, var(--acc) 16%, transparent);
+  }
+  100% {
+    background: transparent;
+    box-shadow: 0 0 0 6px transparent;
+  }
 }
 /* Select → Reply (#164): floats over the selection, inside `.chat`. */
 .chat-reply {
@@ -1186,7 +1265,7 @@ li.done > .md-box,
   gap: 4px;
   padding: 2px 4px 2px 0;
   border: 1px solid var(--line2);
-  border-left: 3px solid color-mix(in srgb, var(--acc) 60%, var(--line2));
+  border-left: 2px solid var(--acc);
   border-radius: calc(8px * var(--rs, 1));
   background: var(--bg2);
   animation: chat-pop-in 0.25s var(--ease-spring);
@@ -1195,7 +1274,8 @@ li.done > .md-box,
   flex: 1;
   min-width: 0;
   display: flex;
-  gap: 7px;
+  flex-direction: column;
+  gap: 2px;
   padding: 5px 4px 5px 9px;
   border: 0;
   background: none;
@@ -1206,7 +1286,15 @@ li.done > .md-box,
   text-align: left;
   cursor: pointer;
 }
-.cc-quote-t > span {
+.cc-quote-hd {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--acct, var(--acc));
+}
+.cc-quote-body {
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 3;
@@ -1214,7 +1302,7 @@ li.done > .md-box,
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
-.cc-quote.open .cc-quote-t > span {
+.cc-quote.open .cc-quote-body {
   display: block;
   max-height: 220px;
   overflow: auto;
@@ -1223,7 +1311,6 @@ li.done > .md-box,
   flex: none;
   width: 11px;
   height: 11px;
-  margin-top: 3px;
 }
 .cc-quote-t:focus-visible {
   outline: 2px solid var(--acc);
@@ -1397,6 +1484,7 @@ li.done > .md-box,
   .cc-btn.stop,
   .cc-img,
   .cc-quote,
+  .cmsg.quote-hit,
   .chat-reply,
   .chat-viewer,
   .md-copy.done,
