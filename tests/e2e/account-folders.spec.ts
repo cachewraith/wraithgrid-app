@@ -47,16 +47,16 @@ test('accounts drag into folders on the Accounts page; no icons', async () => {
     // Folders live on the Accounts page, reached from the sidebar's account switcher.
     await side.getByRole('button', { name: /Switch account/ }).click()
     await win.getByRole('menuitem', { name: 'Manage accounts' }).click()
-    const org = win.getByLabel('Account folders')
-    await org.getByRole('button', { name: 'New folder' }).click()
-    const folder = org.locator('.fold', { hasText: 'Folder 1' })
+    const org = win.getByRole('table', { name: 'Accounts' })
+    await win.getByRole('button', { name: 'New folder' }).click()
+    const folder = org.getByRole('rowgroup', { name: 'Folder Folder 1' })
     await expect(folder).toBeVisible()
 
-    // Drag the account row onto the folder.
+    // Drag the account row onto the folder's heading.
     await win.waitForTimeout(500)
-    const row = org.locator('.acc-row', { hasText: 'work' })
+    const row = org.locator('.acc-tr', { hasText: 'work' })
     const from = (await row.boundingBox())!
-    const to = (await folder.locator('.fold-hd').boundingBox())!
+    const to = (await folder.locator('.acc-grp-hd').boundingBox())!
     await win.mouse.move(from.x + 20, from.y + from.height / 2)
     await win.mouse.down()
     await win.waitForTimeout(100)
@@ -73,11 +73,19 @@ test('accounts drag into folders on the Accounts page; no icons', async () => {
       await expect(folder).toHaveClass(/\bover\b/, { timeout: 250 })
     }).toPass({ timeout: 5000 })
     await win.mouse.up()
-    await expect(folder.locator('.acc-row', { hasText: 'work' })).toBeVisible()
+    await expect(folder.locator('.acc-tr', { hasText: 'work' })).toBeVisible()
     await expect.poll(() => saved().accounts[0].folderId).toBe(saved().accountFolders[0]?.id)
 
     // No icons any more: accounts show their initial, projects plain text.
-    await expect(org.locator('.acc-row', { hasText: 'work' }).locator('.initial')).toHaveText('W')
+    await expect(org.locator('.acc-tr', { hasText: 'work' }).locator('.initial')).toHaveText('W')
+
+    // A click opens the details panel; renaming there saves.
+    await org.locator('.acc-tr', { hasText: 'work' }).click()
+    const det = win.getByRole('complementary', { name: 'Account work' })
+    await expect(det).toContainText('Claude Code')
+    await det.getByLabel('Name', { exact: true }).fill('day job')
+    await det.getByLabel('Name', { exact: true }).press('Enter')
+    await expect.poll(() => saved().accounts[0].name).toBe('day job')
     await expect(side.locator('.ws-row .initial, .ws-row .avatar')).toHaveCount(0)
     if (SHOTS) await win.screenshot({ path: path.join(SHOTS, 'account-folders.png') })
   } finally {

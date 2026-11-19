@@ -358,8 +358,11 @@ export function Composer({
                   title={quoteOpen === i ? 'Show less' : 'Show all'}
                   onClick={() => setQuoteOpen(quoteOpen === i ? null : i)}
                 >
-                  <IconQuote small />
-                  <span>{q.text}</span>
+                  <span className="cc-quote-hd">
+                    <IconQuote small />
+                    Replying to
+                  </span>
+                  <span className="cc-quote-body">{q.text}</span>
                 </button>
                 {q.trimmed ? <span className="cc-quote-cut">trimmed to fit</span> : null}
                 <button

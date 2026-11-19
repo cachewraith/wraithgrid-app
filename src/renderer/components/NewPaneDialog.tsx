@@ -28,11 +28,14 @@ function suggestBranch(now = new Date()): string {
 
 export function NewPaneDialog({
   slotId,
-  branchFrom = null
+  branchFrom = null,
+  presetAccount = null
 }: {
   slotId: string | null
   /** A pane whose repo the new pane gets a branch of, from the Git menu (#162). */
   branchFrom?: string | null
+  /** Opens with this account picked (the Accounts page's "Open a pane"). */
+  presetAccount?: string | null
 }) {
   const { api } = useServices()
   const actions = useActions()
@@ -53,6 +56,7 @@ export function NewPaneDialog({
   // From the Git menu: that pane's folder and account (#162).
   const from = useApp((s) => (branchFrom ? findPane(s.config, branchFrom)?.pane : undefined))
   const initialAccount =
+    accounts.find((a) => a.id === presetAccount)?.id ??
     accounts.find((a) => a.id === from?.accountId)?.id ??
     accounts.find((a) => a.id === project?.accountId)?.id ??
     accounts.find((a) => a.id === settings.defaultAccountId)?.id ??

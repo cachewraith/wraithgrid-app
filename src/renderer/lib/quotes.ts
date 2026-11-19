@@ -60,3 +60,21 @@ export function splitQuotes(text: string): { quotes: string[]; rest: string } {
   }
   return { quotes, rest: lines.slice(i).join('\n') }
 }
+
+/**
+ * A short piece of a quote to find its message by in the chat: the first line with words
+ * (fence lines skipped), spaces collapsed, at most `max` chars; '' when there is none.
+ */
+export function quoteSnippet(text: string, max = 60): string {
+  const line = text
+    .split('\n')
+    .map((l) => l.replace(/\s+/g, ' ').trim())
+    .find((l) => l && !l.startsWith('```') && l !== '[…trimmed]')
+  return (line ?? '').slice(0, max).trim()
+}
+
+/** A quote that is one fenced code block: its code and language, else null. */
+export function quotedCode(text: string): { code: string; lang: string } | null {
+  const m = /^(`{3,})([\w+-]*)\n([\s\S]*?)\n\1$/.exec(text.trim())
+  return m ? { code: m[3]!, lang: m[2]! } : null
+}
