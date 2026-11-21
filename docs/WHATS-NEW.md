@@ -1,8 +1,24 @@
-# What's new in 2.3.0: a clearer Accounts page, and replies you can see
+# What's new in 2.4.0: your Wraithgrid account
+
+*v2.4.0 · 2026-11-21*
+
+Wraithgrid now has accounts. The first time you open 2.4.0, sign in or create a free account; after that it opens as before, even offline. Your agents keep running while you sign in, and your agent CLI accounts (Claude, Codex, and the rest) stay separate, on your computer.
+
+| New | What it does |
+|---|---|
+| Sign in | Sign in with your email and password. When the server offers them, Continue with Google or GitHub opens your browser instead. You stay signed in on that computer |
+| Create an account | Your name, email and a password, then the 6-digit code we email you. Type it into the boxes or paste it: it confirms on its own. Didn't get it? Send a new one from the same screen |
+| Forgot password | Three short steps: your email, the code from the email, then a new password. Your other computers are signed out |
+| Your profile in the sidebar | The bottom-left button shows your name and plan. Its menu still picks which agent account new chats use, and has Sign out |
+| Account in Settings | Settings → General: change your name or password, or sign out |
+
+---
+
+## Previously, in 2.3.0: a clearer Accounts page, and replies you can see
 
 *v2.3.0 · 2026-11-19*
 
-| Change | What it does |
+| New | What it does |
 |---|---|
 | Accounts page | One list of every account, grouped by your folders (drag a row onto a folder heading to move it), with a Provider column, search, a provider filter, and a details panel for the account you click: name, color, folder, its config folder, Remove |
 | Add account | Three short steps: pick the provider, sign in (or reuse the login your terminal already has in `~/.claude` or `~/.codex`, or any folder), then confirm a name filled in from your email. Leaving early adds nothing |
