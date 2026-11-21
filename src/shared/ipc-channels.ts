@@ -98,5 +98,21 @@ export const IPC = {
   previewStop: 'preview:stop',
   previewEvent: 'preview:event',
   previewCapture: 'preview:capture',
-  previewRequestFailed: 'preview:requestFailed'
+  previewRequestFailed: 'preview:requestFailed',
+  cloudStatus: 'cloud:status',
+  cloudConfig: 'cloud:config',
+  cloudSignIn: 'cloud:signIn',
+  cloudEmailSignIn: 'cloud:emailSignIn',
+  cloudEmailSignUp: 'cloud:emailSignUp',
+  cloudEmailReset: 'cloud:emailReset',
+  cloudEmailVerify: 'cloud:emailVerify',
+  cloudEmailResend: 'cloud:emailResend',
+  cloudEmailResetCheck: 'cloud:emailResetCheck',
+  cloudEmailResetConfirm: 'cloud:emailResetConfirm',
+  cloudUpdateName: 'cloud:updateName',
+  cloudChangePassword: 'cloud:changePassword',
+  cloudCancel: 'cloud:cancel',
+  cloudSignOut: 'cloud:signOut',
+  cloudRefresh: 'cloud:refresh',
+  cloudChanged: 'cloud:changed'
 } as const

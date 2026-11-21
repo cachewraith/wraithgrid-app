@@ -780,6 +780,79 @@ export interface WraithApi {
     onAction(cb: (id: number, action: CliAction) => void): () => void
     reply(id: number, result: CliActionResult): void
   }
+  /**
+   * The Wraithgrid account on wraithgrid-server (Tauri app only; absent in the Electron build).
+   * Not the agent CLIs' accounts.
+   */
+  cloud?: {
+    status(): Promise<CloudStatus>
+    /** The server's public config; null when it can't be reached. */
+    config(): Promise<CloudConfig | null>
+    /** Google/GitHub: opens the browser and waits (up to 10 minutes) until sign-in finishes. */
+    signIn(provider: 'google' | 'github'): Promise<CloudSignInResult>
+    /**
+     * Email + password typed in the app (no browser). `code` `email_not_verified` = the server
+     * just emailed a 6-digit code: confirm with `emailVerify`.
+     */
+    emailSignIn(email: string, password: string): Promise<CloudSignInResult>
+    /** Creates an account; the server emails a 6-digit code for `emailVerify`. */
+    emailSignUp(name: string, email: string, password: string): Promise<CloudResult>
+    /** The emailed code confirms the address and signs this computer in. */
+    emailVerify(email: string, otp: string): Promise<CloudSignInResult>
+    /** A new confirmation code (same answer whether or not the account exists). */
+    emailResend(email: string): Promise<CloudResult>
+    /** Emails a 6-digit code to set a new password (same answer for unknown emails). */
+    emailReset(email: string): Promise<CloudResult>
+    /** Is this reset code right? Doesn't use it up, so the new password can be asked next. */
+    emailResetCheck(email: string, otp: string): Promise<CloudResult>
+    /** Code + new password: signs every other computer out and this one in. */
+    emailResetConfirm(email: string, otp: string, password: string): Promise<CloudSignInResult>
+    updateName(name: string): Promise<CloudSignInResult>
+    /** Needs the current password; other computers are signed out. */
+    changePassword(current: string, next: string): Promise<CloudResult>
+    cancel(): Promise<SimpleResult>
+    /** Signs this computer out here and on the server. */
+    signOut(): Promise<SimpleResult>
+    /** Reloads the profile and plan from the server. */
+    refresh(): Promise<CloudStatus>
+    onChanged(cb: (s: CloudStatus) => void): () => void
+  }
+}
+
+/** `code` is the server's error code (`invalid_code`, `code_expired`, `email_not_verified`…). */
+export type CloudResult = { ok: true } | { ok: false; error: string; code?: string }
+export type CloudSignInResult =
+  { ok: true; status: CloudStatus } | { ok: false; error: string; code?: string }
+
+/** wraithgrid-protocol `PublicConfig`, the parts the app reads. */
+export interface CloudConfig {
+  /** Browser sign-ins the server has set up (missing on older servers = none). */
+  providers?: ('google' | 'github')[]
+}
+
+/** Ways to sign in to a Wraithgrid account (wraithgrid-protocol `Provider`). */
+export type CloudProvider = 'google' | 'github' | 'email'
+
+/** The signed-in Wraithgrid user (wraithgrid-protocol `User`). */
+export interface CloudUser {
+  id: string
+  name: string
+  email: string
+  image: string | null
+  providers: CloudProvider[]
+  plan: 'free' | 'pro' | 'team'
+  status: 'active' | 'past_due' | 'suspended'
+  createdAt: string
+}
+
+export interface CloudStatus {
+  /** The server this app signs in to. */
+  server: string
+  signedIn: boolean
+  user: CloudUser | null
+  deviceId: string | null
+  /** A sign-in is open in the browser. */
+  pending: boolean
 }
 
 /** Main polled an account's plan limits from its provider (claude: every 2 minutes). */

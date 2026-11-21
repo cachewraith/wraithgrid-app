@@ -2,6 +2,7 @@
 //! has `setup` (its managed state, background work) and `handle` (its channels).
 
 mod chat;
+mod cloud;
 mod config;
 mod files;
 mod git;
@@ -30,6 +31,7 @@ pub fn setup(app: &AppHandle) {
     mods::setup(app);
     preview::setup(app);
     misc::setup(app);
+    cloud::setup(app);
 }
 
 pub async fn route(app: &AppHandle, channel: &str, payload: Value) -> Result<Value, String> {
@@ -47,6 +49,7 @@ pub async fn route(app: &AppHandle, channel: &str, payload: Value) -> Result<Val
         "themes" => themes::handle(app, channel, payload).await,
         "mods" => mods::handle(app, channel, payload).await,
         "preview" => preview::handle(app, channel, payload).await,
+        "cloud" => cloud::handle(app, channel, payload).await,
         "debug" => {
             eprintln!(
                 "renderer: {}",

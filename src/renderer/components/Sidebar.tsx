@@ -23,12 +23,15 @@ import { AccountAvatar, ProviderLogo } from './ProviderLogo'
 import { ProjectIcon } from './ProjectIcon'
 import { ContextMenu, menuPoint, type MenuPoint } from './ContextMenu'
 import { EdgeResizer } from './EdgeResizer'
+import { Initial } from './AccountIcon'
+import { useCloud } from '../app/cloud'
 import {
   IconChevron,
   IconClock,
   IconGlobe,
   IconCompose,
   IconGauge,
+  IconLogin,
   IconMods,
   IconMonitor,
   IconPlus,
@@ -442,9 +445,16 @@ function SidebarUsage() {
   )
 }
 
-/** The footer: who new chats run as, ChatGPT-style; the menu switches it and leads to accounts. */
+const PLAN_LABEL = { free: 'Free', pro: 'Pro', team: 'Team' } as const
+
+/**
+ * The footer. Signed in to a Wraithgrid account: that profile (the menu still switches which
+ * agent CLI account new chats use). Without accounts (Electron build): the agent CLI account.
+ */
 function AccountSwitcher({ compact }: { compact: boolean }) {
   const actions = useActions()
+  const cloudAccount = useCloud()
+  const me = cloudAccount?.status?.user ?? null
   const accounts = useApp((s) => s.config.accounts)
   const defaultId = useApp((s) => s.config.settings.defaultAccountId)
   const [menu, setMenu] = useState<{ at: MenuPoint; width: number } | null>(null)
@@ -463,19 +473,38 @@ function AccountSwitcher({ compact }: { compact: boolean }) {
     <>
       <button
         className={`acct-sw${compact ? ' compact' : ''}${menu ? ' open' : ''}`}
-        aria-label={`New chats use: ${label}. Switch account`}
+        aria-label={
+          me
+            ? `${me.name}, ${PLAN_LABEL[me.plan]} plan. Account menu`
+            : `New chats use: ${label}. Switch account`
+        }
         aria-haspopup="menu"
-        title={compact ? `New chats use ${label}` : undefined}
+        title={compact ? (me ? `${me.name} · ${me.email}` : `New chats use ${label}`) : undefined}
         onClick={open}
       >
-        {current ? (
+        {me ? (
+          <Initial name={me.name} size={26} />
+        ) : current ? (
           <AccountAvatar cli={current.cli} name={current.name} size={26} />
         ) : (
           <span className="acct-none">
             <IconUserPlus small />
           </span>
         )}
-        {compact ? null : (
+        {compact ? null : me ? (
+          <>
+            <span className="acct-txt">
+              <span className="acct-nm">{me.name}</span>
+              <span className="acct-sub">
+                <span>
+                  {PLAN_LABEL[me.plan]} plan
+                  {me.status === 'past_due' ? ' · payment due' : ''}
+                </span>
+              </span>
+            </span>
+            <IconChevron small className="acct-chev" />
+          </>
+        ) : (
           <>
             <span className="acct-txt">
               <span className="acct-nm">{label}</span>
@@ -502,6 +531,17 @@ function AccountSwitcher({ compact }: { compact: boolean }) {
           label="Accounts"
           onClose={() => setMenu(null)}
           items={[
+            ...(me
+              ? [
+                  {
+                    label: me.name,
+                    sub: me.email,
+                    heading: 'Wraithgrid account',
+                    icon: <Initial name={me.name} size={26} />,
+                    onSelect: () => actions.setView('settings')
+                  }
+                ]
+              : []),
             ...accounts.map((a, i) => ({
               label: a.name,
               // Each pane runs its own account (#49): the tick only says who new chats use.
@@ -518,8 +558,9 @@ function AccountSwitcher({ compact }: { compact: boolean }) {
               onSelect: () => actions.updateSettings({ defaultAccountId: a.id })
             })),
             {
-              label: 'New account',
+              label: me ? 'Add agent account' : 'New account',
               icon: <IconUserPlus small />,
+              heading: me && accounts.length === 0 ? 'Agent CLI accounts' : undefined,
               onSelect: () => actions.setAccountsMode('add')
             },
             {
@@ -529,7 +570,7 @@ function AccountSwitcher({ compact }: { compact: boolean }) {
               onSelect: () => actions.setView('usage')
             },
             {
-              label: 'Manage accounts',
+              label: me ? 'Manage agent accounts' : 'Manage accounts',
               icon: <IconUsers small />,
               onSelect: () => actions.setView('accounts')
             },
@@ -538,7 +579,17 @@ function AccountSwitcher({ compact }: { compact: boolean }) {
               label: 'Settings',
               icon: <IconSettings small />,
               onSelect: () => actions.setView('settings')
-            }
+            },
+            ...(me && cloudAccount
+              ? [
+                  {
+                    label: 'Sign out',
+                    icon: <IconLogin small />,
+                    divider: true,
+                    onSelect: () => void cloudAccount.cloud.signOut()
+                  }
+                ]
+              : [])
           ]}
         />
       ) : null}

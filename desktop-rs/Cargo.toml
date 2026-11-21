@@ -31,6 +31,7 @@ wraithgrid-remote = { path = "../app-rs/crates/remote" }
 wraithgrid-schedule = { path = "../app-rs/crates/schedule" }
 wraithgrid-themes = { path = "../app-rs/crates/themes" }
 wraithgrid-usage = { path = "../app-rs/crates/usage" }
+wraithgrid-cloud = { path = "../app-rs/crates/cloud" }
 # Pane notifications with a click action (`pane:reveal`).
 notify-rust = "=4.18.2"
 

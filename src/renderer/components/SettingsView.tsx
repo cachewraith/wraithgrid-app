@@ -40,6 +40,7 @@ import {
   type ChatModel
 } from '@shared/chat'
 import { Initial } from './AccountIcon'
+import { CloudAccountRow } from './CloudAccountRow'
 import { UpdatesCard, WhatsNew } from './AboutView'
 import { useActions, useApp, useServices } from '../app/services'
 import { currentTheme, drawnTheme } from '../app/store'
@@ -1386,6 +1387,7 @@ export function SettingsView() {
         <h2 className="set-title">{SETTINGS_TABS.find((t) => t.id === tab)?.label}</h2>
         {tab === 'general' ? (
           <>
+            <CloudAccountRow />
             <div className="srow">
               <div>
                 <h3 id="defacc-h">Default account</h3>

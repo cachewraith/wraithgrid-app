@@ -1,0 +1,278 @@
+/* The Wraithgrid account gate (components/AuthGate.tsx): covers the window until signed in. */
+.auth {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--tx);
+}
+/* The window can still be moved and closed while signed out. */
+.auth-top {
+  flex: none;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  height: 40px;
+  padding: 0 6px;
+  -webkit-app-region: drag;
+  user-select: none;
+}
+.auth-top :is(button, a) {
+  -webkit-app-region: no-drag;
+}
+.auth-body {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 20px 64px;
+  overflow-y: auto;
+}
+.auth-card {
+  width: 100%;
+  max-width: 380px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.auth-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  font-size: 14px;
+  margin-bottom: 12px;
+}
+.auth-card h1 {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.auth-sub {
+  margin: -4px 0 8px;
+  color: var(--mu);
+  font-size: 13.5px;
+  line-height: 1.5;
+}
+.auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.auth-field label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--tx);
+}
+.auth-field .inpt {
+  height: 38px;
+  font-weight: 400;
+}
+.auth-label {
+  position: relative;
+}
+.auth-aside {
+  position: absolute;
+  top: 0;
+  right: 0;
+}
+.auth-help {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--mu);
+}
+/* The emailed code: one box per digit (components/OtpInput.tsx). */
+.otp {
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+}
+.otp input {
+  flex: 1 1 0;
+  min-width: 0;
+  max-width: 54px;
+  height: 56px;
+  padding: 0;
+  border: 1px solid var(--line2);
+  border-radius: calc(10px * var(--rs, 1));
+  background: var(--bg2);
+  color: var(--tx);
+  font-family: var(--font-mono);
+  font-size: 24px;
+  font-weight: 600;
+  text-align: center;
+  caret-color: var(--acc);
+  transition:
+    border-color var(--ui-time, 0.15s) var(--ui-ease, ease),
+    box-shadow var(--ui-time, 0.15s) var(--ui-ease, ease);
+}
+.otp input.on {
+  border-color: var(--hover-line);
+  background: var(--bg);
+}
+.otp input:focus {
+  outline: none;
+  border-color: var(--acc);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--acc) 28%, transparent);
+}
+.otp input:disabled {
+  opacity: 0.6;
+}
+.otp.bad input {
+  border-color: var(--err);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .otp.bad {
+    animation: otp-shake 0.3s ease;
+  }
+}
+@keyframes otp-shake {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  25% {
+    transform: translateX(-4px);
+  }
+  75% {
+    transform: translateX(4px);
+  }
+}
+.auth-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px;
+  margin-top: -2px;
+}
+.auth-row .auth-help {
+  font-size: 12.5px;
+}
+/* Above the title on every screen but Sign in. */
+.auth-back {
+  align-self: flex-start;
+  margin: -4px 0 0 -6px;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--mu);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.auth-back:hover {
+  color: var(--tx);
+  background: var(--hover);
+}
+.auth-back:focus-visible {
+  outline: 2px solid var(--acc);
+  outline-offset: 1px;
+}
+/* "Step 2 of 3" over the forgot-password titles. */
+.auth-eyebrow {
+  margin: 0 0 -6px;
+  color: var(--acct);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.auth-sub strong {
+  color: var(--tx);
+  font-weight: 600;
+  word-break: break-all;
+}
+.auth-wide {
+  width: 100%;
+  height: 38px;
+}
+.auth-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--acct);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.auth-link:hover:not(:disabled) {
+  text-decoration: underline;
+}
+.auth-link:disabled {
+  color: var(--mu);
+  cursor: default;
+}
+.auth-link:focus-visible {
+  outline: 2px solid var(--acc);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+.auth-msg {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: calc(7px * var(--rs, 1));
+  background: var(--hover);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+.auth-msg.err {
+  color: var(--err);
+  background: color-mix(in srgb, var(--err) 12%, transparent);
+}
+.auth-or {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--mu);
+  font-size: 12px;
+  margin: 4px 0;
+}
+.auth-or::before,
+.auth-or::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+.auth-foot {
+  margin: 8px 0 0;
+  text-align: center;
+  font-size: 12.5px;
+  color: var(--mu);
+}
+
+/* Settings → General: the signed-in account. */
+.acct-profile {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.acct-profile .who {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+.acct-profile .who strong {
+  font-weight: 600;
+}
+.acct-forms {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 360px;
+  margin-top: 10px;
+}
+.acct-forms label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12.5px;
+}

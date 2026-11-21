@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-11-21
+
+- [cloud] The sign-in screen shows Continue with Google/GitHub only when the server lists them (`cloud:config` → `/v1/config` `providers`; none when offline) (files: src/renderer/components/AuthGate.tsx, src/shared/{ipc-channels,ipc-contract}.ts, src/tauri/bridge.ts, desktop-rs/src/ipc/cloud.rs)
+- [cloud] Forgot password is three screens (email → code → new password, "Step N of 3"): the code is checked by the server (`cloud:emailResetCheck`, `/v1/desktop/email/reset/check`) before the new password is asked for; a code that expires meanwhile returns to the code step; every screen but Sign in has ← Back; Show/Hide on new passwords; specific busy labels (files: src/renderer/components/AuthGate.tsx, src/renderer/styles/auth.css, src/shared/{ipc-channels,ipc-contract}.ts, src/tauri/bridge.ts, desktop-rs/src/ipc/cloud.rs, app-rs/crates/cloud/src/api.rs)
+- [cloud] The emailed code is six digit boxes: typing moves on, Backspace steps back, arrows move, a pasted or autofilled code fills them all; confirming the email submits by itself once the sixth digit is in (reset moves to the new password instead); a refused code clears and shakes the boxes (files: src/renderer/components/{OtpInput,AuthGate}.tsx, src/renderer/lib/auth-forms.ts, src/renderer/styles/auth.css, tests/unit/auth-forms.test.ts)
+
+## 2026-11-20
+
+- [cloud] Account gate: until signed in, the whole window is a sign-in screen (sign in, create account, confirm with a 6-digit emailed code + resend, forgot password with code + new password, Google/GitHub in the browser); the sidebar footer shows the Wraithgrid profile (menu: account, the agent accounts new chats use, add/manage agent accounts, usage, mods, settings, sign out); Settings → General edits the name, changes the password, signs out (files: src/renderer/components/{AuthGate,CloudAccountRow,Sidebar}.tsx, src/renderer/app/{App.tsx,cloud.ts}, src/renderer/lib/auth-forms.ts, src/renderer/styles/auth.css, src/renderer/main.tsx, src/shared/{ipc-channels,ipc-contract}.ts, src/tauri/bridge.ts, desktop-rs/src/ipc/cloud.rs, app-rs/crates/cloud/**, tests/unit/auth-forms.test.ts)
+- [cloud] Checked against the live server (api.wraithgrid.cachewraith.com): `public_endpoints` smoke test (config + refused in-app sign-in, creates nothing) (files: app-rs/crates/cloud/tests/live_server.rs, docs/CONTEXT.md)
+- [cloud] Wraithgrid account in the Tauri app: Settings → General signs in with Google or GitHub in the browser (loopback + PKCE to wraithgrid-server's `/v1/desktop/*`) or with email + password in an in-app form (Sign in / Create account / Forgot password → `/v1/desktop/email/*`; confirm/reset links still open the browser), shows name/email/plan, signs out (revokes the device); token in `cloud-session.json`, rotated at start and daily, `x-wraithgrid-version` on every call; server from `WRAITHGRID_SERVER_URL` (files: app-rs/crates/cloud/**, desktop-rs/src/ipc/{cloud,mod,window}.rs, desktop-rs/Cargo.toml, src/shared/{ipc-channels,ipc-contract}.ts, src/tauri/bridge.ts, src/renderer/components/{CloudAccountRow,SettingsView}.tsx)
+- [docs] CONTEXT.md said Electron v1.26.0; it now says the shipped app is Tauri (desktop-rs) at 2.3.0 (files: docs/CONTEXT.md)
+
 ## 2026-11-19
 
 - [release] v2.3.0: grouped Accounts table + 3-step Add account, reply quotes as cards (files: desktop-rs/Cargo.toml, desktop-rs/Cargo.lock, desktop-rs/tauri.conf.json, docs/WHATS-NEW.md)
