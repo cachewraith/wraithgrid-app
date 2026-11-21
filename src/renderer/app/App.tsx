@@ -28,6 +28,8 @@ import { matchShortcut } from './shortcuts'
 import { paneIds } from '../layout/tree'
 import { terminalTheme } from '../lib/term-theme'
 import { AutoSwitchDialog } from '../components/AutoSwitchDialog'
+import { AuthGate } from '../components/AuthGate'
+import { isGated, useCloud } from './cloud'
 import { DENSE_PANE_COUNT, activeWorkspace, currentTheme, drawnTheme } from './store'
 import { stepZoom } from '@shared/types'
 import { themeVars } from '@shared/themes'
@@ -40,6 +42,8 @@ function useGlobalShortcuts(): void {
       const action = matchShortcut(e)
       if (!action) return
       const s = store.getState()
+      // The sign-in screen owns the keyboard: no app shortcuts behind it.
+      if (isGated()) return
       // Dialogs own the keyboard, except that a sheet's own shortcut toggles it.
       const toggles =
         (action.type === 'shortcuts' && s.modal?.kind === 'shortcuts') ||
@@ -204,32 +208,39 @@ export function App() {
   useDenseSidebar()
   useAppearance()
 
+  const account = useCloud()
+  // Until signed in (or while that's not known yet) the account gate covers everything.
+  const gated = account !== null && !account.status?.signedIn
+
   if (!ready) return <div className="app" />
   return (
-    <div className="app">
-      <TitleBar />
-      <div className="row">
-        <Sidebar />
-        <main className="main">
-          <TopBar />
-          <div className="work">
-            <div className="content">
-              <PaneGrid />
-              {view === 'project' ? <ProjectView /> : null}
-              {view === 'accounts' ? <AccountsView /> : null}
-              {view === 'mods' ? <ModsView /> : null}
-              {view === 'usage' ? <UsageView /> : null}
-              {view === 'scheduled' ? <ScheduledView /> : null}
-              {view === 'settings' ? <SettingsView /> : null}
+    <>
+      <div className="app" inert={gated}>
+        <TitleBar />
+        <div className="row">
+          <Sidebar />
+          <main className="main">
+            <TopBar />
+            <div className="work">
+              <div className="content">
+                <PaneGrid />
+                {view === 'project' ? <ProjectView /> : null}
+                {view === 'accounts' ? <AccountsView /> : null}
+                {view === 'mods' ? <ModsView /> : null}
+                {view === 'usage' ? <UsageView /> : null}
+                {view === 'scheduled' ? <ScheduledView /> : null}
+                {view === 'settings' ? <SettingsView /> : null}
+              </div>
             </div>
-          </div>
-          <StatusBar />
-        </main>
-        {diffOpen ? <DiffPanel /> : null}
+            <StatusBar />
+          </main>
+          {diffOpen ? <DiffPanel /> : null}
+        </div>
+        <ZoomBadge />
+        <Modals />
+        <AutoSwitchDialog />
       </div>
-      <ZoomBadge />
-      <Modals />
-      <AutoSwitchDialog />
-    </div>
+      <AuthGate />
+    </>
   )
 }

@@ -7,6 +7,7 @@ import { getCurrentWebview } from '@tauri-apps/api/webview'
 import { IPC } from '@shared/ipc-channels'
 import type {
   CliAction,
+  CloudStatus,
   LoginEvent,
   PtyDataEvent,
   PreviewEventMessage,
@@ -266,6 +267,25 @@ const api: WraithApi = {
     onAction: (cb) =>
       subscribe<{ id: number; action: CliAction }>(IPC.cliAction, (m) => cb(m.id, m.action)),
     reply: (id, result) => send(IPC.cliResult, { id, result })
+  },
+  cloud: {
+    status: () => call(IPC.cloudStatus, {}),
+    config: () => call(IPC.cloudConfig, {}),
+    signIn: (provider) => call(IPC.cloudSignIn, { provider }),
+    emailSignIn: (email, password) => call(IPC.cloudEmailSignIn, { email, password }),
+    emailSignUp: (name, email, password) => call(IPC.cloudEmailSignUp, { name, email, password }),
+    emailVerify: (email, otp) => call(IPC.cloudEmailVerify, { email, otp }),
+    emailResend: (email) => call(IPC.cloudEmailResend, { email }),
+    emailReset: (email) => call(IPC.cloudEmailReset, { email }),
+    emailResetCheck: (email, otp) => call(IPC.cloudEmailResetCheck, { email, otp }),
+    emailResetConfirm: (email, otp, password) =>
+      call(IPC.cloudEmailResetConfirm, { email, otp, password }),
+    updateName: (name) => call(IPC.cloudUpdateName, { name }),
+    changePassword: (current, next) => call(IPC.cloudChangePassword, { current, next }),
+    cancel: () => call(IPC.cloudCancel, {}),
+    signOut: () => call(IPC.cloudSignOut, {}),
+    refresh: () => call(IPC.cloudRefresh, {}),
+    onChanged: (cb) => subscribe<CloudStatus>(IPC.cloudChanged, cb)
   }
 }
 

@@ -340,7 +340,7 @@ pub async fn handle(
     })
 }
 
-fn open_url(url: &str) -> bool {
+pub(crate) fn open_url(url: &str) -> bool {
     let (cmd, args): (&str, Vec<&str>) = if cfg!(target_os = "macos") {
         ("open", vec![url])
     } else if cfg!(windows) {

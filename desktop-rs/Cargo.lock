@@ -5130,6 +5130,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "wraithgrid-cloud"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "getrandom 0.3.4",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "ureq",
+]
+
+[[package]]
 name = "wraithgrid-core"
 version = "0.1.0"
 dependencies = [
@@ -5158,6 +5170,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tokio",
  "wraithgrid-chat",
+ "wraithgrid-cloud",
  "wraithgrid-core",
  "wraithgrid-git",
  "wraithgrid-mods",
