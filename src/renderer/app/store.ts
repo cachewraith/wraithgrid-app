@@ -137,7 +137,8 @@ export type Modal =
   | { kind: 'newPane'; slotId: string | null; branchFrom?: string; accountId?: string }
   | { kind: 'shortcuts' }
   | { kind: 'workspaces' }
-  | { kind: 'newProject' }
+  /** `git`: open on Git repository, filled in from a `wraithgrid://clone` link. */
+  | { kind: 'newProject'; git?: NewProjectGit }
   | { kind: 'removeAccount'; accountId: string }
   | { kind: 'palette' }
   | { kind: 'removeWorktree'; cwd: string; title: string }
@@ -190,6 +191,15 @@ export interface NewProjectInput {
   machineId: string | null
   /** Open the first chat right away (needs a folder and an account). */
   startChat: boolean
+  /** Put in the first chat's message box, not sent (a link's question). */
+  prompt?: string
+}
+
+/** A repository to clone, as a `wraithgrid://clone` link gave it (lib/deep-link.ts). */
+export interface NewProjectGit {
+  repo: string
+  branch: string | null
+  prompt: string
 }
 
 export interface NewPaneInput {
@@ -2212,8 +2222,23 @@ export function createAppStore({
           }
           void suggest(10)
         }
-        if (input.startChat && folder && accountId)
-          get().createPane({ accountId, cwd: folder, args: [], shell: false, slotId: null })
+        if (input.startChat && folder && accountId) {
+          const paneId = get().createPane({
+            accountId,
+            cwd: folder,
+            args: [],
+            shell: false,
+            slotId: null
+          })
+          const prompt = input.prompt?.trim()
+          if (prompt)
+            set({
+              chatDrops: {
+                ...get().chatDrops,
+                [paneId]: { id: now(), label: '', text: '', images: [], prompt }
+              }
+            })
+        }
         return null
       },
 

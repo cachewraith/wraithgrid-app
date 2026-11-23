@@ -72,6 +72,13 @@ bundle() { # <arch> <binary>: Wraithgrid.app for one CPU
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
   <key>CFBundleName</key><string>Wraithgrid</string>
   <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key><string>Wraithgrid link</string>
+      <key>CFBundleURLSchemes</key><array><string>wraithgrid</string></array>
+    </dict>
+  </array>
   <key>CFBundleShortVersionString</key><string>$version</string>
   <key>CFBundleVersion</key><string>$version</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>

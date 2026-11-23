@@ -507,3 +507,41 @@ fn the_runner_keeps_what_came_first_past_its_buffer_and_reports_git_errors() {
     assert!(e.first_line().starts_with("not a git repository"), "{e}");
     assert!(!git_status(&outside, &dir).repo);
 }
+
+#[test]
+fn clones_a_repo_for_a_new_project_and_reuses_it_when_insteadof_rewrites_its_url() {
+    // An https URL that git's `insteadOf` maps to a local bare repo: no network, and the
+    // reuse check must read the configured URL, not the rewritten one.
+    let r = repo();
+    let (_t, root) = temp();
+    let bare = root.join("demo.git");
+    r.git
+        .run(&["init", "--bare", &bare.to_string_lossy()], &root);
+    r.git
+        .run(&["push", &bare.to_string_lossy(), "main"], &r.dir);
+    let url = "https://git.example.test/team/demo.git";
+    let config = r.git._config.path();
+    let bare_url = bare.to_string_lossy().replace('\\', "/");
+    fs::write(
+        config,
+        format!("[url \"{bare_url}\"]\n\tinsteadOf = {url}\n"),
+    )
+    .unwrap();
+    let parent = root.join("projects");
+    fs::create_dir(&parent).unwrap();
+
+    let c = clone_repo(&r.git.cli, &parent, url, Some("main")).unwrap();
+    assert_eq!(c.dir, parent.join("demo"));
+    assert!(!c.existing);
+    assert!(c.dir.join("a.txt").exists());
+    let again = clone_repo(
+        &r.git.cli,
+        &parent,
+        "https://git.example.test/team/demo/",
+        None,
+    );
+    assert!(again.unwrap().existing);
+    let e = clone_repo(&r.git.cli, &root, url, Some("nope")).unwrap_err();
+    assert_eq!(e, "Remote branch nope not found in upstream origin");
+    assert!(!root.join("demo").exists());
+}

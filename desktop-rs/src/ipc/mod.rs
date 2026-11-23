@@ -6,6 +6,7 @@ mod cloud;
 mod config;
 mod files;
 mod git;
+pub mod links;
 mod misc;
 mod mods;
 mod preview;
@@ -19,6 +20,7 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
 
 pub fn setup(app: &AppHandle) {
+    links::setup(app);
     config::setup(app);
     window::setup(app);
     pty::setup(app);
@@ -38,6 +40,7 @@ pub async fn route(app: &AppHandle, channel: &str, payload: Value) -> Result<Val
     let group = channel.split(':').next().unwrap_or_default();
     let answer = match group {
         "config" => config::handle(app, channel, payload).await,
+        "app" if channel == "app:takeLink" => links::handle(app, channel).await,
         "window" | "app" => window::handle(app, channel, payload).await,
         "shell" if channel == "shell:openExternal" => window::handle(app, channel, payload).await,
         "pty" => pty::handle(app, channel, payload).await,

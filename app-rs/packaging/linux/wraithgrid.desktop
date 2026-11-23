@@ -7,3 +7,4 @@ Icon=wraithgrid
 StartupWMClass=wraithgrid
 Comment=Run several claude CLI sessions in one window, each with its own account (CLAUDE_CONFIG_DIR) and project folder.
 Categories=Development;
+MimeType=x-scheme-handler/wraithgrid;

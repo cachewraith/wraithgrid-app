@@ -39,6 +39,7 @@ import type { GitRunner } from './git'
 import { resolveTheme, type CloseMode, type Machine, type ThemeName } from '@shared/types'
 import { ConfigStore } from './config-store'
 import { machineOfPane, registerIpc, type IpcHandle } from './ipc'
+import { linkFromArgs, validLink } from './links'
 import { PaneRouter } from './pane-router'
 import { prepareRemote } from './remote-bin'
 import { remotePlan } from './remote-plan'
@@ -612,7 +613,25 @@ for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
   })
 }
 
-app.on('second-instance', reopenWindow)
+/** A `wraithgrid://` link waiting for the renderer (`app:takeLink`). */
+let pendingLink: string | null = linkFromArgs(process.argv)
+
+function deliverLink(link: string | null): void {
+  if (!link || !validLink(link)) return
+  pendingLink = link
+  mainWindow?.webContents.send(IPC.appLink)
+}
+
+app.on('second-instance', (_e, argv) => {
+  deliverLink(linkFromArgs(argv))
+  reopenWindow()
+})
+// macOS hands links over as an event, at launch and while running.
+app.on('open-url', (e, url) => {
+  e.preventDefault()
+  deliverLink(url)
+  if (app.isReady()) reopenWindow()
+})
 
 /** A native notification; clicking it brings the window back at Settings → Updates. */
 function showUpdateNotice(notice: UpdateNotice): void {
@@ -822,6 +841,11 @@ void app.whenReady().then(() => {
   hardenSessions()
   ipcHandle = registerIpc({
     getWindow: () => mainWindow,
+    takeLink: () => {
+      const link = pendingLink
+      pendingLink = null
+      return link
+    },
     store,
     ptys: router,
     homeDir,

@@ -119,7 +119,8 @@ const api: WraithApi = {
     show: (paneId, sha) => ipcRenderer.invoke(IPC.gitShow, { paneId, sha }),
     openPullRequest: (paneId) => ipcRenderer.invoke(IPC.gitOpenPr, { paneId }),
     checkWorktree: (cwd) => ipcRenderer.invoke(IPC.gitWorktreeCheck, { cwd }),
-    removeWorktree: (cwd, force) => ipcRenderer.invoke(IPC.gitWorktreeRemove, { cwd, force })
+    removeWorktree: (cwd, force) => ipcRenderer.invoke(IPC.gitWorktreeRemove, { cwd, force }),
+    clone: (url, parent, branch) => ipcRenderer.invoke(IPC.gitClone, { url, parent, branch })
   },
   shells: {
     list: () => ipcRenderer.invoke(IPC.shellList, {})
@@ -183,6 +184,10 @@ const api: WraithApi = {
     onAction: (cb) =>
       subscribe<{ id: number; action: CliAction }>(IPC.cliAction, (m) => cb(m.id, m.action)),
     reply: (id, result) => ipcRenderer.send(IPC.cliResult, { id, result })
+  },
+  links: {
+    take: () => ipcRenderer.invoke(IPC.appTakeLink, {}),
+    onLink: (cb) => subscribe<void>(IPC.appLink, () => cb())
   }
 }
 
