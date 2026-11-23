@@ -1,17 +1,23 @@
 // New project (#26): name, folder, default account, machine and a first chat in one step,
-// opened from the sidebar's + and the palette. The switcher only switches/manages.
+// opened from the sidebar's + and the palette. The switcher only switches/manages. The folder
+// is a local one, or a Git repository cloned into a folder the user picks (Tauri app only;
+// `git` fills it in from a `wraithgrid://clone` link, which never clones without Create).
 import { useEffect, useState } from 'react'
 import { contractHome } from '@shared/paths'
 import { AGENT_CLI_LABEL } from '@shared/agent-clis'
 import { Initial } from './AccountIcon'
 import { useActions, useApp, useServices } from '../app/services'
+import type { NewProjectGit } from '../app/store'
 import { Dialog } from './Dialog'
 import { FolderPicker } from './FolderPicker'
-import { IconBranch, IconCheck, IconClose, IconFolder } from './icons'
+import { IconBranch, IconCheck, IconClose, IconFolder, IconGlobe } from './icons'
 import { IS_MAC } from '../app/shortcuts'
 import { middleTruncate, splitFolder } from '../lib/folder-path'
+import { BRANCH_MAX, normalizeCloneUrl, repoDirName, repoLabel, validBranch } from '@shared/git-url'
 
-export function NewProjectDialog() {
+type Source = 'folder' | 'git'
+
+export function NewProjectDialog({ git }: { git?: NewProjectGit }) {
   const { api } = useServices()
   const actions = useActions()
   const accounts = useApp((s) => s.config.accounts)
@@ -20,10 +26,13 @@ export function NewProjectDialog() {
   const recent = useApp((s) => s.config.recentFolders)
   const home = useApp((s) => s.info.homeDir)
   const plans = useApp((s) => s.accountInfo)
+  const workspaces = useApp((s) => s.config.workspaces)
+  const canClone = typeof api.git.clone === 'function'
 
-  const [name, setName] = useState('')
+  // A link's repository names the project, as a folder pick does.
+  const [name, setName] = useState(git ? repoDirName(git.repo) : '')
   // The last name we filled in from a folder pick: typing your own name stops the suggesting.
-  const [suggested, setSuggested] = useState('')
+  const [suggested, setSuggested] = useState(name)
   const [folder, setFolder] = useState('')
   const [accountId, setAccountId] = useState<string | null>(
     accounts.find((a) => a.id === settings.defaultAccountId)?.id ?? accounts[0]?.id ?? null
@@ -31,7 +40,19 @@ export function NewProjectDialog() {
   const [machineId, setMachineId] = useState<string | null>(null)
   const [startChat, setStartChat] = useState(accounts.length > 0)
   const [error, setError] = useState<string | null>(null)
-  const [picking, setPicking] = useState(false)
+  /** Which folder the picker is choosing: the project's, or where a clone goes. */
+  const [picking, setPicking] = useState<Source | null>(null)
+
+  const [source, setSource] = useState<Source>(git && canClone ? 'git' : 'folder')
+  const [repo, setRepo] = useState(git?.repo ?? '')
+  const [branch, setBranch] = useState(git?.branch ?? '')
+  const [parent, setParent] = useState(settings.defaultCwd || '~')
+  const [cloning, setCloning] = useState(false)
+  const prompt = git?.prompt ?? ''
+  const repoUrl = normalizeCloneUrl(repo)
+  const repoBad = repo.trim() !== '' && !repoUrl
+  const branchBad = branch.trim() !== '' && !validBranch(branch.trim())
+  const isGit = source === 'git'
 
   // The chosen folder, checked in main: exists, and its git branch.
   const [checked, setChecked] = useState<{
@@ -60,8 +81,13 @@ export function NewProjectDialog() {
   const folderState = checked?.folder === folder.trim() ? checked : null
 
   const pickFolder = (p: string): void => {
+    if (picking === 'git') {
+      setParent(p)
+      setPicking(null)
+      return
+    }
     setFolder(p)
-    setPicking(false)
+    setPicking(null)
     setError(null)
     const base = splitFolder(p).name
     if (base && (!name.trim() || name === suggested)) {
@@ -69,8 +95,19 @@ export function NewProjectDialog() {
       setSuggested(base)
     }
   }
+  const typeRepo = (v: string): void => {
+    setRepo(v)
+    setError(null)
+    const url = normalizeCloneUrl(v)
+    const base = url ? repoDirName(url) : ''
+    if (base && (!name.trim() || name === suggested)) {
+      setName(base)
+      setSuggested(base)
+    }
+  }
   const browse = async (): Promise<void> => {
-    const picked = await api.dialog.pickFolder(folder || settings.defaultCwd)
+    const start = picking === 'git' ? parent : folder
+    const picked = await api.dialog.pickFolder(start || settings.defaultCwd)
     if (picked) pickFolder(contractHome(picked, home))
   }
   const togglePin = (p: string): void =>
@@ -80,46 +117,80 @@ export function NewProjectDialog() {
         : [p, ...settings.pinnedFolders].slice(0, 20)
     })
 
-  const canCreate = name.trim() !== '' && folder.trim() !== '' && folderState?.ok !== false
-  const submit = (e?: React.FormEvent): void => {
+  const canCreate =
+    !cloning &&
+    name.trim() !== '' &&
+    (isGit
+      ? !!repoUrl && !branchBad && parent.trim() !== ''
+      : folder.trim() !== '' && folderState?.ok !== false)
+  const submit = async (e?: React.FormEvent): Promise<void> => {
     e?.preventDefault()
+    if (cloning) return
     if (!canCreate) {
-      setError(!name.trim() ? 'Give the project a name.' : 'Pick the project’s folder.')
+      setError(
+        !name.trim()
+          ? 'Give the project a name.'
+          : isGit
+            ? 'Paste the address of a Git repository.'
+            : 'Pick the project’s folder.'
+      )
       return
+    }
+    // Checked before a clone that could take minutes, not after it.
+    if (workspaces.some((w) => w.name.toLowerCase() === name.trim().toLowerCase())) {
+      setError(`A project named ${name.trim()} exists.`)
+      return
+    }
+    let dir = folder.trim()
+    if (isGit && repoUrl && api.git.clone) {
+      setCloning(true)
+      setError(null)
+      const r = await api.git.clone(repoUrl, parent.trim(), branch.trim() || null)
+      setCloning(false)
+      if (!r.ok) {
+        setError(r.error)
+        return
+      }
+      dir = r.dir
     }
     const err = actions.createProject({
       name,
-      folder: folder.trim(),
+      folder: dir,
       accountId,
-      machineId,
-      startChat: startChat && !!accountId
+      machineId: isGit ? null : machineId,
+      startChat: startChat && !!accountId,
+      prompt: isGit ? prompt : undefined
     })
     if (err) setError(err)
   }
   const { name: folderName, parent: folderParent } = splitFolder(folder.trim())
+  // A clone runs on: closing the dialog would only hide it, and the folder would still appear.
+  const close = (): void => {
+    if (!cloning) actions.closeModal()
+  }
 
   if (picking)
     return (
       <Dialog onClose={actions.closeModal} labelledBy="npj-t" className="pinned np">
         <div className="dlg-hd">
-          <h2 id="npj-t">Choose a folder</h2>
+          <h2 id="npj-t">{picking === 'git' ? 'Clone into…' : 'Choose a folder'}</h2>
           <button
             type="button"
             className="icon-btn"
             aria-label="Back to New project"
             title="Back (Esc)"
-            onClick={() => setPicking(false)}
+            onClick={() => setPicking(null)}
           >
             <IconClose />
           </button>
         </div>
         <FolderPicker
-          start={folder.trim() || settings.defaultCwd}
+          start={(picking === 'git' ? parent : folder).trim() || settings.defaultCwd}
           recent={recent}
           pinned={settings.pinnedFolders}
           mac={IS_MAC}
           onPick={pickFolder}
-          onClose={() => setPicking(false)}
+          onClose={() => setPicking(null)}
           onTogglePin={togglePin}
           onSystem={() => void browse()}
         />
@@ -127,8 +198,8 @@ export function NewProjectDialog() {
     )
 
   return (
-    <Dialog onClose={actions.closeModal} labelledBy="npj-t" className="pinned np">
-      <form onSubmit={submit}>
+    <Dialog onClose={close} labelledBy="npj-t" className="pinned np">
+      <form onSubmit={(e) => void submit(e)} aria-busy={cloning}>
         <div className="dlg-hd">
           <h2 id="npj-t">New project</h2>
           <button
@@ -136,53 +207,167 @@ export function NewProjectDialog() {
             className="icon-btn"
             aria-label="Close dialog (Esc)"
             title="Close (Esc)"
-            onClick={actions.closeModal}
+            disabled={cloning}
+            onClick={close}
           >
             <IconClose />
           </button>
         </div>
         <div className="dlg-bd">
-          <div className="fld">
-            <span className="lbl" id="npj-dir-l">
-              Folder
-            </span>
-            {folder.trim() ? (
-              <button
-                type="button"
-                className={`np-folder${folderState?.ok === false ? ' bad' : ''}`}
-                aria-labelledby="npj-dir-l npj-dir-v"
-                onClick={() => setPicking(true)}
-              >
-                <IconFolder />
-                <span id="npj-dir-v" className="np-fv" title={folder}>
-                  <span className="np-fn">{folderName}</span>
-                  {folderParent ? (
-                    <span className="np-fp">{middleTruncate(folderParent, 48)}</span>
-                  ) : null}
+          {canClone ? (
+            <div className="fld">
+              <span className="lbl" id="npj-src">
+                Start from
+              </span>
+              <div className="seg" role="radiogroup" aria-labelledby="npj-src">
+                {(
+                  [
+                    ['folder', 'A folder on this computer'],
+                    ['git', 'A Git repository']
+                  ] as const
+                ).map(([id, label]) => (
+                  <button
+                    type="button"
+                    key={id}
+                    className={`seg-btn${source === id ? ' on' : ''}`}
+                    role="radio"
+                    aria-checked={source === id}
+                    disabled={cloning}
+                    onClick={() => {
+                      setSource(id)
+                      setError(null)
+                    }}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : null}
+
+          {isGit ? (
+            <>
+              <div className="fld">
+                <label className="lbl" htmlFor="npj-repo">
+                  Repository
+                </label>
+                <input
+                  id="npj-repo"
+                  className="inpt"
+                  value={repo}
+                  onChange={(e) => typeRepo(e.target.value)}
+                  placeholder="https://github.com/owner/repo.git or owner/repo"
+                  spellCheck={false}
+                  autoComplete="off"
+                  maxLength={2000}
+                  disabled={cloning}
+                  aria-invalid={repoBad}
+                  aria-describedby="npj-repo-h"
+                  data-autofocus={git ? undefined : true}
+                />
+                <span id="npj-repo-h" className={`hint${repoBad ? ' err' : ''}`}>
+                  {repoBad
+                    ? 'Use an https:// or SSH address (git@host:owner/repo), or GitHub’s owner/repo.'
+                    : 'Private repositories use your git credential helper or SSH key.'}
                 </span>
-                {folderState?.branch ? (
-                  <span className="np-br">
-                    <IconBranch small />
-                    {folderState.branch}
+              </div>
+              <div className="fld">
+                <label className="lbl" htmlFor="npj-branch">
+                  Branch <span className="np-opt">(optional)</span>
+                </label>
+                <input
+                  id="npj-branch"
+                  className="inpt"
+                  value={branch}
+                  onChange={(e) => {
+                    setBranch(e.target.value)
+                    setError(null)
+                  }}
+                  placeholder="The repository’s default branch"
+                  spellCheck={false}
+                  autoComplete="off"
+                  maxLength={BRANCH_MAX}
+                  disabled={cloning}
+                  aria-invalid={branchBad}
+                />
+                {branchBad ? (
+                  <span className="hint err" role="alert">
+                    Not a valid branch name.
                   </span>
                 ) : null}
-                <span className="np-change">Change</span>
-              </button>
-            ) : (
-              <button type="button" className="np-folder" onClick={() => setPicking(true)}>
-                <IconFolder />
-                <span className="np-fv">
-                  <span className="np-fn">Choose a folder…</span>
-                  <span className="np-fp">New chats in the project start there</span>
+              </div>
+              <div className="fld">
+                <span className="lbl" id="npj-into-l">
+                  Clone into
                 </span>
-              </button>
-            )}
-            {folderState?.ok === false ? (
-              <span className="hint err" role="alert">
-                {folderState.error}
+                <button
+                  type="button"
+                  className="np-folder"
+                  aria-labelledby="npj-into-l npj-into-v"
+                  disabled={cloning}
+                  onClick={() => setPicking('git')}
+                >
+                  <IconFolder />
+                  <span id="npj-into-v" className="np-fv" title={parent}>
+                    <span className="np-fn">{repoUrl ? repoDirName(repoUrl) : 'repository'}</span>
+                    <span className="np-fp">in {middleTruncate(parent, 48)}</span>
+                  </span>
+                  <span className="np-change">Change</span>
+                </button>
+              </div>
+              {prompt ? (
+                <div className="note np-ask">
+                  <span>
+                    The first chat opens with this question in its message box, ready for you to
+                    send:
+                    <q>{prompt.length > 240 ? `${prompt.slice(0, 240)}…` : prompt}</q>
+                  </span>
+                </div>
+              ) : null}
+            </>
+          ) : (
+            <div className="fld">
+              <span className="lbl" id="npj-dir-l">
+                Folder
               </span>
-            ) : null}
-          </div>
+              {folder.trim() ? (
+                <button
+                  type="button"
+                  className={`np-folder${folderState?.ok === false ? ' bad' : ''}`}
+                  aria-labelledby="npj-dir-l npj-dir-v"
+                  onClick={() => setPicking('folder')}
+                >
+                  <IconFolder />
+                  <span id="npj-dir-v" className="np-fv" title={folder}>
+                    <span className="np-fn">{folderName}</span>
+                    {folderParent ? (
+                      <span className="np-fp">{middleTruncate(folderParent, 48)}</span>
+                    ) : null}
+                  </span>
+                  {folderState?.branch ? (
+                    <span className="np-br">
+                      <IconBranch small />
+                      {folderState.branch}
+                    </span>
+                  ) : null}
+                  <span className="np-change">Change</span>
+                </button>
+              ) : (
+                <button type="button" className="np-folder" onClick={() => setPicking('folder')}>
+                  <IconFolder />
+                  <span className="np-fv">
+                    <span className="np-fn">Choose a folder…</span>
+                    <span className="np-fp">New chats in the project start there</span>
+                  </span>
+                </button>
+              )}
+              {folderState?.ok === false ? (
+                <span className="hint err" role="alert">
+                  {folderState.error}
+                </span>
+              ) : null}
+            </div>
+          )}
 
           <div className="fld">
             <label className="lbl" htmlFor="npj-name">
@@ -198,7 +383,8 @@ export function NewProjectDialog() {
               }}
               placeholder={suggested || 'e.g. wraithgrid'}
               maxLength={64}
-              data-autofocus
+              disabled={cloning}
+              data-autofocus={!isGit || git ? true : undefined}
             />
           </div>
 
@@ -248,7 +434,7 @@ export function NewProjectDialog() {
             </div>
           )}
 
-          {machines.length ? (
+          {machines.length && !isGit ? (
             <div className="fld">
               <span className="lbl" id="npj-run">
                 Runs on
@@ -303,14 +489,20 @@ export function NewProjectDialog() {
               {error}
             </div>
           ) : null}
+          {cloning ? (
+            <div className="note" role="status">
+              <IconGlobe /> Cloning {repoUrl ? repoLabel(repoUrl) : 'the repository'}… a big
+              repository can take a few minutes.
+            </div>
+          ) : null}
         </div>
         <div className="dlg-ft">
           <span className="hint">Enter to create · Esc to cancel</span>
-          <button type="button" className="btn gh" onClick={actions.closeModal}>
+          <button type="button" className="btn gh" disabled={cloning} onClick={close}>
             Cancel
           </button>
           <button type="submit" className="btn pri" disabled={!canCreate}>
-            Create project
+            {cloning ? 'Cloning…' : isGit ? 'Clone and create' : 'Create project'}
           </button>
         </div>
       </form>

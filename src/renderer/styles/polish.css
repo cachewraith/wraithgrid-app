@@ -1910,6 +1910,22 @@ ol.gh {
   font-size: 12px;
   color: var(--fa);
 }
+.np-folder:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+/* New project → Git repository: "(optional)" beside a label, and a link's question. */
+.np-opt {
+  font-weight: 400;
+  color: var(--fa);
+}
+.np-ask q {
+  display: block;
+  margin-top: 6px;
+  color: var(--tx);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .np-recent {
   display: grid;
   gap: 1px;

@@ -95,14 +95,19 @@ pub fn setup(app: &AppHandle) {
 
 /// One app per user-data dir (`requestSingleInstanceLock`): a second launch asks the first
 /// to show its window over a socket in the user-data dir and exits. The GPUI app uses the
-/// same socket, so it and this one never run on the same config either.
+/// same socket, so it and this one never run on the same config either. A launch carrying a
+/// `wraithgrid://` link (links.rs) hands it over as `link <url>` instead of `open`.
 #[cfg(unix)]
 fn single_instance(app: &AppHandle) {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::{UnixListener, UnixStream};
     let path = current_user_data_dir().join("wraithgrid-window.sock");
+    let hello = match super::links::from_args(std::env::args()) {
+        Some(link) => format!("link {link}\n"),
+        None => "open\n".into(),
+    };
     if let Ok(mut s) = UnixStream::connect(&path) {
-        if s.write_all(b"open\n").is_ok() {
+        if s.write_all(hello.as_bytes()).is_ok() {
             eprintln!("wraithgrid: already running; showing its window");
             std::process::exit(0);
         }
@@ -117,8 +122,14 @@ fn single_instance(app: &AppHandle) {
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
             let mut line = String::new();
-            if BufReader::new(stream).read_line(&mut line).is_ok() && line.trim() == "open" {
+            if BufReader::new(stream).read_line(&mut line).is_err() {
+                continue;
+            }
+            let line = line.trim();
+            if line == "open" {
                 reopen_window(&app);
+            } else if let Some(link) = line.strip_prefix("link ") {
+                super::links::deliver(&app, link);
             }
         }
     });
@@ -240,7 +251,7 @@ fn keep_in_tray(app: &AppHandle) {
     });
 }
 
-fn reopen_window(app: &AppHandle) {
+pub(super) fn reopen_window(app: &AppHandle) {
     let closing = app.state::<Arc<Closing>>();
     tray::hide(app, &closing.tray);
     show_window(app);

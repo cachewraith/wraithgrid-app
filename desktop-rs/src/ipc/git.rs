@@ -1,8 +1,10 @@
 //! `git:*` and `project:suggestIcons` (src/main/ipc.ts + git.ts) over the wraithgrid-git
 //! crate. Git runs in the pane's folder as this process's config has it, never a renderer
-//! path; every git call is blocking, so it runs on the blocking pool.
+//! path; every git call is blocking, so it runs on the blocking pool. `git:clone` is the one
+//! that takes a folder from the renderer: the parent the user picked for a new project.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
@@ -11,7 +13,7 @@ use wraithgrid_core::paths::{
     contract_home, home_dir, is_strictly_inside, resolve_user_path, worktrees_root,
 };
 use wraithgrid_git::{
-    add_worktree, check_worktree, commit_all, git_diff, git_log, git_show, git_status,
+    add_worktree, check_worktree, clone_repo, commit_all, git_diff, git_log, git_show, git_status,
     list_branches, pull_branch, pull_request_link, push_branch, remove_worktree, switch_branch,
     GitCli, GitStatus, SwitchTarget, WorktreeFrom,
 };
@@ -72,6 +74,21 @@ fn own_worktree(cwd: &str) -> Option<PathBuf> {
     let dir = dunce::canonicalize(resolve_user_path(cwd, &home)).ok()?;
     let root = dunce::canonicalize(worktrees_root(&home)).ok()?;
     is_strictly_inside(&dir, &root).then_some(dir)
+}
+
+/// The git for a clone: a big repository takes far longer than a push, and ssh must fail
+/// rather than wait for a host-key or passphrase answer nobody can type (unless the user set
+/// their own ssh command).
+fn clone_git() -> GitCli {
+    let mut git = GitCli {
+        slow_timeout: Duration::from_secs(30 * 60),
+        ..GitCli::default()
+    };
+    if std::env::var_os("GIT_SSH_COMMAND").is_none() && std::env::var_os("GIT_SSH").is_none() {
+        git.env
+            .push(("GIT_SSH_COMMAND".into(), "ssh -o BatchMode=yes".into()));
+    }
+    git
 }
 
 pub async fn handle(
@@ -181,6 +198,41 @@ pub async fn handle(
                         Err(e) => fail(e),
                     }
                 }
+            }
+        }
+        "git:clone" => {
+            let (Some(url), Some(parent_arg)) = (
+                str_arg(&payload, "url", wraithgrid_git::CLONE_URL_MAX),
+                str_arg(&payload, "parent", 4096),
+            ) else {
+                return invalid(fail("Could not clone the repository"));
+            };
+            let branch = match payload.get("branch") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(b)) if b.is_empty() => None,
+                Some(Value::String(b)) => Some(b.clone()),
+                Some(_) => return invalid(fail("Could not clone the repository")),
+            };
+            let home = home_dir();
+            let parent = resolve_user_path(parent_arg, &home);
+            if let Err(e) = std::fs::create_dir_all(&parent) {
+                return Some(Ok(fail(format!("Could not make {parent_arg}: {e}"))));
+            }
+            if !parent.is_dir() {
+                return Some(Ok(fail(format!("Not a folder: {parent_arg}"))));
+            }
+            // Plain path for git on Windows (no \\?\ prefix).
+            let parent = dunce::canonicalize(&parent).unwrap_or(parent);
+            let url = url.to_string();
+            match blocking(move || clone_repo(&clone_git(), &parent, &url, branch.as_deref())).await
+            {
+                Ok(c) => {
+                    let dir = contract_home(&c.dir.to_string_lossy(), &home.to_string_lossy());
+                    let how = if c.existing { "reused" } else { "cloned into" };
+                    eprintln!("wraithgrid: {how} {dir}");
+                    json!({ "ok": true, "dir": dir, "existing": c.existing })
+                }
+                Err(e) => fail(e),
             }
         }
         "git:worktreeCheck" => {

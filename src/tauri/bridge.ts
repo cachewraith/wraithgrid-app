@@ -203,7 +203,12 @@ const api: WraithApi = {
     show: (paneId, sha) => call(IPC.gitShow, { paneId, sha }),
     openPullRequest: (paneId) => call(IPC.gitOpenPr, { paneId }),
     checkWorktree: (cwd) => call(IPC.gitWorktreeCheck, { cwd }),
-    removeWorktree: (cwd, force) => call(IPC.gitWorktreeRemove, { cwd, force })
+    removeWorktree: (cwd, force) => call(IPC.gitWorktreeRemove, { cwd, force }),
+    clone: (url, parent, branch) => call(IPC.gitClone, { url, parent, branch })
+  },
+  links: {
+    take: () => call(IPC.appTakeLink, {}),
+    onLink: (cb) => subscribe<void>(IPC.appLink, () => cb())
   },
   shells: {
     list: () => call(IPC.shellList, {})

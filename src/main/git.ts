@@ -5,9 +5,12 @@
 // building stay unit-testable.
 import { existsSync } from 'node:fs'
 import path from 'node:path'
+import { stat } from 'node:fs/promises'
+import { repoDirName, validBranch, validCloneUrl } from '@shared/git-url'
 import type {
   GitActionResult,
   GitBranches,
+  GitCloneResult,
   GitCommit,
   GitDiffResult,
   GitLogResult,
@@ -550,6 +553,72 @@ export async function removeWorktree(
 }
 
 /** git's own error line (it may print progress lines first), without the "fatal: " prefix. */
+/** Two remote URLs name the same repository (host case, a trailing `/` or `.git` aside). */
+function sameRemote(a: string, b: string): boolean {
+  const norm = (s: string): string =>
+    s
+      .trim()
+      .replace(/\/+$/, '')
+      .replace(/\.git$/, '')
+      .toLowerCase()
+  return norm(a) === norm(b)
+}
+
+/** git's error, said for someone who just pasted a URL (ssh's line comes before `fatal:`). */
+function explainCloneError(err: unknown): string {
+  const e = err as { stderr?: string; message?: string }
+  const l = `${e.stderr ?? ''}\n${e.message ?? ''}`.toLowerCase()
+  if (l.includes('could not read username') || l.includes('terminal prompts disabled'))
+    return 'This repository needs a sign-in. Set up a git credential helper (or use its SSH URL) and try again.'
+  if (l.includes('host key verification failed'))
+    return 'SSH doesn’t know this host yet. Connect to it once with ssh in a terminal, then try again.'
+  if (l.includes('permission denied (publickey'))
+    return 'The SSH server refused your key. Check that it is added to your account there.'
+  if (l.includes('repository') && l.includes('not found'))
+    return 'Repository not found. Check the URL, or that you have access to it.'
+  return firstLine(err)
+}
+
+/**
+ * Clones `url` (remote https/ssh only, after `--`) into `parent/<repo name>` for a new
+ * project (clone.rs in the Tauri app). A folder of that name holding a clone of the same
+ * repository is reused; any other is refused, never overwritten.
+ */
+export async function cloneRepo(
+  run: GitRunner,
+  parent: string,
+  url: string,
+  branch: string | null
+): Promise<GitCloneResult> {
+  url = url.trim()
+  if (!validCloneUrl(url))
+    return { ok: false, error: 'Use an https:// or SSH address of a Git repository.' }
+  if (branch !== null && !validBranch(branch))
+    return { ok: false, error: 'Not a valid branch name.' }
+  try {
+    if (!(await stat(parent)).isDirectory()) throw new Error('not a folder')
+  } catch {
+    return { ok: false, error: `Folder not found: ${parent}` }
+  }
+  const name = repoDirName(url)
+  const dir = path.join(parent, name)
+  if (existsSync(dir)) {
+    if (existsSync(path.join(dir, '.git'))) {
+      // The URL as configured: `remote get-url` applies insteadOf rewrites (https → ssh).
+      const origin = await run(['config', '--get', 'remote.origin.url'], dir).catch(() => null)
+      if (origin !== null && sameRemote(origin, url)) return { ok: true, dir, existing: true }
+    }
+    return { ok: false, error: `${name} already exists in ${parent}. Pick another folder.` }
+  }
+  const args = ['clone', ...(branch ? ['--branch', branch] : []), '--', url, dir]
+  try {
+    await run(args, parent, { slow: true })
+  } catch (err) {
+    return { ok: false, error: explainCloneError(err) }
+  }
+  return { ok: true, dir, existing: false }
+}
+
 function firstLine(err: unknown): string {
   const e = err as { stderr?: string; message?: string }
   const lines = (e.stderr || e.message || '')

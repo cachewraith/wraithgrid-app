@@ -32,6 +32,7 @@ import { AuthGate } from '../components/AuthGate'
 import { isGated, useCloud } from './cloud'
 import { DENSE_PANE_COUNT, activeWorkspace, currentTheme, drawnTheme } from './store'
 import { stepZoom } from '@shared/types'
+import { parseDeepLink } from '../lib/deep-link'
 import { themeVars } from '@shared/themes'
 
 /** App shortcuts, caught in the capture phase so a focused terminal never sees them. */
@@ -174,7 +175,13 @@ function Modals() {
     case 'workspaces':
       return <WorkspaceSwitcher />
     case 'newProject':
-      return <NewProjectDialog />
+      // A new link while it is open starts it over with that link.
+      return (
+        <NewProjectDialog
+          key={modal.git ? `${modal.git.repo}\n${modal.git.prompt}` : ''}
+          git={modal.git}
+        />
+      )
     case 'removeAccount':
       return <RemoveAccountDialog accountId={modal.accountId} />
     case 'palette':
@@ -200,6 +207,33 @@ function Modals() {
   }
 }
 
+/**
+ * `wraithgrid://clone` links (the website's "Open in Wraithgrid"): New project on Git
+ * repository, filled in. Taken only once the app is ready and signed in; main keeps a link
+ * that arrives before that.
+ */
+function useDeepLinks(on: boolean): void {
+  const { api, store } = useServices()
+  useEffect(() => {
+    const links = api.links
+    if (!on || !links) return
+    const take = (): void => {
+      void links.take().then((link) => {
+        if (!link) return
+        const parsed = parseDeepLink(link)
+        if (!parsed) {
+          console.warn('wraithgrid: ignored a link it does not know')
+          return
+        }
+        const { repo, branch, prompt } = parsed
+        store.getState().openModal({ kind: 'newProject', git: { repo, branch, prompt } })
+      })
+    }
+    take()
+    return links.onLink(take)
+  }, [api, store, on])
+}
+
 export function App() {
   const ready = useApp((s) => s.ready)
   const view = useApp((s) => s.view)
@@ -211,6 +245,7 @@ export function App() {
   const account = useCloud()
   // Until signed in (or while that's not known yet) the account gate covers everything.
   const gated = account !== null && !account.status?.signedIn
+  useDeepLinks(ready && !gated)
 
   if (!ready) return <div className="app" />
   return (

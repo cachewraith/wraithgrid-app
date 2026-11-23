@@ -38,6 +38,16 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![ipc, ipc_ordered])
-        .run(tauri::generate_context!())
-        .expect("error while running Wraithgrid");
+        .build(tauri::generate_context!())
+        .expect("error while running Wraithgrid")
+        .run(|_app, _event| {
+            // macOS hands `wraithgrid://` links (Info.plist CFBundleURLTypes) over as an event,
+            // not argv, both at launch and while running.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Opened { urls } = &_event {
+                for url in urls {
+                    ipc::links::deliver(_app, url.as_str());
+                }
+            }
+        });
 }

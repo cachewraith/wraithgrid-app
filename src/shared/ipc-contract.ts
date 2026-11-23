@@ -156,6 +156,16 @@ export const gitWorktreeAddArgs = z.object({
   /** `local`/`remote`: open a branch the repo has instead of creating one (#162). */
   from: z.enum(['new', 'local', 'remote']).default('new')
 })
+/**
+ * New project from a Git repository: cloned into `parent/<repo name>`. Main checks the URL
+ * again (remote https/ssh only, see wraithgrid-git's clone.rs); `parent` is the user's pick.
+ */
+export const gitCloneArgs = z.object({
+  url: z.string().min(1).max(2000),
+  parent: z.string().min(1).max(4096),
+  branch: z.string().min(1).max(100).nullable().default(null)
+})
+export const appTakeLinkArgs = z.object({})
 export const gitCommitArgs = z.object({
   paneId: idSchema,
   message: z.string().min(1).max(5000)
@@ -401,6 +411,9 @@ export type FolderListResult =
   | { ok: false; path: string; parent: string | null; error: string }
 
 export type GitActionResult = { ok: true; detail: string } | { ok: false; error: string }
+/** `existing`: the folder already held a clone of that repository and is used as it is. */
+export type GitCloneResult =
+  { ok: true; dir: string; existing: boolean } | { ok: false; error: string }
 
 /** One commit in the history graph; `refs` as git decorates it (`HEAD -> main`, `tag: v1`). */
 export interface GitCommit {
@@ -685,6 +698,8 @@ export interface WraithApi {
       cwd: string
     ): Promise<{ ok: true; branch: string | null; changed: number } | { ok: false; error: string }>
     removeWorktree(cwd: string, force: boolean): Promise<GitActionResult>
+    /** Clones a repository for a new project (Tauri app only); returns its folder. */
+    clone?(url: string, parent: string, branch: string | null): Promise<GitCloneResult>
   }
   shells: {
     /** Shells installed on this machine, for the Settings picker. */
@@ -779,6 +794,14 @@ export interface WraithApi {
     /** A `wraithgrid new|split` command to carry out; answer it with `reply`. */
     onAction(cb: (id: number, action: CliAction) => void): () => void
     reply(id: number, result: CliActionResult): void
+  }
+  /**
+   * `wraithgrid://` links (the website's "Open in Wraithgrid"; Tauri app only). Main keeps the
+   * latest until it is taken; `onLink` says one arrived while running.
+   */
+  links?: {
+    take(): Promise<string | null>
+    onLink(cb: () => void): () => void
   }
   /**
    * The Wraithgrid account on wraithgrid-server (Tauri app only; absent in the Electron build).

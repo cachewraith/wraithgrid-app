@@ -43,6 +43,7 @@ import {
   gitPaneArgs,
   projectIconArgs,
   gitWorktreeAddArgs,
+  gitCloneArgs,
   gitWorktreeArgs,
   gitWorktreeRemoveArgs,
   gitCommitArgs,
@@ -90,6 +91,7 @@ import {
   type GitDiffResult,
   type GitStatus,
   type GitWorktreeResult,
+  type GitCloneResult,
   type GitActionResult,
   type ModCatalogResult,
   type ModCloneResult,
@@ -146,6 +148,7 @@ import { buildPaneEnv } from './pane-env'
 import {
   addWorktree,
   checkWorktree,
+  cloneRepo,
   commitAll,
   gitDiff,
   gitStatus,
@@ -195,6 +198,8 @@ import type { UpdateInstaller } from './update-install'
 
 export interface IpcDeps {
   getWindow: () => BrowserWindow | null
+  /** The `wraithgrid://` link waiting for the renderer, once (links.ts). */
+  takeLink?: () => string | null
   store: ConfigStore
   ptys: Pick<PaneRouter, 'create' | 'spawnOn' | 'attach' | 'write' | 'resize' | 'kill' | 'probe'>
   homeDir: string
@@ -1130,6 +1135,28 @@ export function registerIpc(deps: IpcDeps): IpcHandle {
     fail('Could not create the worktree')
   )
 
+  // New project from a Git repository: the one git call on a folder the renderer names (the
+  // parent the user picked); the URL is checked again in cloneRepo.
+  handle(
+    IPC.gitClone,
+    gitCloneArgs,
+    async (a): Promise<GitCloneResult> => {
+      const parent = resolveUserPath(a.parent, homeDir)
+      try {
+        await mkdir(parent, { recursive: true })
+      } catch (err) {
+        return fail(`Could not make ${a.parent}: ${(err as Error).message}`)
+      }
+      await deps.envReady
+      const r = await cloneRepo(deps.git, parent, a.url, a.branch)
+      if (!r.ok) return r
+      const dir = contractHome(r.dir, homeDir)
+      log(`${r.existing ? 'reused' : 'cloned into'} ${dir}`)
+      return { ...r, dir }
+    },
+    fail('Could not clone the repository')
+  )
+
   /** A Wraithgrid worktree folder (real path under ~/.wraithgrid/worktrees), or null. */
   const ownWorktree = async (cwd: string): Promise<string | null> => {
     try {
@@ -1700,6 +1727,10 @@ export function registerIpc(deps: IpcDeps): IpcHandle {
   })
 
   // ---- App info --------------------------------------------------------------------
+
+  ipcMain.handle(IPC.appTakeLink, (e): string | null =>
+    trusted(e) ? (deps.takeLink?.() ?? null) : null
+  )
 
   ipcMain.handle(IPC.appInfo, (e): AppInfo | null =>
     trusted(e)

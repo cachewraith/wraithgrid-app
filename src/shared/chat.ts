@@ -238,9 +238,11 @@ export interface ChatDrop {
   id: number
   /** The chip's text. */
   label: string
-  /** Sent after the message. */
+  /** Sent after the message ('' = no chip). */
   text: string
   images: ChatImage[]
+  /** Typed into the box itself (a `wraithgrid://clone` link's question), not sent. */
+  prompt?: string
 }
 
 /** Image files attached from disk, by extension; anything else is sent as a path. */

@@ -245,7 +245,8 @@ export function Composer({
   if (drop && drop.id !== dropId) {
     setDropId(drop.id)
     setImages([...images, ...drop.images].slice(0, CHAT_IMAGES_MAX))
-    setNotes([...notes, { label: drop.label, text: drop.text }])
+    if (drop.text) setNotes([...notes, { label: drop.label, text: drop.text }])
+    if (drop.prompt) setText(text.trim() ? `${drop.prompt}\n\n${text}` : drop.prompt)
   }
   useEffect(() => {
     if (dropId === null) return

@@ -274,6 +274,11 @@ Section "Install"
   WriteRegStr SHCTX "${UNINSTALL_REGISTRY_KEY}" URLInfoAbout "${HOMEPAGE}"
   WriteRegStr SHCTX "${UNINSTALL_REGISTRY_KEY}" URLUpdateInfo "${HOMEPAGE}"
   WriteRegStr SHCTX "${UNINSTALL_REGISTRY_KEY}" Readme "${HOMEPAGE}"
+  ; wraithgrid:// links (the website's "Open in Wraithgrid") start the app with the link.
+  WriteRegStr SHCTX "Software\Classes\wraithgrid" "" "URL:Wraithgrid link"
+  WriteRegStr SHCTX "Software\Classes\wraithgrid" "URL Protocol" ""
+  WriteRegStr SHCTX "Software\Classes\wraithgrid\DefaultIcon" "" "$INSTDIR\${APP_EXE},0"
+  WriteRegStr SHCTX "Software\Classes\wraithgrid\shell\open\command" "" '"$INSTDIR\${APP_EXE}" "%1"'
   WriteRegDWORD SHCTX "${UNINSTALL_REGISTRY_KEY}" NoModify 1
   WriteRegDWORD SHCTX "${UNINSTALL_REGISTRY_KEY}" NoRepair 1
   ${GetSize} "$INSTDIR" "/S=0K" $R0 $R1 $R2
@@ -363,6 +368,9 @@ Section "Uninstall"
     !insertmacro UseContext $installMode
   ${EndIf}
 
+  ${If} $R7 == "0"
+    DeleteRegKey SHCTX "Software\Classes\wraithgrid"
+  ${EndIf}
   DeleteRegKey SHCTX "${UNINSTALL_REGISTRY_KEY}"
   DeleteRegKey SHCTX "${INSTALL_REGISTRY_KEY}"
 SectionEnd
