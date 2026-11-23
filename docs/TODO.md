@@ -1,6 +1,7 @@
 # TODO
 
 ## Now
+- Web access (relay host, feat/web-access-relay-20261123): tested by unit tests + a live run against a local server (`tests/unit/relay-live.test.ts`); not yet clicked through in the real Tauri app with wraithgrid-web, nor on Windows/macOS; a chat whose process had exited is not restarted by a relayed send (it answers "could not start"); the web can't approve tools (by design for now); phone app: later, not planned now
 - Git repo projects + `wraithgrid://clone` links (feat/git-repo-projects-20261121): try in the packaged Tauri app on each OS (link registration: xdg-mime on Linux, Info.plist on macOS, NSIS on Windows); Windows has no single-instance handover yet, so a link while the app runs starts a second app on the same config: add a named-pipe/loopback handover; clone has no progress or cancel (30-min limit); add a WHATS-NEW 2.5.0 section at release (the website's Git page says "needs v2.5.0")
 - Wraithgrid account (feat/cloud-signin-20261120): block 1 (sign-in, profile, rotation, sign-out) done and tested against a local server; not yet clicked through in the real app with a real browser (Google/GitHub need the server's OAuth apps). Server must be deployed at the default URL (or change `DEFAULT_SERVER`) and the protocol published. Next blocks: plan/entitlements + billing buttons, devices list, events + push rules + announcements, share links, relay, teams
 - Pre-existing on main: `release-notes.test.ts` fails on 2.3.0 (its WHATS-NEW section uses a "Change | What it does" table, which `noteParts` doesn't read as items)

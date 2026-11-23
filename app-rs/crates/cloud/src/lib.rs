@@ -13,7 +13,7 @@ pub mod session;
 pub use api::{ApiError, Client, DeviceInfo, HttpFn, HttpRequest, HttpResponse, TokenGrant};
 pub use loopback::{Callback, Listener};
 pub use pkce::Pkce;
-pub use session::{SavedSession, SESSION_FILE};
+pub use session::{write_private, SavedSession, SESSION_FILE};
 
 /// The production server; `WRAITHGRID_SERVER_URL` replaces it (dev: `http://localhost:3000`).
 pub const DEFAULT_SERVER: &str = "https://api.wraithgrid.cachewraith.com";

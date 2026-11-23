@@ -839,6 +839,44 @@ export interface WraithApi {
     /** Reloads the profile and plan from the server. */
     refresh(): Promise<CloudStatus>
     onChanged(cb: (s: CloudStatus) => void): () => void
+    /**
+     * The relay to a paired web app (src/renderer/lib/relay/host.ts): a pending pairing
+     * with its one-time code (plus the server and the web app's URL for the pairing link).
+     */
+    relayPair(): Promise<
+      | {
+          ok: true
+          pairing: { id: string; deviceName: string; expiresAt: string }
+          code: string
+          server: string
+          appUrl: string
+        }
+      | { ok: false; error: string; code?: string }
+    >
+    relayPairings(): Promise<
+      | {
+          ok: true
+          pairings: {
+            id: string
+            status: string
+            phoneName: string | null
+            phoneKey: string | null
+          }[]
+        }
+      | { ok: false; error: string }
+    >
+    relayUnpair(id: string): Promise<SimpleResult>
+    /**
+     * Opens the relay WebSocket in main (with a fresh ticket); `gen` names this connection in
+     * its `relay:event`s (open, frame, closed). Frames are text, sealed by the renderer.
+     */
+    relayConnect(gen: number): Promise<SimpleResult>
+    relaySend(gen: number, text: string): Promise<SimpleResult>
+    relayClose(gen: number): Promise<SimpleResult>
+    onRelay(cb: (e: RelayEvent) => void): () => void
+    /** relay.json (keys and pairings), owner-only in the user-data dir; null when none. */
+    relayLoad(): Promise<unknown>
+    relaySave(data: unknown): Promise<SimpleResult>
   }
 }
 
@@ -867,6 +905,12 @@ export interface CloudUser {
   status: 'active' | 'past_due' | 'suspended'
   createdAt: string
 }
+
+/** The relay socket in main (`relay:event`). */
+export type RelayEvent =
+  | { gen: number; kind: 'open' }
+  | { gen: number; kind: 'frame'; text: string }
+  | { gen: number; kind: 'closed'; error?: string }
 
 export interface CloudStatus {
   /** The server this app signs in to. */

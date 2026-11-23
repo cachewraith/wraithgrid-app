@@ -20,6 +20,7 @@ import { ChatBus } from './lib/chat-bus'
 import { makeThumbs } from './lib/chat-images'
 import { PtyBus } from './lib/pty-bus'
 import { RectRegistry } from './lib/scheduling'
+import { RelayHost } from './lib/relay/host'
 
 // Composition root: the only place services are constructed.
 const api = window.wraith
@@ -33,7 +34,9 @@ api.chat.onFlush(() => {
   api.chat.flushed()
 })
 window.addEventListener('pagehide', () => chat.flush())
-const services: Services = { api, bus, chat, rects, store }
+// The web app relay needs the Wraithgrid account (Tauri only).
+const relay = api.cloud ? new RelayHost({ api: api.cloud, store, chat }) : undefined
+const services: Services = { api, bus, chat, rects, store, relay }
 
 // xterm measures glyphs when it opens, so the bundled fonts must be ready first.
 const fontsReady = Promise.all(
@@ -43,6 +46,7 @@ const fontsReady = Promise.all(
 ).catch(() => undefined)
 
 void Promise.all([fontsReady, store.getState().init()]).then(() => {
+  void relay?.start()
   createRoot(document.getElementById('root')!).render(
     <StrictMode>
       <ServicesProvider services={services}>

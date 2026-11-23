@@ -263,6 +263,42 @@ impl Client {
         let path = format!("/v1/devices/{}", crate::encode(device_id));
         self.call("DELETE", &path, Some(token), None).map(|_| ())
     }
+
+    /// `POST /v1/relay/pairings`: a pending pairing for a browser or phone, and its one-time code.
+    pub fn relay_pair(&self, token: &str) -> Result<Value, ApiError> {
+        self.call("POST", "/v1/relay/pairings", Some(token), Some(json!({})))
+    }
+
+    /// `GET /v1/relay/pairings`: this desktop's pairings.
+    pub fn relay_pairings(&self, token: &str) -> Result<Value, ApiError> {
+        self.call("GET", "/v1/relay/pairings", Some(token), None)
+    }
+
+    /// `DELETE /v1/relay/pairings/:id`.
+    pub fn relay_unpair(&self, token: &str, id: &str) -> Result<(), ApiError> {
+        let path = format!("/v1/relay/pairings/{}", crate::encode(id));
+        self.call("DELETE", &path, Some(token), None).map(|_| ())
+    }
+
+    /// `POST /v1/relay/ticket`: a one-time ticket for the relay WebSocket.
+    pub fn relay_ticket(&self, token: &str) -> Result<Value, ApiError> {
+        self.call("POST", "/v1/relay/ticket", Some(token), Some(json!({})))
+    }
+
+    /// The relay WebSocket for a ticket: the server's URL with ws(s) instead of http(s).
+    pub fn relay_socket_url(&self, ticket: &str) -> String {
+        let base = self
+            .server
+            .strip_prefix("https://")
+            .map(|r| format!("wss://{r}"))
+            .or_else(|| {
+                self.server
+                    .strip_prefix("http://")
+                    .map(|r| format!("ws://{r}"))
+            })
+            .unwrap_or_else(|| self.server.clone());
+        format!("{base}/v1/relay/connect?ticket={}", crate::encode(ticket))
+    }
 }
 
 fn device_json(device: &DeviceInfo) -> Value {
@@ -461,6 +497,19 @@ mod tests {
         let seen2 = seen2.lock().unwrap();
         assert_eq!(seen2[0].1, "http://srv/v1/me/password");
         assert!(seen2[0].2.contains(&("authorization", "Bearer tok".into())));
+    }
+
+    #[test]
+    fn relay_socket_url_swaps_the_scheme_and_encodes_the_ticket() {
+        let c = |server: &str| Client::new(server.into(), "1".into(), Box::new(|_| unreachable!()));
+        assert_eq!(
+            c("https://api.example.com").relay_socket_url("a b"),
+            "wss://api.example.com/v1/relay/connect?ticket=a%20b"
+        );
+        assert_eq!(
+            c("http://localhost:3000").relay_socket_url("t"),
+            "ws://localhost:3000/v1/relay/connect?ticket=t"
+        );
     }
 
     #[test]
