@@ -11,6 +11,7 @@ import type {
   LoginEvent,
   PtyDataEvent,
   PreviewEventMessage,
+  RelayEvent,
   PtyExitEvent,
   UpdateProgress,
   UsageLimitsEvent,
@@ -290,7 +291,16 @@ const api: WraithApi = {
     cancel: () => call(IPC.cloudCancel, {}),
     signOut: () => call(IPC.cloudSignOut, {}),
     refresh: () => call(IPC.cloudRefresh, {}),
-    onChanged: (cb) => subscribe<CloudStatus>(IPC.cloudChanged, cb)
+    onChanged: (cb) => subscribe<CloudStatus>(IPC.cloudChanged, cb),
+    relayPair: () => call(IPC.cloudRelayPair, {}),
+    relayPairings: () => call(IPC.cloudRelayPairings, {}),
+    relayUnpair: (id) => call(IPC.cloudRelayUnpair, { id }),
+    relayConnect: (gen) => call(IPC.relayConnect, { gen }),
+    relaySend: (gen, text) => call(IPC.relaySend, { gen, text }),
+    relayClose: (gen) => call(IPC.relayClose, { gen }),
+    onRelay: (cb) => subscribe<RelayEvent>(IPC.relayEvent, cb),
+    relayLoad: () => call(IPC.cloudRelayLoad, {}),
+    relaySave: (data) => call(IPC.cloudRelaySave, { data })
   }
 }
 

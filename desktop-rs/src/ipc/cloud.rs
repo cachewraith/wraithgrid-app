@@ -1,6 +1,8 @@
 //! `cloud:*`: the Wraithgrid account on wraithgrid-server (wraithgrid-cloud). Sign-in opens
 //! the browser and waits on a loopback port; the session lives in cloud-session.json and is
 //! rotated at start and once a day. `cloud:changed` tells the renderer whenever it changes.
+//! `cloud:relay*`: pairing a browser/phone and the relay ticket, with this device's session
+//! (the renderer runs the relay itself, src/renderer/lib/relay); its keys live in relay.json.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -10,8 +12,8 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 use wraithgrid_cloud::{
-    authorize_url, device_name, platform, server_url, ApiError, Callback, Client, DeviceInfo,
-    Listener, Pkce, SavedSession, TokenGrant, PROVIDERS, SESSION_FILE,
+    authorize_url, device_name, platform, server_url, write_private, ApiError, Callback, Client,
+    DeviceInfo, Listener, Pkce, SavedSession, TokenGrant, PROVIDERS, SESSION_FILE,
 };
 use wraithgrid_core::paths::current_user_data_dir;
 
@@ -19,6 +21,22 @@ use wraithgrid_core::paths::current_user_data_dir;
 const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const ROTATE_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// The relay's keys and pairings (the renderer's JSON, kept owner-only).
+const RELAY_FILE: &str = "relay.json";
+const RELAY_FILE_MAX: usize = 512 * 1024;
+/// The web app pairing links open (`WRAITHGRID_APP_URL` overrides it, e.g. a local dev server).
+const DEFAULT_APP_URL: &str = "https://app.wraithgrid.cachewraith.com";
+
+fn app_url() -> String {
+    std::env::var("WRAITHGRID_APP_URL")
+        .ok()
+        .filter(|u| u.starts_with("https://") || u.starts_with("http://localhost"))
+        .unwrap_or_else(|| DEFAULT_APP_URL.into())
+}
+
+fn relay_file() -> PathBuf {
+    current_user_data_dir().join(RELAY_FILE)
+}
 
 pub struct Cloud {
     client: Client,
@@ -211,6 +229,40 @@ async fn sign_in_with(
     }
 }
 
+/// A one-time relay ticket, as the WebSocket URL to open (relay.rs connects to it).
+pub(super) async fn relay_socket(app: &AppHandle) -> Result<String, String> {
+    let Some(token) = app.state::<Cloud>().token() else {
+        return Err("Sign in to Wraithgrid first.".into());
+    };
+    let task_app = app.clone();
+    blocking(move || {
+        let c = &task_app.state::<Cloud>().client;
+        let v = c.relay_ticket(&token).map_err(|e| e.message)?;
+        let ticket = v["ticket"].as_str().unwrap_or_default();
+        Ok(c.relay_socket_url(ticket))
+    })
+    .await
+}
+
+/// Runs a call with this device's session; `{ ok, ...answer }` or `{ ok: false, error, code }`.
+async fn authed(
+    app: &AppHandle,
+    call: impl FnOnce(&Client, &str) -> Result<Value, ApiError> + Send + 'static,
+) -> Value {
+    let Some(token) = app.state::<Cloud>().token() else {
+        return json!({ "ok": false, "error": "Sign in to Wraithgrid first.", "code": "signed_out" });
+    };
+    let task_app = app.clone();
+    match blocking(move || call(&task_app.state::<Cloud>().client, &token)).await {
+        Ok(Value::Object(mut m)) => {
+            m.insert("ok".into(), json!(true));
+            Value::Object(m)
+        }
+        Ok(_) => super::ok(),
+        Err(e) => json!({ "ok": false, "error": e.message, "code": e.code }),
+    }
+}
+
 /// Runs a call with nothing to keep; `{ ok }` or `{ ok: false, error, code }`.
 async fn simple(
     app: &AppHandle,
@@ -338,9 +390,43 @@ pub async fn handle(
             }
             super::ok()
         }
+        "cloud:relayPair" => {
+            let server = cloud.client.server.clone();
+            let mut v = authed(app, |c, t| c.relay_pair(t)).await;
+            if v["ok"] == json!(true) {
+                v["server"] = json!(server);
+                v["appUrl"] = json!(app_url());
+            }
+            v
+        }
+        "cloud:relayPairings" => authed(app, |c, t| c.relay_pairings(t)).await,
+        "cloud:relayUnpair" => {
+            let id = text(&payload, "id");
+            if !id.starts_with("pair_") || id.len() > 100 {
+                return Some(Ok(super::fail("No such pairing.")));
+            }
+            authed(app, move |c, t| c.relay_unpair(t, &id).map(|_| Value::Null)).await
+        }
+        "cloud:relayLoad" => match std::fs::read_to_string(relay_file()) {
+            Ok(text) => serde_json::from_str(&text).unwrap_or(Value::Null),
+            Err(_) => Value::Null,
+        },
+        "cloud:relaySave" => {
+            let data = payload.get("data").cloned().unwrap_or(Value::Null);
+            let text = data.to_string();
+            if !data.is_object() || text.len() > RELAY_FILE_MAX {
+                return Some(Ok(super::fail("Invalid relay data.")));
+            }
+            match write_private(&relay_file(), &text) {
+                Ok(()) => super::ok(),
+                Err(e) => super::fail(format!("Couldn't save the relay keys: {e}")),
+            }
+        }
         "cloud:signOut" => {
             let session = cloud.session.lock().unwrap().clone();
             cloud.store(None);
+            // Pairings belong to this device's session, which ends here.
+            let _ = std::fs::remove_file(relay_file());
             if let Some(s) = session {
                 // Ends this device on the server too; offline, the token just expires there.
                 let task_app = app.clone();

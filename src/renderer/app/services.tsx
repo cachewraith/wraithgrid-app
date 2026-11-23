@@ -4,6 +4,7 @@ import type { WraithApi } from '@shared/ipc-contract'
 import type { ChatBus } from '../lib/chat-bus'
 import type { PtyBus } from '../lib/pty-bus'
 import type { RectRegistry } from '../lib/scheduling'
+import type { RelayHost } from '../lib/relay/host'
 import type { AppState } from './store'
 
 /** Built once in main.tsx (the composition root) and handed down through context. */
@@ -13,6 +14,8 @@ export interface Services {
   chat: ChatBus
   rects: RectRegistry
   store: StoreApi<AppState>
+  /** The relay to a paired web app (Tauri app only: needs `api.cloud`). */
+  relay?: RelayHost
 }
 
 const ServicesContext = createContext<Services | null>(null)

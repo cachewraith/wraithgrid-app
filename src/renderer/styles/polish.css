@@ -2971,3 +2971,61 @@ ol.gh {
   font-size: 12.5px;
   cursor: pointer;
 }
+
+/* Settings → General → Web access (RelayAccessRow) and its pairing dialog. */
+.ctl.relay {
+  display: grid;
+  gap: 10px;
+  justify-items: start;
+}
+.relay-list {
+  display: grid;
+  gap: 6px;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.relay-list li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border: 1px solid var(--line2);
+  border-radius: calc(8px * var(--rs, 1));
+}
+.relay-list .nm {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.relay-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--fa);
+}
+.relay-dot.on {
+  background: var(--ok, #3fb950);
+}
+.relay-act {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.pair-dlg .dlg-bd {
+  display: grid;
+  gap: 12px;
+  justify-items: start;
+}
+.pair-link {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+}
+.pair-link .inpt {
+  flex: 1;
+  min-width: 0;
+}

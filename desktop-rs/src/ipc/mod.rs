@@ -11,6 +11,7 @@ mod misc;
 mod mods;
 mod preview;
 mod pty;
+mod relay;
 mod themes;
 mod update;
 mod usage;
@@ -34,6 +35,7 @@ pub fn setup(app: &AppHandle) {
     preview::setup(app);
     misc::setup(app);
     cloud::setup(app);
+    relay::setup(app);
 }
 
 pub async fn route(app: &AppHandle, channel: &str, payload: Value) -> Result<Value, String> {
@@ -53,6 +55,7 @@ pub async fn route(app: &AppHandle, channel: &str, payload: Value) -> Result<Val
         "mods" => mods::handle(app, channel, payload).await,
         "preview" => preview::handle(app, channel, payload).await,
         "cloud" => cloud::handle(app, channel, payload).await,
+        "relay" => relay::handle(app, channel, payload).await,
         "debug" => {
             eprintln!(
                 "renderer: {}",

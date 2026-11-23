@@ -32,25 +32,31 @@ impl SavedSession {
 
     pub fn save(&self, file: &Path) -> io::Result<()> {
         let data = serde_json::to_string_pretty(self).map_err(io::Error::other)?;
-        let tmp = file.with_extension(format!("json.{}.tmp", std::process::id()));
-        let mut opts = fs::OpenOptions::new();
-        opts.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            opts.mode(0o600);
-        }
-        {
-            let mut f = opts.open(&tmp)?;
-            f.write_all(data.as_bytes())?;
-            f.sync_all()?;
-        }
-        fs::rename(&tmp, file)
+        write_private(file, &data)
     }
 
     pub fn remove(file: &Path) {
         let _ = fs::remove_file(file);
     }
+}
+
+/// Writes a file only its owner can read (0600 on Unix), replacing it in one step: the
+/// session token, and the relay's keys (relay.json).
+pub fn write_private(file: &Path, data: &str) -> io::Result<()> {
+    let tmp = file.with_extension(format!("json.{}.tmp", std::process::id()));
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        opts.mode(0o600);
+    }
+    {
+        let mut f = opts.open(&tmp)?;
+        f.write_all(data.as_bytes())?;
+        f.sync_all()?;
+    }
+    fs::rename(&tmp, file)
 }
 
 #[cfg(test)]
