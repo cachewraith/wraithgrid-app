@@ -52,9 +52,24 @@ export const WireProject = z.object({
   folder: z.string().max(4096).nullable(),
   chats: z.array(WireChat).max(200),
   /** A new chat can start here (the project has a folder and an account to use). */
-  canChat: z.boolean()
+  canChat: z.boolean(),
+  /** Its icon, `<set>:<name>` (shared/project-icons.ts); left out for the plain folder. 2.5.2+ */
+  icon: z.string().max(64).optional()
 })
 export type WireProject = z.infer<typeof WireProject>
+
+/** A slash command or skill the chat's CLI offers, for the web's `/` menu. 2.5.2+ */
+export const WireCommand = z.object({
+  name: z.string().min(1).max(100),
+  description: z.string().max(300),
+  /** What goes after the name, e.g. `<topic>`; '' when it takes nothing. */
+  hint: z.string().max(100),
+  /** `$` for a skill named in the text (codex) rather than run as `/name`. */
+  sigil: z.enum(['/', '$']),
+  /** Part of the CLI itself, not a plugin, skill or the user's own file. */
+  builtin: z.boolean()
+})
+export type WireCommand = z.infer<typeof WireCommand>
 
 /** From the web app to the desktop. */
 export const ToDesktop = z.discriminatedUnion('kind', [
@@ -102,14 +117,18 @@ export const ToWeb = z.discriminatedUnion('kind', [
     items: z.array(WireItem).max(500),
     busy: z.boolean(),
     /** Older items were left out. */
-    more: z.boolean()
+    more: z.boolean(),
+    /** The CLI's commands, once it has said (2.5.2+; older desktops leave it out). */
+    commands: z.array(WireCommand).max(200).optional()
   }),
   /** Items that are new or changed since the last snapshot/update, by `id`. */
   z.object({
     kind: z.literal('chat.update'),
     paneId: Id,
     items: z.array(WireItem).max(500),
-    busy: z.boolean()
+    busy: z.boolean(),
+    /** Sent when the CLI's commands changed since the snapshot or the last update. */
+    commands: z.array(WireCommand).max(200).optional()
   }),
   z.object({
     kind: z.literal('ack'),

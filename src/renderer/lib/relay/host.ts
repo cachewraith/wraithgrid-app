@@ -22,7 +22,7 @@ import {
 import { findPane, paneView, type AppState } from '../../app/store'
 import type { ChatBus } from '../chat-bus'
 import { projectFolder } from '../team'
-import { markSent, newChatAccount, snapshot, state, updates } from './wire'
+import { markSent, newChatAccount, snapshot, state, updates, wireCommands } from './wire'
 
 /** What main does for the relay (`cloud:relay*`). */
 export interface RelayApi {
@@ -174,6 +174,8 @@ export class RelayHost {
   /** pairing → pane → item id → last sent JSON. */
   private open = new Map<string, Map<string, Map<string, string>>>()
   private lastBusy = new Map<string, boolean>()
+  /** pairing + pane → the commands last sent (JSON), so a change goes out once. */
+  private lastCommands = new Map<string, string>()
   private paneSubs = new Map<string, () => void>()
   private dirtyPanes = new Set<string>()
   private flushTimer: ReturnType<typeof setTimeout> | null = null
@@ -613,6 +615,7 @@ export class RelayHost {
         markSent(sent, snap.items)
         panes.set(msg.paneId, sent)
         this.lastBusy.set(`${id} ${msg.paneId}`, snap.busy)
+        this.lastCommands.set(`${id} ${msg.paneId}`, JSON.stringify(snap.commands ?? []))
         this.watch(msg.paneId)
         return this.send(id, snap)
       }
@@ -763,6 +766,13 @@ export class RelayHost {
           for (const f of updates(paneId, thread, sent, this.lastBusy.get(key) ?? null))
             this.send(id, f)
           this.lastBusy.set(key, thread.busy)
+          // The CLI said its commands after the chat was opened (it starts on the first send).
+          const commands = wireCommands(thread)
+          const json = JSON.stringify(commands)
+          if (this.lastCommands.get(key) !== json) {
+            this.lastCommands.set(key, json)
+            this.send(id, { kind: 'chat.update', paneId, items: [], busy: thread.busy, commands })
+          }
         }
       }
     }, this.timers.flush)

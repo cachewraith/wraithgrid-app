@@ -4,11 +4,17 @@ import { describe, expect, it } from 'vitest'
 import { PLAINTEXT_MAX } from '../../src/shared/relay/crypto'
 import { ToWeb } from '../../src/shared/relay/messages'
 import { EMPTY_THREAD, type ChatItem, type ChatThread } from '../../src/renderer/lib/chat-thread'
+import { defaultConfig } from '../../src/shared/schema'
+import type { ChatCommand } from '../../src/shared/chat'
+import type { Config, Workspace } from '../../src/shared/types'
 import {
+  COMMANDS_BUDGET,
   ITEM_TEXT_CAP,
   markSent,
   snapshot,
+  state,
   updates,
+  wireCommands,
   wireItem
 } from '../../src/renderer/lib/relay/wire'
 
@@ -76,5 +82,91 @@ describe('snapshot and updates', () => {
     expect(updates('p', { ...t, busy: true }, sent, false)).toEqual([
       { kind: 'chat.update', paneId: 'p', items: [], busy: true }
     ])
+  })
+})
+
+describe('project icons in state', () => {
+  const config = (icons: string[]): Config => {
+    const base = defaultConfig()
+    const ws = base.workspaces[0]!
+    return {
+      ...base,
+      workspaces: icons.map((icon, i): Workspace => ({ ...ws, id: `ws${i}`, name: `p${i}`, icon }))
+    }
+  }
+  const input = (c: Config) => ({
+    config: c,
+    isChat: () => true,
+    thread: () => EMPTY_THREAD,
+    activeAt: () => null
+  })
+
+  it('sends a known icon id, and leaves out the folder, emoji and unknown sets', () => {
+    const s = state('pc', input(config(['mit:react', '', 'ms:folder', '🚀', 'web:evil'])))
+    expect(s.projects.map((p) => p.icon)).toEqual([
+      'mit:react',
+      undefined,
+      undefined,
+      undefined,
+      undefined
+    ])
+    expect(ToWeb.safeParse(s).success).toBe(true)
+  })
+})
+
+describe('the CLI’s commands', () => {
+  const cmd = (name: string, over: Partial<ChatCommand> = {}): ChatCommand => ({
+    name,
+    description: `Does ${name}`,
+    argumentHint: '',
+    aliases: [],
+    builtin: false,
+    ...over
+  })
+
+  it('lists what the desktop’s menu lists from the CLI: no terminal-only ones, none of ours', () => {
+    const t = {
+      ...EMPTY_THREAD,
+      commands: [
+        cmd('review', { argumentHint: '<pr>' }),
+        cmd('compact', { builtin: true }),
+        cmd('config', { builtin: true }),
+        cmd('model', { builtin: true }),
+        cmd('plan-ideas', { mention: true })
+      ],
+      terminalOnly: ['config']
+    }
+    expect(wireCommands(t)).toEqual([
+      { name: 'review', description: 'Does review', hint: '<pr>', sigil: '/', builtin: false },
+      { name: 'plan-ideas', description: 'Does plan-ideas', hint: '', sigil: '$', builtin: false },
+      { name: 'compact', description: 'Does compact', hint: '', sigil: '/', builtin: true }
+    ])
+  })
+
+  it('keeps the list within its budget, and a snapshot with it within one frame', () => {
+    const many = Array.from({ length: 400 }, (_, i) =>
+      cmd(`skill-${i}`, { description: '😀'.repeat(400) })
+    )
+    const t = {
+      ...EMPTY_THREAD,
+      commands: many,
+      items: Array.from({ length: 50 }, (_, i): ChatItem => ({
+        kind: 'assistant',
+        id: `a${i}`,
+        text: '😀'.repeat(6000)
+      }))
+    }
+    const list = wireCommands(t)
+    expect(list.length).toBeGreaterThan(10)
+    expect(list.length).toBeLessThanOrEqual(200)
+    expect(size(list)).toBeLessThanOrEqual(COMMANDS_BUDGET)
+    const snap = snapshot('p', t)
+    expect(snap.commands).toEqual(list)
+    expect(size({ v: 1, n: Date.now() * 1000, m: snap })).toBeLessThanOrEqual(PLAINTEXT_MAX)
+    expect(ToWeb.safeParse(snap).success).toBe(true)
+  })
+
+  it('leaves commands out of a snapshot until the CLI has said them', () => {
+    expect(snapshot('p', thread([])).commands).toBeUndefined()
   })
 })
