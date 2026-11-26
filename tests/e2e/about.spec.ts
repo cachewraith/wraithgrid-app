@@ -25,11 +25,13 @@ test('after an update: "Updated to" once, What’s new in About, earlier version
     })
   )
   // The saved note must remain among the ten newest earlier versions as bundled notes grow.
-  // Unpackaged Electron reports its own (newer) version, so the next application patch is
-  // an earlier note there, above the bundle's latest entry, rather than a pruned 0.x fixture.
-  const appVersion = (
-    JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')) as { version: string }
-  ).version
+  // Unpackaged Electron reports its own (newer) version, so the patch after the newest bundled
+  // note is an earlier note there, above every bundled one. (package.json's version stopped
+  // moving when the Tauri app took over, and newer notes pushed it out of the ten.)
+  const appVersion = /^# What.s new in (\d+\.\d+\.\d+)/m.exec(
+    fs.readFileSync(path.join(ROOT, 'docs/WHATS-NEW.md'), 'utf8')
+  )?.[1]
+  if (!appVersion) throw new Error('docs/WHATS-NEW.md has no "# What’s new in x.y.z" heading')
   const [major, minor, patch] = appVersion.split('.')
   const savedVersion = `${major}.${minor}.${Number.parseInt(patch!, 10) + 1}`
   const notesFile = path.join(userData, 'release-notes.json')
