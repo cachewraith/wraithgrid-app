@@ -1,4 +1,22 @@
-# What's new in 2.4.0: your Wraithgrid account
+# What's new in 2.5.0: your projects from a browser
+
+*v2.5.0 · 2026-11-26*
+
+Work on this computer's projects from any browser, your phone included, while Wraithgrid runs here. And a new project can start straight from a Git repository.
+
+| New | What it does |
+|---|---|
+| Web access | Sign in at app.wraithgrid.cachewraith.com with your Wraithgrid account, then press **Pair** next to this computer. Wraithgrid here asks **Allow a browser to use this computer?** with a 6-digit code: if the browser shows the same code, press Allow. From then on you see your projects and chats live, send messages, start a chat or stop one, from anywhere. End-to-end encrypted: our server passes messages on but can't read them. Tool approvals stay on this computer. Turn it off or remove a browser in Settings → General → Web access |
+| Projects from Git | New project → Start from: **A Git repository**. Paste an https:// or SSH address, or GitHub's owner/repo, pick a branch if you like and where to clone it, then **Clone and create**. A folder that already holds that repository is used as it is |
+| wraithgrid:// links | A `wraithgrid://clone` link opens New project filled in with its repository. Nothing is cloned until you press Clone and create, and a question in the link waits in the first chat's message box until you press Enter |
+
+| Fix | What changed |
+|---|---|
+| Asked to sign in again and again | The daily refresh of your sign-in could sign Wraithgrid out (and each new sign-in added another computer to your account). It keeps you signed in now |
+
+---
+
+## Previously, in 2.4.0: your Wraithgrid account
 
 *v2.4.0 · 2026-11-21*
 
