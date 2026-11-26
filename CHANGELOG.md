@@ -2,6 +2,7 @@
 
 ## 2026-11-26
 
+- [test] About e2e picks its versions from the newest WHATS-NEW section, not package.json (stuck at 1.26.0): the 2.5.1 notes pushed 1.26.0 out of About's ten earlier versions and failed CI's E2E smoke test (files: tests/e2e/about.spec.ts)
 - [release] v2.5.1: one computer, one entry on the account (install id with sign-in) (files: desktop-rs/Cargo.toml, desktop-rs/Cargo.lock, desktop-rs/tauri.conf.json, docs/WHATS-NEW.md, docs/CONTEXT.md)
 - [cloud] One computer, one entry: each install keeps a random id in `install-id` (user data dir, owner-only) and sends it with sign-in, so the server reuses that computer's device instead of adding another every time you sign in (needs wraithgrid-server with migration 0012; older servers reject the field) (files: app-rs/crates/cloud/src/{api,session,lib}.rs, app-rs/crates/cloud/tests/live_server.rs, desktop-rs/src/ipc/cloud.rs)
 - [release] v2.5.0: Web access with one-click pairing (Allow / Deny with a matching code), projects from a Git repository, wraithgrid://clone links, fewer forced sign-ins (files: desktop-rs/Cargo.toml, desktop-rs/Cargo.lock, desktop-rs/tauri.conf.json, docs/WHATS-NEW.md)
