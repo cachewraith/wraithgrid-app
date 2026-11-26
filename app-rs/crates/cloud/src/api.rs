@@ -280,6 +280,32 @@ impl Client {
         self.call("DELETE", &path, Some(token), None).map(|_| ())
     }
 
+    /// One-click pairing: this desktop's public key for a browser's request (shown there as the
+    /// pairing code).
+    pub fn relay_request_key(
+        &self,
+        token: &str,
+        id: &str,
+        desktop_key: &str,
+    ) -> Result<(), ApiError> {
+        let path = format!("/v1/relay/requests/{}/key", crate::encode(id));
+        self.call(
+            "POST",
+            &path,
+            Some(token),
+            Some(json!({ "desktopKey": desktop_key })),
+        )
+        .map(|_| ())
+    }
+
+    /// One-click pairing: the user's Allow (`approve`) or Deny on this desktop.
+    pub fn relay_request_answer(&self, token: &str, id: &str, allow: bool) -> Result<(), ApiError> {
+        let answer = if allow { "approve" } else { "deny" };
+        let path = format!("/v1/relay/requests/{}/{answer}", crate::encode(id));
+        self.call("POST", &path, Some(token), Some(json!({})))
+            .map(|_| ())
+    }
+
     /// `POST /v1/relay/ticket`: a one-time ticket for the relay WebSocket.
     pub fn relay_ticket(&self, token: &str) -> Result<Value, ApiError> {
         self.call("POST", "/v1/relay/ticket", Some(token), Some(json!({})))

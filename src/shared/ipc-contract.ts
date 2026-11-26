@@ -877,6 +877,10 @@ export interface WraithApi {
     /** relay.json (keys and pairings), owner-only in the user-data dir; null when none. */
     relayLoad(): Promise<unknown>
     relaySave(data: unknown): Promise<SimpleResult>
+    /** One-click pairing: this desktop's public key for a browser's request. */
+    relayRequestKey(id: string, desktopKey: string): Promise<SimpleResult>
+    /** One-click pairing: Allow (true) or Deny on this desktop. */
+    relayRequestAnswer(id: string, allow: boolean): Promise<SimpleResult>
   }
 }
 

@@ -4,7 +4,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { defaultConfig } from '../../src/shared/schema'
 import type { Config, Pane, Workspace } from '../../src/shared/types'
-import { channel, newKeyPair } from '../../src/shared/relay/crypto'
+import { channel, newKeyPair, pairingCode } from '../../src/shared/relay/crypto'
 import { Counter, decode, encode, parsePairingLink, ToWeb } from '../../src/shared/relay/messages'
 import { RelayHost, type RelayApi } from '../../src/renderer/lib/relay/host'
 import { EMPTY_THREAD, type ChatThread } from '../../src/renderer/lib/chat-thread'
@@ -31,7 +31,9 @@ function setup() {
   } as unknown as Workspace
   const config: Config = {
     ...defaultConfig(),
-    accounts: [{ id: 'a1', name: 'work', cli: 'claude' } as Config['accounts'][number]],
+    accounts: [
+      { id: 'a1', name: 'work', cli: 'claude', signedIn: true } as Config['accounts'][number]
+    ],
     workspaces: [ws],
     activeWorkspace: 'ws1'
   }
@@ -85,6 +87,8 @@ function setup() {
   const frame = (f: unknown): void => sock.onmessage!({ data: JSON.stringify(f) } as MessageEvent)
 
   let saved: unknown = null
+  const requestKey = vi.fn(async (_id: string, _key: string) => ({ ok: true as const }))
+  const requestAnswer = vi.fn(async (_id: string, _allow: boolean) => ({ ok: true as const }))
   const listed: {
     id: string
     status: string
@@ -123,6 +127,8 @@ function setup() {
       saved = JSON.parse(JSON.stringify(d))
       return { ok: true }
     },
+    relayRequestKey: requestKey,
+    relayRequestAnswer: requestAnswer,
     status: async () => ({
       server: '',
       signedIn: true,
@@ -139,7 +145,19 @@ function setup() {
     openSocket: async () => sock as never,
     timers: { state: 10_000, flush: 1, startWait: 1000 }
   })
-  return { host, sent, sock, frame, actions, setThread, saved: () => saved, config, listed }
+  return {
+    host,
+    sent,
+    sock,
+    frame,
+    actions,
+    setThread,
+    saved: () => saved,
+    config,
+    listed,
+    requestKey,
+    requestAnswer
+  }
 }
 
 const tick = (ms = 5): Promise<void> => new Promise((r) => setTimeout(r, ms))
@@ -339,5 +357,76 @@ describe('RelayHost', () => {
     t.frame({ t: 'welcome', v: 1, connectionId: 'c2', role: 'desktop' })
     await tick()
     expect(t.host.getView().pairings).toEqual([])
+  })
+
+  it('one-click pairing: a browser asks, the codes match, Allow makes it trusted', async () => {
+    const t = setup()
+    await t.host.start()
+    await tick()
+    t.sock.onopen?.({} as Event)
+    t.frame({ t: 'welcome', v: 1, connectionId: 'c', role: 'desktop' })
+    const web = newKeyPair()
+    const REQ = 'pair_req1'
+    t.listed.push({ id: REQ, status: 'pending', phoneName: 'Chrome', phoneKey: web.publicKey })
+    t.frame({
+      t: 'pairing.request',
+      pairing: REQ,
+      phoneName: 'Chrome on Linux',
+      phoneKey: web.publicKey,
+      deviceName: 'Work laptop'
+    })
+    await tick()
+    // The desktop posted its key; the dialog shows the code the browser computes too.
+    expect(t.requestKey).toHaveBeenCalledTimes(1)
+    const [, desktopKey] = t.requestKey.mock.calls[0]!
+    const view = t.host.getView()
+    expect(view.request).toMatchObject({
+      id: REQ,
+      name: 'Chrome on Linux',
+      code: pairingCode(REQ, desktopKey, web.publicKey)
+    })
+    // Not listed as paired until allowed.
+    expect(view.pairings).toEqual([])
+
+    await t.host.answerRequest(true)
+    expect(t.requestAnswer).toHaveBeenCalledWith(REQ, true)
+    expect(t.host.getView()).toMatchObject({
+      request: null,
+      pairings: [{ id: REQ, name: 'Chrome on Linux', confirmed: true }]
+    })
+    // Trusted straight away: no pair.confirm needed.
+    const ch = channel('web', web.secretKey, desktopKey, REQ)
+    t.frame({
+      t: 'data',
+      pairing: REQ,
+      seq: 1,
+      payload: encode(ch, new Counter(), { kind: 'sync' })
+    })
+    await tick()
+    const inc = new Counter()
+    const got = t.sent
+      .filter((f) => f.t === 'data')
+      .map((f) => decode(ch, inc, String(f.payload), ToWeb))
+    expect(got.find((m) => m?.kind === 'state')).toMatchObject({ device: 'Work laptop' })
+  })
+
+  it('one-click pairing: Deny forgets it, and nothing it sends is answered', async () => {
+    const t = setup()
+    await t.host.start()
+    await tick()
+    t.sock.onopen?.({} as Event)
+    const web = newKeyPair()
+    t.frame({
+      t: 'pairing.request',
+      pairing: 'pair_req2',
+      phoneName: 'Chrome',
+      phoneKey: web.publicKey,
+      deviceName: 'Work laptop'
+    })
+    await tick()
+    await t.host.answerRequest(false)
+    expect(t.requestAnswer).toHaveBeenCalledWith('pair_req2', false)
+    expect(t.host.getView().request).toBeNull()
+    expect((t.saved() as { pairings: object }).pairings).toEqual({})
   })
 })

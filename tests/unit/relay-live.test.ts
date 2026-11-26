@@ -7,7 +7,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { defaultConfig } from '../../src/shared/schema'
 import type { Config, Pane, Workspace } from '../../src/shared/types'
-import { channel, newKeyPair } from '../../src/shared/relay/crypto'
+import { channel, newKeyPair, pairingCode } from '../../src/shared/relay/crypto'
 import { Counter, decode, encode, parsePairingLink, ToWeb } from '../../src/shared/relay/messages'
 import { RelayHost, type RelayApi } from '../../src/renderer/lib/relay/host'
 import { EMPTY_THREAD, type ChatThread } from '../../src/renderer/lib/chat-thread'
@@ -44,7 +44,8 @@ const until = async (ok: () => boolean, what = '', ms = 8000): Promise<void> => 
 }
 
 describe.skipIf(!SERVER || !EMAIL || !PASSWORD)('relay against a real server', () => {
-  it('pairs a browser, which then reads and drives a chat on this desktop', async () => {
+  /** A desktop (RelayHost over a real server session, fake store/chat) and a browser session. */
+  async function setUp() {
     // The desktop's device session (what cloud-session.json holds) and the browser's session.
     const desk = await call('POST', '/v1/desktop/email/sign-in', null, {
       email: EMAIL,
@@ -127,6 +128,14 @@ describe.skipIf(!SERVER || !EMAIL || !PASSWORD)('relay against a real server', (
       onRelay: () => () => undefined,
       relayLoad: async () => saved,
       relaySave: async (d) => ((saved = JSON.parse(JSON.stringify(d))), { ok: true }),
+      relayRequestKey: async (id, desktopKey) => (
+        await call('POST', `/v1/relay/requests/${id}/key`, deskToken, { desktopKey }),
+        { ok: true }
+      ),
+      relayRequestAnswer: async (id, allow) => (
+        await call('POST', `/v1/relay/requests/${id}/${allow ? 'approve' : 'deny'}`, deskToken, {}),
+        { ok: true }
+      ),
       status: async () => ({
         server: SERVER,
         signedIn: true,
@@ -145,6 +154,15 @@ describe.skipIf(!SERVER || !EMAIL || !PASSWORD)('relay against a real server', (
       chat: chat as never,
       timers: { state: 500, flush: 50, startWait: 2000 }
     })
+    const setThread = (t: ChatThread): void => {
+      thread = t
+      for (const cb of subs) cb()
+    }
+    return { desk, deskToken, webToken, host, chatSend, thread: () => thread, setThread }
+  }
+
+  it('pairs a browser, which then reads and drives a chat on this desktop', async () => {
+    const { desk, deskToken, webToken, host, chatSend, thread, setThread } = await setUp()
     await host.start()
     const pair = await host.pair()
     if (!pair.ok) throw new Error(pair.error)
@@ -204,12 +222,11 @@ describe.skipIf(!SERVER || !EMAIL || !PASSWORD)('relay against a real server', (
 
       say({ kind: 'chat.open', paneId: 'p1' })
       await until(() => heard.some((m) => m.kind === 'chat.snapshot'), 'snapshot')
-      thread = {
-        ...thread,
+      setThread({
+        ...thread(),
         busy: true,
-        items: [...thread.items, { kind: 'assistant', id: 'a1', text: 'streamed' }]
-      }
-      for (const cb of subs) cb()
+        items: [...thread().items, { kind: 'assistant', id: 'a1', text: 'streamed' }]
+      })
       await until(
         () =>
           heard.some((m) => m.kind === 'chat.update' && m.items.some((i) => i.text === 'streamed')),
@@ -221,6 +238,72 @@ describe.skipIf(!SERVER || !EMAIL || !PASSWORD)('relay against a real server', (
       expect(chatSend).toHaveBeenCalledWith('p1', 'from the web', [])
     } finally {
       sock.close()
+      host.stop()
+      await call('DELETE', `/v1/devices/${desk.device.id}`, deskToken).catch(() => undefined)
+    }
+  }, 30_000)
+
+  it('one-click: the browser asks, both compute the same code, Allow pairs them', async () => {
+    const { desk, deskToken, webToken, host } = await setUp()
+    // Nothing paired yet: with web access on, the desktop connects anyway.
+    await host.start()
+    try {
+      await until(() => host.getView().connected, 'the desktop on the relay')
+      const list = await call('GET', '/v1/relay/desktops', webToken)
+      expect(list.desktops).toContainEqual(
+        expect.objectContaining({ id: desk.device.id, name: 'Relay smoke desktop', online: true })
+      )
+      const web = newKeyPair()
+      const asked = await call('POST', '/v1/relay/requests', webToken, {
+        deviceId: desk.device.id,
+        phoneName: 'Live browser',
+        phoneKey: web.publicKey
+      })
+      await until(() => host.getView().request !== null, 'the Allow dialog')
+      let status = await call('GET', `/v1/relay/requests/${asked.pairing}`, webToken)
+      const deadline = Date.now() + 5000
+      while (!status.desktopKey && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 100))
+        status = await call('GET', `/v1/relay/requests/${asked.pairing}`, webToken)
+      }
+      // The browser's code and the desktop's dialog agree.
+      expect(pairingCode(asked.pairing, status.desktopKey, web.publicKey)).toBe(
+        host.getView().request?.code
+      )
+      await host.answerRequest(true)
+      status = await call('GET', `/v1/relay/requests/${asked.pairing}`, webToken)
+      expect(status.state).toBe('active')
+
+      // Paired: the browser talks to it straight away, no pair.confirm.
+      const ch = channel('web', web.secretKey, status.desktopKey, asked.pairing)
+      const inc = new Counter()
+      const heard: ToWeb[] = []
+      const sock = new WebSocket(
+        wsUrl((await call('POST', '/v1/relay/ticket', webToken, {})).ticket)
+      )
+      let joined = false
+      sock.onopen = () => sock.send(JSON.stringify({ t: 'hello', v: [1] }))
+      sock.onmessage = (e) => {
+        const f = JSON.parse(String(e.data))
+        if (f.t === 'welcome') sock.send(JSON.stringify({ t: 'join', pairings: [asked.pairing] }))
+        if (f.t === 'joined') joined = f.pairings[0]?.online === true
+        if (f.t === 'data') {
+          const m = decode(ch, inc, f.payload, ToWeb)
+          if (m) heard.push(m)
+        }
+      }
+      await until(() => joined, 'the browser joined, desktop online')
+      sock.send(
+        JSON.stringify({
+          t: 'data',
+          pairing: asked.pairing,
+          seq: 1,
+          payload: encode(ch, new Counter(), { kind: 'sync' })
+        })
+      )
+      await until(() => heard.some((m) => m.kind === 'state'), 'state')
+      sock.close()
+    } finally {
       host.stop()
       await call('DELETE', `/v1/devices/${desk.device.id}`, deskToken).catch(() => undefined)
     }

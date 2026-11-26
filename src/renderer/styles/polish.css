@@ -3029,3 +3029,16 @@ ol.gh {
   flex: 1;
   min-width: 0;
 }
+/* One-click pairing's Allow / Deny (RelayRequestDialog): the code to compare, large. */
+.relay-req {
+  display: grid;
+  gap: 10px;
+}
+.relay-code {
+  margin: 4px 0;
+  font-family: var(--font-mono);
+  font-size: 30px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-align: center;
+}

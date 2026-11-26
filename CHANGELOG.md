@@ -3,6 +3,7 @@
 ## 2026-11-26
 
 - [cloud] Fewer forced sign-ins: the daily token rotation keeps the new token before any other request (it used to ask for the profile first, so a request still on the old token could see a 401 and sign the app out, losing the new token too) (files: desktop-rs/src/ipc/cloud.rs)
+- [relay] One-click pairing: with Web access on, the app stays connected to the relay, so a browser signed in to the same account can ask to pair; an app-wide dialog asks Allow / Deny and shows a 6-digit code from both public keys (`pairingCode`, shared with wraithgrid-web) that the browser shows too; Allow trusts it at once (no pair.confirm), Deny or 2 minutes forget it; requests aren't listed as paired until allowed (files: src/shared/relay/crypto.ts, src/renderer/lib/relay/host.ts, src/renderer/components/RelayAccessRow.tsx, src/renderer/app/App.tsx, src/renderer/styles/polish.css, src/shared/{ipc-channels,ipc-contract}.ts, src/tauri/bridge.ts, desktop-rs/src/ipc/cloud.rs, app-rs/crates/cloud/src/api.rs, tests/unit/relay-{crypto,host,live}.test.ts)
 
 ## 2026-11-21
 

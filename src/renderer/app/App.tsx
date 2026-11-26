@@ -29,6 +29,7 @@ import { paneIds } from '../layout/tree'
 import { terminalTheme } from '../lib/term-theme'
 import { AutoSwitchDialog } from '../components/AutoSwitchDialog'
 import { AuthGate } from '../components/AuthGate'
+import { RelayRequestDialog } from '../components/RelayAccessRow'
 import { isGated, useCloud } from './cloud'
 import { DENSE_PANE_COUNT, activeWorkspace, currentTheme, drawnTheme } from './store'
 import { stepZoom } from '@shared/types'
@@ -274,6 +275,7 @@ export function App() {
         <ZoomBadge />
         <Modals />
         <AutoSwitchDialog />
+        <RelayRequestDialog />
       </div>
       <AuthGate />
     </>

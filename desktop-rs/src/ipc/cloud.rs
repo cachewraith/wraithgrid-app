@@ -410,6 +410,28 @@ pub async fn handle(
             }
             authed(app, move |c, t| c.relay_unpair(t, &id).map(|_| Value::Null)).await
         }
+        "cloud:relayRequestKey" | "cloud:relayRequestAnswer" => {
+            let id = text(&payload, "id");
+            if !id.starts_with("pair_") || id.len() > 100 {
+                return Some(Ok(super::fail("No such pairing.")));
+            }
+            if channel == "cloud:relayRequestKey" {
+                let key = text(&payload, "desktopKey");
+                authed(app, move |c, t| {
+                    c.relay_request_key(t, &id, &key).map(|_| Value::Null)
+                })
+                .await
+            } else {
+                let allow = payload
+                    .get("allow")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                authed(app, move |c, t| {
+                    c.relay_request_answer(t, &id, allow).map(|_| Value::Null)
+                })
+                .await
+            }
+        }
         "cloud:relayLoad" => match std::fs::read_to_string(relay_file()) {
             Ok(text) => serde_json::from_str(&text).unwrap_or(Value::Null),
             Err(_) => Value::Null,
