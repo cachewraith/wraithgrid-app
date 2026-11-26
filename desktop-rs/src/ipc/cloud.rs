@@ -122,14 +122,17 @@ fn rotate(app: &AppHandle) {
     let Some(token) = cloud.token() else { return };
     match cloud.client.refresh(&token) {
         Ok((fresh, expires_at)) => {
-            let user = cloud.client.me(&fresh).ok();
-            cloud.update_if(&token, |s| {
-                s.token = fresh;
+            // Keep the new token before anything else: the old one only lasts a short grace on
+            // the server, and a request that fails with it must not find it still current.
+            let kept = cloud.update_if(&token, |s| {
+                s.token = fresh.clone();
                 s.expires_at = expires_at;
-                if let Some(u) = user {
-                    s.user = u;
-                }
             });
+            if kept {
+                if let Ok(user) = cloud.client.me(&fresh) {
+                    cloud.update_if(&fresh, |s| s.user = user);
+                }
+            }
             changed(app);
         }
         Err(e) if e.is_signed_out() => {
