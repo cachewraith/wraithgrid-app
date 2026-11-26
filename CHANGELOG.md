@@ -2,6 +2,7 @@
 
 ## 2026-11-26
 
+- [release] v2.5.1: one computer, one entry on the account (install id with sign-in) (files: desktop-rs/Cargo.toml, desktop-rs/Cargo.lock, desktop-rs/tauri.conf.json, docs/WHATS-NEW.md, docs/CONTEXT.md)
 - [cloud] One computer, one entry: each install keeps a random id in `install-id` (user data dir, owner-only) and sends it with sign-in, so the server reuses that computer's device instead of adding another every time you sign in (needs wraithgrid-server with migration 0012; older servers reject the field) (files: app-rs/crates/cloud/src/{api,session,lib}.rs, app-rs/crates/cloud/tests/live_server.rs, desktop-rs/src/ipc/cloud.rs)
 - [release] v2.5.0: Web access with one-click pairing (Allow / Deny with a matching code), projects from a Git repository, wraithgrid://clone links, fewer forced sign-ins (files: desktop-rs/Cargo.toml, desktop-rs/Cargo.lock, desktop-rs/tauri.conf.json, docs/WHATS-NEW.md)
 - [cloud] Fewer forced sign-ins: the daily token rotation keeps the new token before any other request (it used to ask for the profile first, so a request still on the old token could see a 401 and sign the app out, losing the new token too) (files: desktop-rs/src/ipc/cloud.rs)

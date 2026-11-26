@@ -1,4 +1,16 @@
-# What's new in 2.5.0: your projects from a browser
+# What's new in 2.5.1: one computer, one entry
+
+*v2.5.1 · 2026-11-26*
+
+Your account now lists each computer once, however many times you sign in on it.
+
+| Fix | What changed |
+|---|---|
+| The same computer listed again and again | Each sign-in added another copy of this computer to your account, so the web app showed several with the same name, most of them offline. Wraithgrid now remembers this install and keeps one entry for it. Old copies: on app.wraithgrid.cachewraith.com, open Your computers and press **Remove** next to the ones you no longer use |
+
+---
+
+## Previously, in 2.5.0: your projects from a browser
 
 *v2.5.0 · 2026-11-26*
 
