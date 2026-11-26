@@ -14,6 +14,7 @@ fn device(name: &str) -> DeviceInfo {
         name: name.into(),
         platform: wraithgrid_cloud::platform().into(),
         app_version: "2.3.0".into(),
+        install_id: None,
     }
 }
 

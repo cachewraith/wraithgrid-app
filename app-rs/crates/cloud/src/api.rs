@@ -51,6 +51,8 @@ pub struct DeviceInfo {
     pub name: String,
     pub platform: String,
     pub app_version: String,
+    /// This install's own random id (`install_id`): signing in again reuses its device.
+    pub install_id: Option<String>,
 }
 
 /// What `/v1/desktop/token` answers (`DesktopTokenResponse`).
@@ -328,11 +330,15 @@ impl Client {
 }
 
 fn device_json(device: &DeviceInfo) -> Value {
-    json!({
+    let mut v = json!({
         "name": device.name,
         "platform": device.platform,
         "appVersion": device.app_version,
-    })
+    });
+    if let Some(id) = &device.install_id {
+        v["installId"] = json!(id);
+    }
+    v
 }
 
 /// `DesktopTokenResponse` → what the app keeps.
@@ -429,6 +435,7 @@ mod tests {
             name: "thinkpad".into(),
             platform: "linux".into(),
             app_version: "2.3.0".into(),
+            install_id: None,
         };
         let g = c
             .exchange("code", "verifier", "http://127.0.0.1:1/callback", &device)
@@ -459,6 +466,7 @@ mod tests {
             name: "thinkpad".into(),
             platform: "linux".into(),
             app_version: "2.3.0".into(),
+            install_id: None,
         };
         let g = c.email_sign_in("a@b.dev", "pw", &device).unwrap();
         assert_eq!((g.token.as_str(), g.device_id.as_str()), ("tok", "dev_2"));
@@ -472,12 +480,33 @@ mod tests {
     }
 
     #[test]
+    fn the_install_id_goes_with_the_device_only_when_known() {
+        let ok = r#"{"session":{"token":"tok","expiresAt":"2026-12-20T00:00:00.000Z"},"device":{"id":"dev_3"},"user":{"email":"a@b.dev"}}"#;
+        let mut device = DeviceInfo {
+            name: "thinkpad".into(),
+            platform: "linux".into(),
+            app_version: "2.5.1".into(),
+            install_id: Some("AAAAAAAAAAAAAAAAAAAAAAAA".into()),
+        };
+        let (c, seen) = client(200, ok);
+        c.email_sign_in("a@b.dev", "pw", &device).unwrap();
+        device.install_id = None;
+        c.email_sign_in("a@b.dev", "pw", &device).unwrap();
+        let seen = seen.lock().unwrap();
+        let body =
+            |i: usize| -> Value { serde_json::from_str(seen[i].3.as_ref().unwrap()).unwrap() };
+        assert_eq!(body(0)["device"]["installId"], "AAAAAAAAAAAAAAAAAAAAAAAA");
+        assert!(body(1)["device"].get("installId").is_none());
+    }
+
+    #[test]
     fn verify_and_reset_confirm_send_the_code_and_device() {
         let ok = r#"{"session":{"token":"tok","expiresAt":"2026-12-20T00:00:00.000Z"},"device":{"id":"dev_3"},"user":{"email":"a@b.dev"}}"#;
         let device = DeviceInfo {
             name: "thinkpad".into(),
             platform: "linux".into(),
             app_version: "2.3.0".into(),
+            install_id: None,
         };
         let (c, seen) = client(200, ok);
         assert_eq!(
@@ -556,6 +585,7 @@ mod tests {
             name: "x".into(),
             platform: "linux".into(),
             app_version: "2.3.0".into(),
+            install_id: None,
         };
         let e = c.exchange("c", "v", "r", &device).unwrap_err();
         assert_eq!(e.code, "upgrade_required");

@@ -12,8 +12,9 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 use wraithgrid_cloud::{
-    authorize_url, device_name, platform, server_url, write_private, ApiError, Callback, Client,
-    DeviceInfo, Listener, Pkce, SavedSession, TokenGrant, PROVIDERS, SESSION_FILE,
+    authorize_url, device_name, install_id, platform, server_url, write_private, ApiError,
+    Callback, Client, DeviceInfo, Listener, Pkce, SavedSession, TokenGrant, PROVIDERS,
+    SESSION_FILE,
 };
 use wraithgrid_core::paths::current_user_data_dir;
 
@@ -190,6 +191,8 @@ fn this_device() -> DeviceInfo {
         name: device_name(),
         platform: platform().into(),
         app_version: APP_VERSION.into(),
+        // The same install signing in again keeps its device (and pairings) on the account.
+        install_id: install_id(&current_user_data_dir()),
     }
 }
 

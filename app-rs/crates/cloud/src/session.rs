@@ -59,6 +59,32 @@ pub fn write_private(file: &Path, data: &str) -> io::Result<()> {
     fs::rename(&tmp, file)
 }
 
+/// The file holding this install's random id.
+pub const INSTALL_ID_FILE: &str = "install-id";
+
+/// This install's id (made once, kept in the user-data folder): the server reuses the same
+/// device when this install signs in again, instead of adding another. None when it can't be
+/// read or written (the server then makes a device, as before).
+pub fn install_id(dir: &Path) -> Option<String> {
+    let file = dir.join(INSTALL_ID_FILE);
+    if let Ok(text) = fs::read_to_string(&file) {
+        let id = text.trim();
+        if (16..=64).contains(&id.len())
+            && id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        {
+            return Some(id.to_owned());
+        }
+    }
+    let mut buf = [0u8; 18];
+    getrandom::fill(&mut buf).ok()?;
+    let id = crate::pkce::b64url(&buf); // 24 chars
+    fs::create_dir_all(dir).ok()?;
+    write_private(&file, &id).ok()?;
+    Some(id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -89,5 +115,19 @@ mod tests {
         SavedSession::remove(&file);
         assert_eq!(SavedSession::load(&file, "http://srv"), None);
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn install_id_is_made_once_and_kept() {
+        let dir = std::env::temp_dir().join(format!("wg-install-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let a = install_id(&dir).unwrap();
+        assert_eq!(a.len(), 24);
+        assert_eq!(install_id(&dir).unwrap(), a);
+        // A damaged file gets a fresh id.
+        fs::write(dir.join(INSTALL_ID_FILE), "bad id").unwrap();
+        let b = install_id(&dir).unwrap();
+        assert_ne!(b, a);
+        let _ = fs::remove_dir_all(&dir);
     }
 }
