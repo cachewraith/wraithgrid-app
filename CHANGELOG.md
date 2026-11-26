@@ -2,6 +2,7 @@
 
 ## 2026-11-26
 
+- [release] v2.5.2: project icons and `/` commands for the web app (files: desktop-rs/Cargo.toml, desktop-rs/Cargo.lock, desktop-rs/tauri.conf.json, docs/WHATS-NEW.md, docs/CONTEXT.md)
 - [relay] Web access sends each project's icon (`WireProject.icon`, `<set>:<name>`, not the plain folder) and the chat CLI's `/` commands (`chat.snapshot.commands`, and a `chat.update` when they change after the chat opened; the desktop menu's list minus terminal-only and Wraithgrid's own, max 200 within 16 kB); optional fields, older web apps ignore them (files: src/shared/relay/messages.ts, src/renderer/lib/relay/{wire,host}.ts, tests/unit/relay-{wire,host}.test.ts)
 - [test] About e2e picks its versions from the newest WHATS-NEW section, not package.json (stuck at 1.26.0): the 2.5.1 notes pushed 1.26.0 out of About's ten earlier versions and failed CI's E2E smoke test (files: tests/e2e/about.spec.ts)
 - [release] v2.5.1: one computer, one entry on the account (install id with sign-in) (files: desktop-rs/Cargo.toml, desktop-rs/Cargo.lock, desktop-rs/tauri.conf.json, docs/WHATS-NEW.md, docs/CONTEXT.md)

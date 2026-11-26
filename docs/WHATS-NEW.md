@@ -1,4 +1,17 @@
-# What's new in 2.5.1: one computer, one entry
+# What's new in 2.5.2: your icons and commands on the web
+
+*v2.5.2 · 2026-11-26*
+
+Web access at app.wraithgrid.cachewraith.com now shows more of this app: your project icons, and each chat's commands when you type `/`.
+
+| New | What it does |
+|---|---|
+| Project icons on the web | The icon you picked for a project here shows next to it in the browser too, in the sidebar and in search |
+| `/` commands on the web | Type `/` at the start of a message in the browser to list that chat's skills and commands, as in the chat box here. Pick one, add what it needs and send. `/new`, `/stop` and `/search` work there too |
+
+---
+
+## Previously, in 2.5.1: one computer, one entry
 
 *v2.5.1 · 2026-11-26*
 
