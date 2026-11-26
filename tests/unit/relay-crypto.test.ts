@@ -8,6 +8,7 @@ import {
   directionKey,
   newKeyPair,
   open,
+  pairingCode,
   PLAINTEXT_MAX,
   publicKeyOf,
   seal,
@@ -48,6 +49,14 @@ describe('relay crypto', () => {
     const phone = channel('web', V.pS, V.dP, PAIR)
     expect(open(phone.receive, PAIR, V.d2p)).toBe('hello web')
     expect(open(desktop.receive, PAIR, V.p2d)).toBe('hello desktop')
+  })
+
+  it('derives the one-click pairing code from the id and both keys (vector)', () => {
+    // Independently: Python hashlib over the same string.
+    expect(pairingCode(PAIR, V.dP, V.pP)).toBe('369 759')
+    // Any swapped key gives another code.
+    expect(pairingCode(PAIR, V.pP, V.dP)).not.toBe('369 759')
+    expect(pairingCode('pair_other', V.dP, V.pP)).toMatch(/^\d{3} \d{3}$/)
   })
 
   it('refuses a changed frame, another pairing, the wrong direction', () => {

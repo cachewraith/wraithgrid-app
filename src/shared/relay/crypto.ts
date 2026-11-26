@@ -99,6 +99,20 @@ export function open(key: Uint8Array, pairingId: string, sealed: string): string
   }
 }
 
+/**
+ * The 6-digit code one-click pairing shows on both screens: from the pairing id and both public
+ * keys, so the two match only if the server passed both keys on unchanged.
+ *   n = big-endian uint32 of SHA-256(utf8("wraithgrid-pair-code-v1|" + id + "|" + desktop + "|" + web))[0..4]
+ *   code = (n mod 1 000 000), six digits, shown as "123 456"
+ */
+export function pairingCode(pairingId: string, desktopKey: string, webKey: string): string {
+  const h = sha256(enc.encode(`wraithgrid-pair-code-v1|${pairingId}|${desktopKey}|${webKey}`))
+  const [a = 0, b = 0, c = 0, d = 0] = h
+  const n = (((a << 24) | (b << 16) | (c << 8) | d) >>> 0) % 1_000_000
+  const six = String(n).padStart(6, '0')
+  return `${six.slice(0, 3)} ${six.slice(3)}`
+}
+
 /** Both directions' keys for one side of a pairing. */
 export interface Channel {
   pairingId: string

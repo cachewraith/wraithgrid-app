@@ -10,7 +10,7 @@
 // typing in this window would — but not approve tool calls.
 import type { StoreApi } from 'zustand'
 import type { CloudStatus, RelayEvent, SimpleResult } from '@shared/ipc-contract'
-import { channel, newKeyPair, type Channel } from '@shared/relay/crypto'
+import { channel, newKeyPair, pairingCode, type Channel } from '@shared/relay/crypto'
 import {
   Counter,
   decode,
@@ -55,6 +55,8 @@ export interface RelayApi {
   onRelay(cb: (e: RelayEvent) => void): () => void
   relayLoad(): Promise<unknown>
   relaySave(data: unknown): Promise<SimpleResult>
+  relayRequestKey(id: string, desktopKey: string): Promise<SimpleResult>
+  relayRequestAnswer(id: string, allow: boolean): Promise<SimpleResult>
   status(): Promise<CloudStatus>
   onChanged(cb: (s: CloudStatus) => void): () => void
 }
@@ -77,6 +79,8 @@ interface Saved {
   v: 1
   enabled: boolean
   pairings: Record<string, SavedPairing>
+  /** This computer's name on the account (from a pairing or a request). */
+  deviceName?: string
 }
 
 export interface RelayView {
@@ -87,7 +91,15 @@ export interface RelayView {
   pairings: { id: string; name: string | null; confirmed: boolean; online: boolean }[]
   /** The pairing link being shown, until it is claimed or expires. */
   pending: { id: string; link: string; expiresAt: number } | null
+  /**
+   * One-click pairing: a signed-in browser asks to use this computer. Shown app-wide with
+   * Allow / Deny and the code the browser shows too.
+   */
+  request: { id: string; name: string; code: string; expiresAt: number } | null
 }
+
+/** How long the desktop's Allow / Deny stays open (the server's own limit). */
+const REQUEST_MS = 2 * 60_000
 
 type Socket = {
   readyState: number
@@ -166,6 +178,8 @@ export class RelayHost {
   private dirtyPanes = new Set<string>()
   private flushTimer: ReturnType<typeof setTimeout> | null = null
   private pending: RelayView['pending'] = null
+  private request: RelayView['request'] = null
+  private requestTimer: ReturnType<typeof setTimeout> | null = null
   private error: string | null = null
   private listeners = new Set<() => void>()
   private view: RelayView = this.makeView()
@@ -210,17 +224,15 @@ export class RelayHost {
       // Signing out ends this device's pairings on the server; main deletes relay.json.
       this.saved.pairings = {}
       this.pending = null
+      this.request = null
     }
     this.reconcile()
   }
 
   /** Connects when there is something to connect for, disconnects otherwise. */
   private reconcile(): void {
-    const want =
-      this.loaded &&
-      this.signedIn &&
-      this.saved.enabled &&
-      Object.keys(this.saved.pairings).length > 0
+    // Connected whenever web access is on, so a browser can ask to pair with one click.
+    const want = this.loaded && this.signedIn && this.saved.enabled
     if (want && !this.ws && !this.retryTimer) void this.connect()
     if (!want) this.disconnect()
     this.changed()
@@ -297,14 +309,16 @@ export class RelayHost {
       connected: this.ws?.readyState === 1,
       error: this.error,
       pairings: Object.entries(this.saved.pairings)
-        .filter(([, p]) => p.phoneKey)
+        // A one-click request (no code) is listed once allowed; until then it's the dialog.
+        .filter(([, p]) => p.phoneKey && (p.confirmed || p.code))
         .map(([id, p]) => ({
           id,
           name: p.phoneName,
           confirmed: p.confirmed,
           online: this.online.has(id)
         })),
-      pending: this.pending
+      pending: this.pending,
+      request: this.request
     }
   }
 
@@ -335,6 +349,7 @@ export class RelayHost {
       createdAt: this.now(),
       out: 0
     }
+    this.saved.deviceName = r.pairing.deviceName
     // A pending pairing nobody claimed is dropped (the server's lapse too).
     for (const [id, p] of Object.entries(this.saved.pairings))
       if (!p.phoneKey && id !== r.pairing.id) delete this.saved.pairings[id]
@@ -351,6 +366,61 @@ export class RelayHost {
     this.error = null
     this.reconcile()
     return { ok: true, link }
+  }
+
+  /** One-click pairing: the user's answer to the browser that asked. */
+  async answerRequest(allow: boolean): Promise<SimpleResult> {
+    const req = this.request
+    if (!req) return { ok: true }
+    this.request = null
+    if (this.requestTimer) clearTimeout(this.requestTimer)
+    this.requestTimer = null
+    const r = await this.deps.api.relayRequestAnswer(req.id, allow)
+    const p = this.saved.pairings[req.id]
+    if (allow && r.ok && p) {
+      p.confirmed = true
+      this.online.add(req.id)
+      await this.persist()
+      this.reconcile()
+    } else await this.forget(req.id)
+    return r
+  }
+
+  private async onRequest(id: string, phoneName: string, phoneKey: string, deviceName: string) {
+    if (!this.saved.enabled || this.saved.pairings[id] || !/^[A-Za-z0-9_-]{43}$/.test(phoneKey))
+      return
+    // A newer request replaces one still open (the browser asked again).
+    if (this.request) void this.answerRequest(false)
+    const keys = newKeyPair()
+    this.saved.pairings[id] = {
+      secretKey: keys.secretKey,
+      publicKey: keys.publicKey,
+      deviceName,
+      code: null,
+      phoneKey,
+      phoneName: phoneName.slice(0, 64),
+      // Trusted once the user presses Allow here, after comparing the codes.
+      confirmed: false,
+      createdAt: this.now(),
+      out: 0
+    }
+    this.saved.deviceName = deviceName
+    await this.persist()
+    const r = await this.deps.api.relayRequestKey(id, keys.publicKey)
+    if (!r.ok) {
+      await this.forget(id)
+      return
+    }
+    this.request = {
+      id,
+      name: phoneName.slice(0, 64),
+      code: pairingCode(id, keys.publicKey, phoneKey),
+      expiresAt: this.now() + REQUEST_MS
+    }
+    this.requestTimer = setTimeout(() => {
+      if (this.request?.id === id) void this.answerRequest(false)
+    }, REQUEST_MS)
+    this.changed()
   }
 
   cancelPair(): void {
@@ -374,6 +444,7 @@ export class RelayHost {
     this.synced.delete(id)
     this.closeAll(id)
     if (this.pending?.id === id) this.pending = null
+    if (this.request?.id === id) this.request = null
     await this.persist()
     this.reconcile()
   }
@@ -407,6 +478,14 @@ export class RelayHost {
         this.changed()
         break
       }
+      case 'pairing.request':
+        void this.onRequest(
+          String(f.pairing),
+          String(f.phoneName),
+          String(f.phoneKey),
+          String(f.deviceName ?? '')
+        )
+        break
       case 'pairing.claimed': {
         const p = this.saved.pairings[String(f.pairing)]
         if (!p || p.phoneKey) break
@@ -618,7 +697,9 @@ export class RelayHost {
   private pushState(): void {
     if (!this.synced.size) return
     const s = this.deps.store.getState()
-    const msg = state(Object.values(this.saved.pairings)[0]?.deviceName ?? 'Wraithgrid', {
+    const device =
+      this.saved.deviceName || Object.values(this.saved.pairings)[0]?.deviceName || 'Wraithgrid'
+    const msg = state(device, {
       config: s.config,
       isChat: (paneId) => paneView(s.config, paneId) === 'chat',
       thread: (paneId) => this.deps.chat.thread(paneId),

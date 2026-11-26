@@ -14,7 +14,8 @@ const NO_VIEW: RelayView = {
   connected: false,
   error: null,
   pairings: [],
-  pending: null
+  pending: null,
+  request: null
 }
 const noop = (): (() => void) => () => undefined
 
@@ -198,6 +199,58 @@ function PairDialog({
       <div className="dlg-ft">
         <button type="button" className="btn pri" onClick={onClose}>
           {claimed ? 'Done' : 'Close'}
+        </button>
+      </div>
+    </Dialog>
+  )
+}
+
+/**
+ * One-click pairing, app-wide: a browser signed in to this account asks to use this computer.
+ * Allow only when the browser shows the same code (then the server passed both keys unchanged).
+ */
+export function RelayRequestDialog() {
+  const { relay } = useServices()
+  const view = useRelay(relay)
+  const [busy, setBusy] = useState(false)
+  const req = view.request
+  if (!relay || !req) return null
+  const answer = async (allow: boolean): Promise<void> => {
+    setBusy(true)
+    await relay.answerRequest(allow)
+    setBusy(false)
+  }
+  return (
+    <Dialog onClose={() => void answer(false)} labelledBy="relay-req-t" role="alertdialog">
+      <div className="dlg-hd">
+        <h2 id="relay-req-t">Allow a browser to use this computer?</h2>
+      </div>
+      <div className="dlg-bd relay-req">
+        <p>
+          <b>{req.name}</b>, signed in to your Wraithgrid account, asks to work on this computer’s
+          projects: read and send chats, start chats and clone repositories.
+        </p>
+        <p className="ex">Allow only if the browser shows this same code:</p>
+        <p className="relay-code" aria-label={`Code ${req.code}`}>
+          {req.code}
+        </p>
+        <p className="hint">
+          Tool approvals stay on this computer. You can remove it later in Settings → General → Web
+          access.
+        </p>
+      </div>
+      <div className="dlg-ft">
+        <button type="button" className="btn gh" disabled={busy} onClick={() => void answer(false)}>
+          Deny
+        </button>
+        <button
+          type="button"
+          className="btn pri"
+          disabled={busy}
+          onClick={() => void answer(true)}
+          data-autofocus
+        >
+          Allow
         </button>
       </div>
     </Dialog>

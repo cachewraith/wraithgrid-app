@@ -122,14 +122,17 @@ fn rotate(app: &AppHandle) {
     let Some(token) = cloud.token() else { return };
     match cloud.client.refresh(&token) {
         Ok((fresh, expires_at)) => {
-            let user = cloud.client.me(&fresh).ok();
-            cloud.update_if(&token, |s| {
-                s.token = fresh;
+            // Keep the new token before anything else: the old one only lasts a short grace on
+            // the server, and a request that fails with it must not find it still current.
+            let kept = cloud.update_if(&token, |s| {
+                s.token = fresh.clone();
                 s.expires_at = expires_at;
-                if let Some(u) = user {
-                    s.user = u;
-                }
             });
+            if kept {
+                if let Ok(user) = cloud.client.me(&fresh) {
+                    cloud.update_if(&fresh, |s| s.user = user);
+                }
+            }
             changed(app);
         }
         Err(e) if e.is_signed_out() => {
@@ -406,6 +409,28 @@ pub async fn handle(
                 return Some(Ok(super::fail("No such pairing.")));
             }
             authed(app, move |c, t| c.relay_unpair(t, &id).map(|_| Value::Null)).await
+        }
+        "cloud:relayRequestKey" | "cloud:relayRequestAnswer" => {
+            let id = text(&payload, "id");
+            if !id.starts_with("pair_") || id.len() > 100 {
+                return Some(Ok(super::fail("No such pairing.")));
+            }
+            if channel == "cloud:relayRequestKey" {
+                let key = text(&payload, "desktopKey");
+                authed(app, move |c, t| {
+                    c.relay_request_key(t, &id, &key).map(|_| Value::Null)
+                })
+                .await
+            } else {
+                let allow = payload
+                    .get("allow")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                authed(app, move |c, t| {
+                    c.relay_request_answer(t, &id, allow).map(|_| Value::Null)
+                })
+                .await
+            }
         }
         "cloud:relayLoad" => match std::fs::read_to_string(relay_file()) {
             Ok(text) => serde_json::from_str(&text).unwrap_or(Value::Null),

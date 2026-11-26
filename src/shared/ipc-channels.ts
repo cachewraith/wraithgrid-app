@@ -108,6 +108,8 @@ export const IPC = {
   cloudRelayUnpair: 'cloud:relayUnpair',
   cloudRelayLoad: 'cloud:relayLoad',
   cloudRelaySave: 'cloud:relaySave',
+  cloudRelayRequestKey: 'cloud:relayRequestKey',
+  cloudRelayRequestAnswer: 'cloud:relayRequestAnswer',
   relayConnect: 'relay:connect',
   relaySend: 'relay:send',
   relayClose: 'relay:close',

@@ -300,7 +300,9 @@ const api: WraithApi = {
     relayClose: (gen) => call(IPC.relayClose, { gen }),
     onRelay: (cb) => subscribe<RelayEvent>(IPC.relayEvent, cb),
     relayLoad: () => call(IPC.cloudRelayLoad, {}),
-    relaySave: (data) => call(IPC.cloudRelaySave, { data })
+    relaySave: (data) => call(IPC.cloudRelaySave, { data }),
+    relayRequestKey: (id, desktopKey) => call(IPC.cloudRelayRequestKey, { id, desktopKey }),
+    relayRequestAnswer: (id, allow) => call(IPC.cloudRelayRequestAnswer, { id, allow })
   }
 }
 
