@@ -292,6 +292,39 @@ describe('RelayHost', () => {
     })
   })
 
+  it('sends the CLI’s commands once it has said them, and only when they change', async () => {
+    const t = setup()
+    const { say, heard } = await paired(t)
+    say({ kind: 'chat.open', paneId: 'p1' })
+    await tick()
+    expect(heard().at(-1)).not.toHaveProperty('commands')
+
+    const items = [{ kind: 'user' as const, id: 'u1', text: 'hello', images: 0 }]
+    const commands = [
+      { name: 'review', description: 'Review a PR', argumentHint: '', aliases: [], builtin: false }
+    ]
+    t.setThread({ ...EMPTY_THREAD, items, commands })
+    await tick(20)
+    expect(heard().at(-1)).toEqual({
+      kind: 'chat.update',
+      paneId: 'p1',
+      items: [],
+      busy: false,
+      commands: [
+        { name: 'review', description: 'Review a PR', hint: '', sigil: '/', builtin: false }
+      ]
+    })
+
+    const before = heard().length
+    t.setThread({ ...EMPTY_THREAD, items, commands, busy: true })
+    await tick(20)
+    expect(
+      heard()
+        .slice(before)
+        .some((m) => 'commands' in m)
+    ).toBe(false)
+  })
+
   it('drops a frame the server replays', async () => {
     const t = setup()
     const { heard, raw } = await paired(t)

@@ -3,10 +3,12 @@
 // message fits one sealed frame. Pure, so it is unit-tested.
 import type { Config } from '@shared/types'
 import { AGENT_CLI_SPECS } from '@shared/agent-clis'
+import { DEFAULT_PROJECT_ICON, PROJECT_ICON_ID } from '@shared/project-icons'
 import { PLAINTEXT_MAX } from '@shared/relay/crypto'
-import type { WireChat, WireItem, WireProject, ToWeb } from '@shared/relay/messages'
+import type { WireChat, WireCommand, WireItem, WireProject, ToWeb } from '@shared/relay/messages'
 import type { ChatItem, ChatThread } from '../chat-thread'
 import { pendingApproval } from '../chat-thread'
+import { buildSlashItems } from '../slash'
 import { projectFolder } from '../team'
 
 /** Item text past this is cut (a frame is 64 KiB; 4 bytes per character at worst). */
@@ -15,6 +17,10 @@ export const ITEM_TEXT_CAP = 12_000
 const FRAME_BUDGET = PLAINTEXT_MAX - 256
 /** Items a snapshot starts from (newest); older ones are left for the desktop. */
 export const SNAPSHOT_ITEMS = 120
+/** At most this much of a frame goes to the CLI's commands; the rest is left out. */
+export const COMMANDS_BUDGET = 16_000
+/** A command's description past this is cut. */
+const COMMAND_TEXT_CAP = 160
 
 const bytes = (v: unknown): number => new TextEncoder().encode(JSON.stringify(v)).length
 
@@ -66,9 +72,43 @@ export function wireItem(it: ChatItem): WireItem {
   }
 }
 
+const commandMemo = new WeakMap<ChatThread['commands'], { term: string; out: WireCommand[] }>()
+
+/**
+ * The CLI's commands for the web's `/` menu: what the desktop's own menu lists from the CLI
+ * (buildSlashItems, without the terminal-only ones and Wraithgrid's own), cut to fit
+ * COMMANDS_BUDGET. Memoised per command list, as flushes run on every streamed token.
+ */
+export function wireCommands(thread: Pick<ChatThread, 'commands' | 'terminalOnly'>): WireCommand[] {
+  const term = thread.terminalOnly.join(' ')
+  const hit = commandMemo.get(thread.commands)
+  if (hit && hit.term === term) return hit.out
+  const out: WireCommand[] = []
+  let size = 2
+  for (const c of buildSlashItems(thread.commands, thread.terminalOnly)) {
+    if (c.group === 'app' || c.sigil === '@' || out.length >= 200) continue
+    const w: WireCommand = {
+      name: c.name.slice(0, 100),
+      description:
+        c.description.length > COMMAND_TEXT_CAP
+          ? `${c.description.slice(0, COMMAND_TEXT_CAP - 1)}…`
+          : c.description,
+      hint: c.argumentHint.slice(0, 100),
+      sigil: c.sigil === '$' ? '$' : '/',
+      builtin: c.group === 'builtin'
+    }
+    const s = bytes(w) + 1
+    if (size + s > COMMANDS_BUDGET) break
+    size += s
+    out.push(w)
+  }
+  commandMemo.set(thread.commands, { term, out })
+  return out
+}
+
 /**
  * A chat's snapshot: its newest items that fit one frame, oldest first. `more` when older
- * ones were left out.
+ * ones were left out. The CLI's commands come along once it has said them.
  */
 export function snapshot(
   paneId: string,
@@ -76,7 +116,15 @@ export function snapshot(
 ): Extract<ToWeb, { kind: 'chat.snapshot' }> {
   const all = thread.items
   const items: WireItem[] = []
-  let size = bytes({ kind: 'chat.snapshot', paneId, items: [], busy: thread.busy, more: true })
+  const commands = wireCommands(thread)
+  let size = bytes({
+    kind: 'chat.snapshot',
+    paneId,
+    items: [],
+    busy: thread.busy,
+    more: true,
+    ...(commands.length ? { commands } : {})
+  })
   for (let i = all.length - 1; i >= 0 && items.length < SNAPSHOT_ITEMS; i--) {
     const w = wireItem(all[i]!)
     const s = bytes(w) + 1
@@ -89,7 +137,8 @@ export function snapshot(
     paneId,
     items,
     busy: thread.busy,
-    more: items.length < all.length
+    more: items.length < all.length,
+    ...(commands.length ? { commands } : {})
   }
 }
 
@@ -165,6 +214,7 @@ export function state(device: string, s: StateInput): Extract<ToWeb, { kind: 'st
     name: ws.name.slice(0, 100),
     folder: projectFolder(ws)?.slice(0, 4096) ?? null,
     canChat: !ws.machineId && !!projectFolder(ws) && !!newChatAccount(s.config, ws.id),
+    ...(PROJECT_ICON_ID.test(ws.icon) && ws.icon !== DEFAULT_PROJECT_ICON ? { icon: ws.icon } : {}),
     chats: ws.panes
       .filter((p) => s.isChat(p.id))
       .slice(0, 200)
