@@ -18,6 +18,7 @@ import {
   type WirePreview,
   type WireProject,
   type WireSettings,
+  type WireTask,
   type ToWeb
 } from '@shared/relay/messages'
 import type { ChatItem, ChatThread } from '../chat-thread'
@@ -210,17 +211,33 @@ export function wireCommands(thread: Pick<ChatThread, 'commands' | 'terminalOnly
  * A chat's snapshot: its newest items that fit one frame, oldest first. `more` when older
  * ones were left out. The CLI's commands come along once it has said them.
  */
+/** Work still running after its turn, as the web shows it: ages, not this clock's times. */
+export function wireBackground(thread: ChatThread, now: number): WireTask[] {
+  return thread.background.slice(0, 20).map((t) => ({
+    id: t.id.slice(0, 200),
+    kind: t.kind,
+    label: t.label.slice(0, 300),
+    ms: Math.min(Math.max(0, Math.round(now - t.since)), 30 * 24 * 3600_000)
+  }))
+}
+
+/** What tells one background list from another (not the ages, which change every tick). */
+export const backgroundKey = (thread: ChatThread): string =>
+  JSON.stringify(thread.background.slice(0, 20).map((t) => [t.id, t.kind, t.label]))
+
 export function snapshot(
   paneId: string,
   thread: ChatThread,
-  settings?: WireSettings | null
+  settings?: WireSettings | null,
+  now = Date.now()
 ): Extract<ToWeb, { kind: 'chat.snapshot' }> {
   const all = thread.items
   const items: WireItem[] = []
   const commands = wireCommands(thread)
   const extra = {
     ...(commands.length ? { commands } : {}),
-    ...(settings ? { settings } : {})
+    ...(settings ? { settings } : {}),
+    background: wireBackground(thread, now)
   }
   let size = bytes({
     kind: 'chat.snapshot',
@@ -356,7 +373,8 @@ export function state(device: string, s: StateInput): Extract<ToWeb, { kind: 'st
           account: (a?.name ?? '').slice(0, 100),
           busy: t.busy,
           waiting: pendingApproval(t) !== null,
-          activeAt: s.activeAt(p.id)
+          activeAt: s.activeAt(p.id),
+          ...(!t.busy && t.background.length ? { background: true } : {})
         }
       })
   }))

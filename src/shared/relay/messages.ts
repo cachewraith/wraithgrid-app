@@ -29,7 +29,7 @@ export const THUMB_URL = /^data:image\/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/
 
 /**
  * What a paired desktop can do beyond 2.5.0, in `state.features`; the web app offers a control
- * only when its desktop lists it. `icons`, `commands`: 2.5.2. `thumbs`: 2.5.4. The rest: 2.5.3.
+ * only when its desktop lists it. `icons`, `commands`: 2.5.2. `thumbs`, `background`: 2.5.4. The rest: 2.5.3.
  */
 export const RELAY_FEATURES = [
   'icons',
@@ -38,7 +38,8 @@ export const RELAY_FEATURES = [
   'settings',
   'images',
   'preview',
-  'thumbs'
+  'thumbs',
+  'background'
 ] as const
 export type RelayFeature = (typeof RELAY_FEATURES)[number]
 
@@ -59,6 +60,20 @@ export const WirePreview = z.discriminatedUnion('type', [
   })
 ])
 export type WirePreview = z.infer<typeof WirePreview>
+
+/** Work the agent left running after its turn: a command, an agent. 2.5.4+ */
+export const WireTask = z.object({
+  id: Id,
+  kind: z.enum(['shell', 'agent', 'other']),
+  label: z.string().max(300),
+  /** How long it had been running when sent (ms); the web counts on from there. */
+  ms: z
+    .number()
+    .int()
+    .min(0)
+    .max(30 * 24 * 3600_000)
+})
+export type WireTask = z.infer<typeof WireTask>
 
 /** One of claude's AskUserQuestion questions, waiting for `chat.answer`. 2.5.3+ */
 export const WireQuestion = z.object({
@@ -131,7 +146,9 @@ export const WireChat = z.object({
   busy: z.boolean(),
   /** A tool call waits for approval on the desktop. */
   waiting: z.boolean(),
-  activeAt: z.number().nullable()
+  activeAt: z.number().nullable(),
+  /** Not busy, but work it started is still running (`chat.*.background`). 2.5.4+ */
+  background: z.boolean().optional()
 })
 export type WireChat = z.infer<typeof WireChat>
 
@@ -270,7 +287,9 @@ export const ToWeb = z.discriminatedUnion('kind', [
     /** The CLI's commands, once it has said (2.5.2+; older desktops leave it out). */
     commands: z.array(WireCommand).max(200).optional(),
     /** Model, effort and mode, and what the web may pick (2.5.3+). */
-    settings: WireSettings.optional()
+    settings: WireSettings.optional(),
+    /** Work still running after its turn, the whole list (2.5.4+; older desktops leave it out). */
+    background: z.array(WireTask).max(20).optional()
   }),
   /** Items that are new or changed since the last snapshot/update, by `id`. */
   z.object({
@@ -281,7 +300,9 @@ export const ToWeb = z.discriminatedUnion('kind', [
     /** Sent when the CLI's commands changed since the snapshot or the last update. */
     commands: z.array(WireCommand).max(200).optional(),
     /** Sent when the settings (or what may be picked) changed. */
-    settings: WireSettings.optional()
+    settings: WireSettings.optional(),
+    /** Sent when the background work changed: the whole list, [] when it all ended. */
+    background: z.array(WireTask).max(20).optional()
   }),
   z.object({
     kind: z.literal('ack'),

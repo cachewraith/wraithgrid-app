@@ -2,11 +2,12 @@
 
 *v2.5.4 · 2026-11-27*
 
-Images you sent in a chat, pasted here or attached in the browser, now show up in the web app's chat too, not just as "1 image".
+Images you sent in a chat, pasted here or attached in the browser, now show up in the web app's chat too, not just as "1 image". And work left running in the background shows there as well.
 
 | New | What it does |
 |---|---|
 | See sent images on the web | A message's images show as tiles in the browser, the same thumbnails as here. Tap one to open it full screen; on a computer, the arrow keys move between them |
+| Background work on the web | When Claude leaves a command or an agent running after its turn, the browser shows the same "Running in background" box as here, with how long each has been going, and the chat list says "background" |
 
 ---
 
