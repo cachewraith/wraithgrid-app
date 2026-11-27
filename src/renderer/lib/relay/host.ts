@@ -200,6 +200,8 @@ export class RelayHost {
   private seq = 0
   private retry = 0
   private retryTimer: ReturnType<typeof setTimeout> | null = null
+  /** A connect is waiting for main's socket: a second one would race it (see `connect`). */
+  private connecting = false
   private stateTimer: ReturnType<typeof setInterval> | null = null
   private saveTimer: ReturnType<typeof setTimeout> | null = null
   private online = new Set<string>()
@@ -281,7 +283,7 @@ export class RelayHost {
   private reconcile(): void {
     // Connected whenever web access is on, so a browser can ask to pair with one click.
     const want = this.loaded && this.signedIn && this.saved.enabled
-    if (want && !this.ws && !this.retryTimer) void this.connect()
+    if (want && !this.ws && !this.retryTimer && !this.connecting) void this.connect()
     if (!want) this.disconnect()
     this.changed()
   }
@@ -295,7 +297,22 @@ export class RelayHost {
 
   private async connect(): Promise<void> {
     this.retryTimer = null
-    const ws = await this.openSocket()
+    // One at a time: two overlapping connects could resolve out of order and leave `this.ws` on
+    // the older socket, whose events are never delivered (it never opens or closes), so the
+    // desktop would stay offline for good.
+    this.connecting = true
+    let ws: Socket | { error: string }
+    try {
+      ws = await this.openSocket()
+    } catch (e) {
+      ws = { error: e instanceof Error ? e.message : String(e) }
+    } finally {
+      this.connecting = false
+    }
+    if (!this.loaded || !this.signedIn || !this.saved.enabled) {
+      if (!('error' in ws)) ws.close()
+      return
+    }
     if ('error' in ws) {
       this.error = ws.error
       this.changed()
@@ -327,6 +344,27 @@ export class RelayHost {
       this.retryTimer = null
       this.reconcile()
     }, wait)
+  }
+
+  /**
+   * The network is back or the computer woke from sleep: reconnect now instead of waiting out
+   * the backoff, and replace a socket that may have died while asleep (the server dropped it
+   * and told the browsers this computer is offline; main's ping would notice only later).
+   */
+  wake(): void {
+    if (!this.loaded || !this.signedIn || !this.saved.enabled) return
+    if (this.retryTimer) clearTimeout(this.retryTimer)
+    this.retryTimer = null
+    this.retry = 0
+    const ws = this.ws
+    if (ws) {
+      this.ws = null
+      ws.close()
+      this.online.clear()
+      this.synced.clear()
+      this.clearSubs()
+    }
+    this.reconcile()
   }
 
   private disconnect(): void {

@@ -45,6 +45,18 @@ const fontsReady = Promise.all(
   )
 ).catch(() => undefined)
 
+if (relay) {
+  // Back online, or awake after sleep (a timer that fired far too late): reconnect web access now.
+  window.addEventListener('online', () => relay.wake())
+  let tick = Date.now()
+  setInterval(() => {
+    const now = Date.now()
+    // Hidden windows' timers may be throttled to about a minute; a longer gap means sleep.
+    if (now - tick > 150_000) relay.wake()
+    tick = now
+  }, 20_000)
+}
+
 void Promise.all([fontsReady, store.getState().init()]).then(() => {
   void relay?.start()
   createRoot(document.getElementById('root')!).render(

@@ -11,7 +11,7 @@ import { EMPTY_THREAD, type ChatThread } from '../../src/renderer/lib/chat-threa
 
 const PAIR = 'pair_test1'
 
-function setup() {
+function setup(openSocket?: () => Promise<unknown>) {
   const pane = {
     id: 'p1',
     accountId: 'a1',
@@ -146,7 +146,7 @@ function setup() {
     api,
     store: store as never,
     chat: chat as never,
-    openSocket: async () => sock as never,
+    openSocket: (openSocket ?? (async () => sock)) as never,
     timers: { state: 10_000, flush: 1, startWait: 1000 }
   })
   return {
@@ -672,5 +672,60 @@ describe('RelayHost', () => {
     expect(t.requestAnswer).toHaveBeenCalledWith('pair_req2', false)
     expect(t.host.getView().request).toBeNull()
     expect((t.saved() as { pairings: object }).pairings).toEqual({})
+  })
+
+  it('never runs two connects at once (a late older socket would leave it offline for good)', async () => {
+    let calls = 0
+    let resolve: (s: unknown) => void = () => undefined
+    const t = setup(
+      () =>
+        new Promise((r) => {
+          calls++
+          resolve = r
+        })
+    )
+    await t.host.start()
+    // Things that reconcile while the first connect still waits for main's socket.
+    await t.host.setEnabled(true)
+    await t.host.pair()
+    expect(calls).toBe(1)
+    resolve(t.sock)
+    await tick()
+    t.sock.onopen?.({} as Event)
+    expect(t.sent[0]).toEqual({ t: 'hello', v: [1] })
+  })
+
+  it('retries when opening the socket throws', async () => {
+    vi.useFakeTimers()
+    try {
+      let calls = 0
+      const t = setup(async () => {
+        if (++calls === 1) throw new Error('ipc down')
+        return t.sock
+      })
+      await t.host.start()
+      await vi.advanceTimersByTimeAsync(1100)
+      expect(calls).toBe(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('wake() replaces a socket that may have died in sleep and reconnects at once', async () => {
+    let calls = 0
+    const socks: { close: ReturnType<typeof vi.fn> }[] = []
+    const t = setup(async () => {
+      calls++
+      const s = { ...t.sock, close: vi.fn() }
+      socks.push(s)
+      return s
+    })
+    await t.host.start()
+    await tick()
+    expect(calls).toBe(1)
+    t.host.wake()
+    await tick()
+    expect(socks[0]!.close).toHaveBeenCalled()
+    expect(calls).toBe(2)
   })
 })

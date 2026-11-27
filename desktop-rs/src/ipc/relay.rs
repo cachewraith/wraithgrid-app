@@ -6,15 +6,27 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 use tokio::sync::mpsc;
+use tokio::time::{interval_at, timeout, Instant, MissedTickBehavior};
 use tokio_tungstenite::tungstenite::Message;
 
 /// One frame at most (the server's own cap is 64 KiB of ciphertext, base64 inside JSON).
 const FRAME_MAX: usize = 256 * 1024;
+/// A connect that hasn't finished by then (black-holed network, captive portal) is given up.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+/// We ping this often. It keeps NAT/proxy idle timers from silently dropping the link and gives
+/// the server's idle timeout (120 s) traffic, and its pong proves the link is alive.
+const PING_EVERY: Duration = Duration::from_secs(25);
+/// Nothing at all received for this long (not even a pong): the link is dead (sleep/wake, a
+/// network change leave the TCP connection half-open, and a read would wait forever). The
+/// socket is dropped so the renderer reconnects, instead of looking connected while the server
+/// has long told the browser this computer is offline.
+const DEAD_AFTER: Duration = Duration::from_secs(70);
 
 #[derive(Default)]
 pub struct Relay {
@@ -56,27 +68,49 @@ pub async fn handle(
             *relay.out.lock().unwrap() = Some((gen, tx));
             let app = app.clone();
             tauri::async_runtime::spawn(async move {
-                let (ws, _) = match tokio_tungstenite::connect_async(url.as_str()).await {
-                    Ok(ok) => ok,
-                    Err(e) => {
+                let connect = tokio_tungstenite::connect_async(url.as_str());
+                let (ws, _) = match timeout(CONNECT_TIMEOUT, connect).await {
+                    Ok(Ok(ok)) => ok,
+                    Ok(Err(e)) => {
                         eprintln!("wraithgrid: relay connect failed: {e}");
                         return event(&app, gen, "closed", json!({ "error": e.to_string() }));
+                    }
+                    Err(_) => {
+                        eprintln!("wraithgrid: relay connect timed out");
+                        let error = "Connecting to Wraithgrid timed out.";
+                        return event(&app, gen, "closed", json!({ "error": error }));
                     }
                 };
                 event(&app, gen, "open", json!({}));
                 let (mut write, mut read) = ws.split();
+                let mut ping = interval_at(Instant::now() + PING_EVERY, PING_EVERY);
+                ping.set_missed_tick_behavior(MissedTickBehavior::Delay);
+                let mut heard = Instant::now();
                 loop {
                     tokio::select! {
                         msg = read.next() => match msg {
                             Some(Ok(Message::Text(text))) if text.len() <= FRAME_MAX => {
+                                heard = Instant::now();
                                 event(&app, gen, "frame", json!({ "text": text.as_str() }));
                             }
                             Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
-                            Some(Ok(_)) => {}
+                            // Pings, pongs: tungstenite answers the server's pings itself.
+                            Some(Ok(_)) => heard = Instant::now(),
+                        },
+                        _ = ping.tick() => {
+                            if heard.elapsed() >= DEAD_AFTER {
+                                eprintln!("wraithgrid: relay link silent, reconnecting");
+                                break;
+                            }
+                            let ping = Message::Ping(Vec::new().into());
+                            if timeout(PING_EVERY, write.send(ping)).await.map_or(true, |r| r.is_err()) {
+                                break;
+                            }
                         },
                         out = rx.recv() => match out {
                             Some(text) => {
-                                if write.send(Message::text(text)).await.is_err() {
+                                let sent = timeout(DEAD_AFTER, write.send(Message::text(text))).await;
+                                if sent.map_or(true, |r| r.is_err()) {
                                     break;
                                 }
                             }
