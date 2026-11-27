@@ -7,8 +7,11 @@ import { AGENT_CLI_SPECS } from '@shared/agent-clis'
 import { DEFAULT_PROJECT_ICON, PROJECT_ICON_ID } from '@shared/project-icons'
 import { PLAINTEXT_MAX } from '@shared/relay/crypto'
 import {
+  IMAGE_CHUNK,
   PREVIEW_MAX,
   RELAY_FEATURES,
+  THUMB_PARTS_MAX,
+  THUMB_URL,
   type WireChat,
   type WireCommand,
   type WireItem,
@@ -70,15 +73,51 @@ export function wirePreview(p: ToolPreview): WirePreview {
 /** An item over this many bytes drops its details, so it still fits one frame. */
 const ITEM_BUDGET = FRAME_BUDGET - 2048
 
+/** A sent message's thumbnails the web can be sent: data URLs of an image kind. */
+export const wireThumbs = (thumbs: string[] | undefined): string[] =>
+  (thumbs ?? []).filter((t) => THUMB_URL.test(t)).slice(0, 20)
+
+/**
+ * A user message's thumbnails as `chat.thumb` frames, each data URL cut in IMAGE_CHUNK pieces;
+ * one that isn't a data URL of an image kind, or needs over THUMB_PARTS_MAX frames, is left out
+ * (the others keep their index).
+ */
+export function thumbFrames(
+  paneId: string,
+  item: string,
+  thumbs: string[]
+): Extract<ToWeb, { kind: 'chat.thumb' }>[] {
+  const frames: Extract<ToWeb, { kind: 'chat.thumb' }>[] = []
+  thumbs.slice(0, 20).forEach((url, index) => {
+    if (!THUMB_URL.test(url)) return
+    const parts = Math.ceil(url.length / IMAGE_CHUNK)
+    if (parts > THUMB_PARTS_MAX) return
+    for (let part = 0; part < parts; part++)
+      frames.push({
+        kind: 'chat.thumb',
+        paneId,
+        item,
+        index,
+        part,
+        parts,
+        data: url.slice(part * IMAGE_CHUNK, (part + 1) * IMAGE_CHUNK)
+      })
+  })
+  return frames
+}
+
 export function wireItem(it: ChatItem): WireItem {
   switch (it.kind) {
-    case 'user':
+    case 'user': {
+      const thumbs = wireThumbs(it.thumbs).length
       return {
         id: it.id,
         kind: 'user',
         ...cap(it.text, false),
-        ...(it.images ? { images: Math.min(it.images, 20) } : {})
+        ...(it.images ? { images: Math.min(it.images, 20) } : {}),
+        ...(thumbs ? { thumbs } : {})
       }
+    }
     case 'assistant':
       return { id: it.id, kind: 'assistant', ...cap(it.text, false) }
     case 'thinking':

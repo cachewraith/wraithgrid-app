@@ -473,6 +473,38 @@ describe('RelayHost', () => {
     expect(heard().at(-1)).toMatchObject({ kind: 'ack', req: 's3', ok: false })
   })
 
+  it('sends a sent message’s thumbnails to a browser that has its chat open', async () => {
+    const t = setup()
+    const { say, heard } = await paired(t)
+    const thumb = `data:image/webp;base64,${'Q'.repeat(100)}`
+    t.setThread({
+      ...EMPTY_THREAD,
+      items: [{ kind: 'user', id: 'u1', text: 'look', images: 1, thumbs: [thumb] }]
+    })
+    // heard() gives only what came since it was last called.
+    const got: ToWeb[] = []
+    const thumbs = (): ToWeb[] => (got.push(...heard()), got.filter((m) => m.kind === 'chat.thumb'))
+    // Not open yet: nothing.
+    say({ kind: 'chat.thumbs', paneId: 'p1', item: 'u1' })
+    await tick(20)
+    expect(thumbs()).toHaveLength(0)
+    say({ kind: 'chat.open', paneId: 'p1' })
+    await tick(20)
+    thumbs()
+    const snap = got.find((m) => m.kind === 'chat.snapshot')
+    expect(snap?.kind === 'chat.snapshot' && snap.items[0]).toMatchObject({ images: 1, thumbs: 1 })
+    say({ kind: 'chat.thumbs', paneId: 'p1', item: 'u1' })
+    await tick(20)
+    expect(thumbs()).toEqual([
+      { kind: 'chat.thumb', paneId: 'p1', item: 'u1', index: 0, part: 0, parts: 1, data: thumb }
+    ])
+    // Asked again right away: not sent twice. An unknown item: nothing.
+    say({ kind: 'chat.thumbs', paneId: 'p1', item: 'u1' })
+    say({ kind: 'chat.thumbs', paneId: 'p1', item: 'nope' })
+    await tick(20)
+    expect(thumbs()).toHaveLength(1)
+  })
+
   it('drops a frame the server replays', async () => {
     const t = setup()
     const { heard, raw } = await paired(t)

@@ -38,9 +38,11 @@ import {
   newChatAccount,
   snapshot,
   state,
+  thumbFrames,
   updates,
   wireCommands,
-  wireSettings
+  wireSettings,
+  wireThumbs
 } from './wire'
 
 /** What main does for the relay (`cloud:relay*`). */
@@ -174,6 +176,8 @@ export interface HostDeps {
 const START_WAIT_MS = 20_000
 /** An image upload not finished (or not sent) within this is dropped. */
 const UPLOAD_MS = 3 * 60_000
+/** One message's thumbnails go out at most once in this long per pairing (`chat.thumbs`). */
+const THUMBS_MS = 2000
 /** Image uploads one browser may have going at once. */
 const UPLOADS_MAX = 8
 
@@ -211,6 +215,8 @@ export class RelayHost {
   private lastSettings = new Map<string, string>()
   /** pairing → its image uploads in progress (`chat.image`), by upload id. */
   private uploads = new Map<string, Map<string, Upload>>()
+  /** When each `${pairing} ${pane} ${item}`'s thumbnails were last sent. */
+  private thumbsSent = new Map<string, number>()
   private paneSubs = new Map<string, () => void>()
   private dirtyPanes = new Set<string>()
   private flushTimer: ReturnType<typeof setTimeout> | null = null
@@ -673,6 +679,8 @@ export class RelayHost {
       }
       case 'chat.image':
         return this.addImagePart(id, msg)
+      case 'chat.thumbs':
+        return this.sendThumbs(id, msg.paneId, msg.item)
       case 'chat.answer':
         return this.send(id, { kind: 'ack', req: msg.req, ...this.answer(msg) })
       case 'chat.set': {
@@ -918,6 +926,21 @@ export class RelayHost {
     u.size += msg.data.length
   }
 
+  /** A user message's thumbnails, to a pairing that has its chat open; not again within THUMBS_MS. */
+  private sendThumbs(id: string, paneId: string, item: string): void {
+    if (!this.open.get(id)?.has(paneId)) return
+    const it = this.deps.chat.thread(paneId).items.find((x) => x.id === item)
+    if (it?.kind !== 'user') return
+    const thumbs = wireThumbs(it.thumbs)
+    if (!thumbs.length) return
+    const now = this.now()
+    for (const [k, at] of this.thumbsSent) if (now - at > THUMBS_MS) this.thumbsSent.delete(k)
+    const key = `${id} ${paneId} ${item}`
+    if (this.thumbsSent.has(key)) return
+    this.thumbsSent.set(key, now)
+    for (const f of thumbFrames(paneId, item, thumbs)) this.send(id, f)
+  }
+
   /** The finished uploads a message names, as images (and forgotten); or why not. */
   private takeImages(
     id: string,
@@ -983,6 +1006,7 @@ export class RelayHost {
 
   private closeAll(id: string): void {
     this.uploads.delete(id)
+    for (const k of this.thumbsSent.keys()) if (k.startsWith(`${id} `)) this.thumbsSent.delete(k)
     const panes = [...(this.open.get(id)?.keys() ?? [])]
     this.open.delete(id)
     for (const paneId of panes) this.unwatchIdle(paneId)

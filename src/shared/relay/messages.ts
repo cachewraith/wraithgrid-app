@@ -22,10 +22,14 @@ export const IMAGE_PARTS_MAX = 150
 /** Images one message may carry (the desktop's own limit). */
 export const IMAGES_MAX = 4
 export const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'] as const
+/** Frames one thumbnail may take (`chat.thumb`, IMAGE_CHUNK characters each). */
+export const THUMB_PARTS_MAX = 24
+/** A sent message's thumbnail as the web shows it in an <img>: a base64 data URL of an image kind. */
+export const THUMB_URL = /^data:image\/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/]+={0,2}$/
 
 /**
  * What a paired desktop can do beyond 2.5.0, in `state.features`; the web app offers a control
- * only when its desktop lists it. `icons`, `commands`: 2.5.2. The rest: 2.5.3.
+ * only when its desktop lists it. `icons`, `commands`: 2.5.2. `thumbs`: 2.5.4. The rest: 2.5.3.
  */
 export const RELAY_FEATURES = [
   'icons',
@@ -33,7 +37,8 @@ export const RELAY_FEATURES = [
   'answer',
   'settings',
   'images',
-  'preview'
+  'preview',
+  'thumbs'
 ] as const
 export type RelayFeature = (typeof RELAY_FEATURES)[number]
 
@@ -86,7 +91,9 @@ export const WireItem = z.object({
   /** claude asks (AskUserQuestion) and waits: answer with `chat.answer {ask: id}` (2.5.3+). */
   ask: z.object({ id: Id, questions: z.array(WireQuestion).min(1).max(8) }).optional(),
   /** A user message's attached images, counted (2.5.3+). */
-  images: z.number().int().min(0).max(20).optional()
+  images: z.number().int().min(0).max(20).optional(),
+  /** Thumbnails the desktop has of them, sent on `chat.thumbs` (2.5.4+). */
+  thumbs: z.number().int().min(0).max(20).optional()
 })
 export type WireItem = z.infer<typeof WireItem>
 
@@ -236,7 +243,9 @@ export const ToDesktop = z.discriminatedUnion('kind', [
     .refine(
       (m) => [m.model, m.effort, m.mode].filter((v) => v !== undefined).length === 1,
       'One setting at a time'
-    )
+    ),
+  /** Send this open chat's user message's thumbnails as `chat.thumb` frames. 2.5.4+ */
+  z.object({ kind: z.literal('chat.thumbs'), paneId: Id, item: Id })
 ])
 export type ToDesktop = z.infer<typeof ToDesktop>
 
@@ -283,7 +292,26 @@ export const ToWeb = z.discriminatedUnion('kind', [
     paneId: Id.optional()
   }),
   /** The chat is gone (closed or deleted on the desktop). */
-  z.object({ kind: z.literal('chat.gone'), paneId: Id })
+  z.object({ kind: z.literal('chat.gone'), paneId: Id }),
+  /**
+   * One frame of a user message's thumbnail `index` (`WireItem.thumbs`): its data URL, cut in
+   * IMAGE_CHUNK pieces. Joined, the parts must match THUMB_URL. 2.5.4+
+   */
+  z
+    .object({
+      kind: z.literal('chat.thumb'),
+      paneId: Id,
+      item: Id,
+      index: z.number().int().min(0).max(19),
+      part: z
+        .number()
+        .int()
+        .min(0)
+        .max(THUMB_PARTS_MAX - 1),
+      parts: z.number().int().min(1).max(THUMB_PARTS_MAX),
+      data: z.string().min(1).max(IMAGE_CHUNK)
+    })
+    .refine((m) => m.part < m.parts, 'A part past the end')
 ])
 export type ToWeb = z.infer<typeof ToWeb>
 
