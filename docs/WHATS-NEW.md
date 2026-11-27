@@ -1,4 +1,16 @@
-# What's new in 2.6.0: talk to type
+# What's new in 2.6.1: voice typing fixed
+
+*v2.6.1 · 2026-11-27*
+
+In 2.6.0, clicking the mic closed the app on many computers. Voice typing now works as it should.
+
+| Fix | What changed |
+|---|---|
+| The app closed when voice typing started | On most laptop and desktop processors, the app quit as soon as you clicked the mic (the speech engine was built for a newer kind of processor). It now runs on any processor from about 2013 on, and an older one gets a message instead |
+
+---
+
+## Previously, in 2.6.0: talk to type
 
 *v2.6.0 · 2026-11-27*
 

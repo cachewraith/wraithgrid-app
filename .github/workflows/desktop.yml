@@ -101,6 +101,16 @@ jobs:
         run: |
           cargo build --release --locked --manifest-path host-rs/Cargo.toml
           cargo build --release --locked --manifest-path desktop-rs/Cargo.toml
+      # 2.6.0 shipped whisper.cpp tuned for the runner's CPU and crashed on CPUs without AVX-512
+      # (.cargo/config.toml now builds a fixed baseline): fail if ggml has AVX-512 code again. (The
+      # app's other AVX-512, crc32fast's, runs only after a CPU check.)
+      - name: No AVX-512 in whisper.cpp
+        shell: bash
+        run: |
+          lib=$(ls desktop-rs/target/release/build/whisper-rs-sys-*/out/lib/libggml-cpu.a | head -1)
+          n=$(objdump -d --no-show-raw-insn "$lib" | grep -cE '%zmm[0-9]' || true)
+          echo "$lib: $n AVX-512 instructions"
+          test "$n" -eq 0
       - name: Package
         env:
           APPIMAGE_EXTRACT_AND_RUN: '1'

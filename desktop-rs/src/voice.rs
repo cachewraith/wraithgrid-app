@@ -284,8 +284,30 @@ pub struct Engine {
     ctx: Mutex<Option<Arc<WhisperContext>>>,
 }
 
+/// whisper.cpp is built for this x86-64 baseline (.cargo/config.toml: GGML_NATIVE=OFF); on an
+/// older CPU its code would crash the app with an illegal instruction, so it's never loaded there.
+pub fn cpu_supported() -> Result<(), String> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let ok = is_x86_feature_detected!("sse4.2")
+            && is_x86_feature_detected!("avx")
+            && is_x86_feature_detected!("avx2")
+            && is_x86_feature_detected!("fma")
+            && is_x86_feature_detected!("f16c")
+            && is_x86_feature_detected!("bmi2");
+        if !ok {
+            return Err(
+                "Voice typing needs a processor with AVX2 (most from 2013 on); this one doesn't have it."
+                    .into(),
+            );
+        }
+    }
+    Ok(())
+}
+
 impl Engine {
     fn context(&self) -> Result<Arc<WhisperContext>, String> {
+        cpu_supported()?;
         let mut slot = self.ctx.lock().unwrap();
         if let Some(c) = slot.as_ref() {
             return Ok(c.clone());
@@ -406,7 +428,7 @@ mod tests {
         assert_eq!(e.transcribe(&[0.5; 100]).unwrap(), "");
     }
 
-    /// Downloads the real model (into `$HOME/.wraithgrid/models`, run with a throwaway HOME) and
+    /// Downloads the real model if missing (into `$HOME/.wraithgrid/models`) and
     /// transcribes a 16-bit mono WAV: `WG_VOICE_WAV=jfk.wav HOME=$(mktemp -d) cargo test
     /// --no-default-features voice::tests::live -- --ignored --nocapture`.
     #[test]
@@ -421,9 +443,12 @@ mod tests {
             .iter()
             .map(|b| i16::from_le_bytes(*b) as f32 / 32768.0)
             .collect();
-        let mut calls = 0;
-        download_model(&AtomicBool::new(false), |_, _| calls += 1).unwrap();
-        assert!(model_ready() && calls > 0);
+        if !model_ready() {
+            let mut calls = 0;
+            download_model(&AtomicBool::new(false), |_, _| calls += 1).unwrap();
+            assert!(calls > 0);
+        }
+        assert!(model_ready());
         let t = Instant::now();
         let text = Engine::default()
             .transcribe(&resample(&pcm, rate, RATE))
@@ -447,6 +472,11 @@ mod tests {
         let n = levels.lock().unwrap().len();
         eprintln!("{} samples at 16 kHz, {n} level events", audio.len());
         assert!(audio.len() > RATE as usize && n >= 10);
+    }
+
+    #[test]
+    fn this_cpu_runs_whisper() {
+        assert_eq!(cpu_supported(), Ok(()));
     }
 
     #[test]
