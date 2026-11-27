@@ -16,6 +16,8 @@ import {
   state,
   thumbFrames,
   updates,
+  backgroundKey,
+  wireBackground,
   wireCommands,
   wireItem,
   wireSettings
@@ -280,5 +282,33 @@ describe('sent images’ thumbnails (2.5.4)', () => {
 
   it('leaves out a thumbnail too big for THUMB_PARTS_MAX frames', () => {
     expect(thumbFrames('p1', 'u1', [png(IMAGE_CHUNK * THUMB_PARTS_MAX)])).toEqual([])
+  })
+})
+
+describe('work running in the background (2.5.4)', () => {
+  const tasks = [
+    { id: 'b1', kind: 'shell' as const, label: 'bun run dev', since: 1_000 },
+    { id: 'b2', kind: 'agent' as const, label: 'x'.repeat(400), since: 9_000 }
+  ]
+  const t: ChatThread = { ...EMPTY_THREAD, background: tasks }
+
+  it('sends each task’s age, not this clock’s time, with long labels cut', () => {
+    const w = wireBackground(t, 10_000)
+    expect(w[0]).toEqual({ id: 'b1', kind: 'shell', label: 'bun run dev', ms: 9_000 })
+    expect(w[1]?.label).toHaveLength(300)
+    expect(w[1]?.ms).toBe(1_000)
+    const snap = snapshot('p1', t, null, 10_000)
+    expect(snap.background).toEqual(w)
+    expect(ToWeb.safeParse(snap).success).toBe(true)
+    expect(snapshot('p1', EMPTY_THREAD, null, 10_000).background).toEqual([])
+  })
+
+  it('tells lists apart by their tasks, not their ages', () => {
+    const older: ChatThread = {
+      ...t,
+      background: tasks.map((x) => ({ ...x, since: x.since - 500 }))
+    }
+    expect(backgroundKey(older)).toBe(backgroundKey(t))
+    expect(backgroundKey({ ...t, background: tasks.slice(1) })).not.toBe(backgroundKey(t))
   })
 })

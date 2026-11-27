@@ -20,7 +20,8 @@ import {
   ToDesktop,
   type ToWeb,
   type WireCommand,
-  type WireSettings
+  type WireSettings,
+  type WireTask
 } from '@shared/relay/messages'
 import {
   CHAT_EFFORTS,
@@ -42,7 +43,9 @@ import {
   updates,
   wireCommands,
   wireSettings,
-  wireThumbs
+  wireThumbs,
+  backgroundKey,
+  wireBackground
 } from './wire'
 
 /** What main does for the relay (`cloud:relay*`). */
@@ -211,6 +214,8 @@ export class RelayHost {
   private lastBusy = new Map<string, boolean>()
   /** pairing + pane → the commands last sent (JSON), so a change goes out once. */
   private lastCommands = new Map<string, string>()
+  /** `${pairing} ${pane}` → the background work last sent (`backgroundKey`). */
+  private lastBackground = new Map<string, string>()
   /** pairing + pane → the settings last sent (JSON). */
   private lastSettings = new Map<string, string>()
   /** pairing → its image uploads in progress (`chat.image`), by upload id. */
@@ -652,7 +657,8 @@ export class RelayHost {
         const snap = snapshot(
           msg.paneId,
           this.deps.chat.thread(msg.paneId),
-          this.settingsOf(msg.paneId)
+          this.settingsOf(msg.paneId),
+          this.now()
         )
         let panes = this.open.get(id)
         if (!panes) this.open.set(id, (panes = new Map()))
@@ -661,6 +667,10 @@ export class RelayHost {
         panes.set(msg.paneId, sent)
         this.lastBusy.set(`${id} ${msg.paneId}`, snap.busy)
         this.lastCommands.set(`${id} ${msg.paneId}`, JSON.stringify(snap.commands ?? []))
+        this.lastBackground.set(
+          `${id} ${msg.paneId}`,
+          backgroundKey(this.deps.chat.thread(msg.paneId))
+        )
         this.lastSettings.set(`${id} ${msg.paneId}`, JSON.stringify(snap.settings ?? null))
         this.watch(msg.paneId)
         return this.send(id, snap)
@@ -816,7 +826,7 @@ export class RelayHost {
   private sendExtras(id: string, paneId: string): void {
     const key = `${id} ${paneId}`
     const thread = this.deps.chat.thread(paneId)
-    const extra: { commands?: WireCommand[]; settings?: WireSettings } = {}
+    const extra: { commands?: WireCommand[]; settings?: WireSettings; background?: WireTask[] } = {}
     const commands = wireCommands(thread)
     const cj = JSON.stringify(commands)
     if (this.lastCommands.get(key) !== cj) {
@@ -829,7 +839,12 @@ export class RelayHost {
       this.lastSettings.set(key, sj)
       extra.settings = settings
     }
-    if (extra.commands || extra.settings)
+    const bk = backgroundKey(thread)
+    if (this.lastBackground.get(key) !== bk) {
+      this.lastBackground.set(key, bk)
+      extra.background = wireBackground(thread, this.now())
+    }
+    if (extra.commands || extra.settings || extra.background)
       this.send(id, { kind: 'chat.update', paneId, items: [], busy: thread.busy, ...extra })
   }
 

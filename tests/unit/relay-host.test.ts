@@ -505,6 +505,37 @@ describe('RelayHost', () => {
     expect(thumbs()).toHaveLength(1)
   })
 
+  it('sends the work left running in the background, and again only when it changes', async () => {
+    const t = setup()
+    const { say, heard } = await paired(t)
+    const task = {
+      id: 'b1',
+      kind: 'shell' as const,
+      label: 'gh run watch',
+      since: Date.now() - 5000
+    }
+    t.setThread({ ...EMPTY_THREAD, background: [task] })
+    say({ kind: 'chat.open', paneId: 'p1' })
+    await tick(20)
+    const snap = heard().find((m) => m.kind === 'chat.snapshot')
+    expect(snap?.kind === 'chat.snapshot' && snap.background).toEqual([
+      { id: 'b1', kind: 'shell', label: 'gh run watch', ms: expect.any(Number) }
+    ])
+    const ms = snap?.kind === 'chat.snapshot' ? (snap.background?.[0]?.ms ?? 0) : 0
+    expect(ms).toBeGreaterThanOrEqual(5000)
+    // Same work, only older: nothing new. Ended: an update with an empty list.
+    t.setThread({ ...EMPTY_THREAD, background: [{ ...task }] })
+    await tick(80)
+    expect(heard().some((m) => m.kind === 'chat.update' && m.background)).toBe(false)
+    t.setThread({ ...EMPTY_THREAD, background: [] })
+    await tick(80)
+    expect(heard().find((m) => m.kind === 'chat.update' && m.background)).toMatchObject({
+      kind: 'chat.update',
+      paneId: 'p1',
+      background: []
+    })
+  })
+
   it('drops a frame the server replays', async () => {
     const t = setup()
     const { heard, raw } = await paired(t)
