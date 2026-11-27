@@ -6,8 +6,9 @@
 //
 // A paired browser is trusted only after its first sealed message, `pair.confirm`, carries the
 // one-time code from our pairing link and the key it claimed with. Nothing it sends acts on its own:
-// it can read chats, send a message to a chat, start one in a project, or stop a turn — as
-// typing in this window would — but not approve tool calls.
+// it can read chats, send a message (with images) to a chat, start one in a project, stop a
+// turn, answer claude's questions, or switch a chat's model, effort or a mode that still asks —
+// as using this window would — but not approve tool calls.
 import type { StoreApi } from 'zustand'
 import type { CloudStatus, RelayEvent, SimpleResult } from '@shared/ipc-contract'
 import { channel, newKeyPair, pairingCode, type Channel } from '@shared/relay/crypto'
@@ -17,12 +18,30 @@ import {
   encode,
   pairingLinkUrl,
   ToDesktop,
-  type ToWeb
+  type ToWeb,
+  type WireCommand,
+  type WireSettings
 } from '@shared/relay/messages'
+import {
+  CHAT_EFFORTS,
+  CHAT_IMAGE_MAX,
+  CHAT_MODEL_PATTERN,
+  type ChatEffort,
+  type ChatImage,
+  type ChatMode
+} from '@shared/chat'
 import { findPane, paneView, type AppState } from '../../app/store'
 import type { ChatBus } from '../chat-bus'
 import { projectFolder } from '../team'
-import { markSent, newChatAccount, snapshot, state, updates, wireCommands } from './wire'
+import {
+  markSent,
+  newChatAccount,
+  snapshot,
+  state,
+  updates,
+  wireCommands,
+  wireSettings
+} from './wire'
 
 /** What main does for the relay (`cloud:relay*`). */
 export interface RelayApi {
@@ -153,6 +172,18 @@ export interface HostDeps {
 }
 
 const START_WAIT_MS = 20_000
+/** An image upload not finished (or not sent) within this is dropped. */
+const UPLOAD_MS = 3 * 60_000
+/** Image uploads one browser may have going at once. */
+const UPLOADS_MAX = 8
+
+interface Upload {
+  mediaType: ChatImage['mediaType']
+  parts: (string | undefined)[]
+  got: number
+  size: number
+  at: number
+}
 
 export class RelayHost {
   private saved: Saved = { v: 1, enabled: true, pairings: {} }
@@ -176,6 +207,10 @@ export class RelayHost {
   private lastBusy = new Map<string, boolean>()
   /** pairing + pane → the commands last sent (JSON), so a change goes out once. */
   private lastCommands = new Map<string, string>()
+  /** pairing + pane → the settings last sent (JSON). */
+  private lastSettings = new Map<string, string>()
+  /** pairing → its image uploads in progress (`chat.image`), by upload id. */
+  private uploads = new Map<string, Map<string, Upload>>()
   private paneSubs = new Map<string, () => void>()
   private dirtyPanes = new Set<string>()
   private flushTimer: ReturnType<typeof setTimeout> | null = null
@@ -608,7 +643,11 @@ export class RelayHost {
         if (!findPane(s.config, msg.paneId) || paneView(s.config, msg.paneId) !== 'chat')
           return this.send(id, { kind: 'chat.gone', paneId: msg.paneId })
         if (!this.deps.chat.thread(msg.paneId).items.length) await this.deps.chat.load(msg.paneId)
-        const snap = snapshot(msg.paneId, this.deps.chat.thread(msg.paneId))
+        const snap = snapshot(
+          msg.paneId,
+          this.deps.chat.thread(msg.paneId),
+          this.settingsOf(msg.paneId)
+        )
         let panes = this.open.get(id)
         if (!panes) this.open.set(id, (panes = new Map()))
         const sent = new Map<string, string>()
@@ -616,6 +655,7 @@ export class RelayHost {
         panes.set(msg.paneId, sent)
         this.lastBusy.set(`${id} ${msg.paneId}`, snap.busy)
         this.lastCommands.set(`${id} ${msg.paneId}`, JSON.stringify(snap.commands ?? []))
+        this.lastSettings.set(`${id} ${msg.paneId}`, JSON.stringify(snap.settings ?? null))
         this.watch(msg.paneId)
         return this.send(id, snap)
       }
@@ -623,10 +663,25 @@ export class RelayHost {
         this.open.get(id)?.delete(msg.paneId)
         return this.unwatchIdle(msg.paneId)
       case 'chat.send': {
+        const imgs = this.takeImages(id, msg.images)
+        if ('error' in imgs)
+          return this.send(id, { kind: 'ack', req: msg.req, ok: false, error: imgs.error })
         const err = await this.ready(msg.paneId)
         if (err) return this.send(id, { kind: 'ack', req: msg.req, ok: false, error: err })
-        this.deps.store.getState().chatSend(msg.paneId, msg.text, [])
+        this.deps.store.getState().chatSend(msg.paneId, msg.text, imgs.images)
         return this.send(id, { kind: 'ack', req: msg.req, ok: true })
+      }
+      case 'chat.image':
+        return this.addImagePart(id, msg)
+      case 'chat.answer':
+        return this.send(id, { kind: 'ack', req: msg.req, ...this.answer(msg) })
+      case 'chat.set': {
+        const r = this.setting(msg)
+        if (r.ok) {
+          this.dirtyPanes.add(msg.paneId)
+          this.flushSoon()
+        }
+        return this.send(id, { kind: 'ack', req: msg.req, ...r })
       }
       case 'chat.stop': {
         if (!findPane(s.config, msg.paneId))
@@ -640,10 +695,13 @@ export class RelayHost {
         return this.send(id, { kind: 'ack', req: msg.req, ok: true })
       }
       case 'chat.new': {
+        const imgs = this.takeImages(id, msg.images)
+        if ('error' in imgs)
+          return this.send(id, { kind: 'ack', req: msg.req, ok: false, error: imgs.error })
         const r = this.newChat(msg.wsId)
         if ('error' in r)
           return this.send(id, { kind: 'ack', req: msg.req, ok: false, error: r.error })
-        if (msg.text) {
+        if (msg.text || imgs.images.length) {
           const err = await this.ready(r.paneId)
           if (err)
             return this.send(id, {
@@ -653,7 +711,7 @@ export class RelayHost {
               error: err,
               paneId: r.paneId
             })
-          this.deps.store.getState().chatSend(r.paneId, msg.text, [])
+          this.deps.store.getState().chatSend(r.paneId, msg.text, imgs.images)
         }
         this.pushState()
         return this.send(id, { kind: 'ack', req: msg.req, ok: true, paneId: r.paneId })
@@ -726,7 +784,158 @@ export class RelayHost {
   }
 
   private startStateTimer(): void {
-    if (!this.stateTimer) this.stateTimer = setInterval(() => this.pushState(), this.timers.state)
+    if (!this.stateTimer)
+      this.stateTimer = setInterval(() => {
+        this.pushState()
+        // Settings changed in this window (no chat event) reach open chats within a tick.
+        for (const [id, panes] of this.open)
+          for (const paneId of panes.keys()) this.sendExtras(id, paneId)
+      }, this.timers.state)
+  }
+
+  /** A chat's settings for the web, null when it is not a chat (anymore). */
+  private settingsOf(paneId: string): WireSettings | null {
+    const s = this.deps.store.getState()
+    const found = findPane(s.config, paneId)
+    if (!found || paneView(s.config, paneId) !== 'chat') return null
+    return wireSettings(found.pane, this.deps.chat.thread(paneId))
+  }
+
+  /**
+   * The CLI's commands and the chat's settings, in an update when they changed since last sent:
+   * the CLI says its commands once it starts (on the first send), and settings change here too.
+   */
+  private sendExtras(id: string, paneId: string): void {
+    const key = `${id} ${paneId}`
+    const thread = this.deps.chat.thread(paneId)
+    const extra: { commands?: WireCommand[]; settings?: WireSettings } = {}
+    const commands = wireCommands(thread)
+    const cj = JSON.stringify(commands)
+    if (this.lastCommands.get(key) !== cj) {
+      this.lastCommands.set(key, cj)
+      extra.commands = commands
+    }
+    const settings = this.settingsOf(paneId)
+    const sj = JSON.stringify(settings)
+    if (settings && this.lastSettings.get(key) !== sj) {
+      this.lastSettings.set(key, sj)
+      extra.settings = settings
+    }
+    if (extra.commands || extra.settings)
+      this.send(id, { kind: 'chat.update', paneId, items: [], busy: thread.busy, ...extra })
+  }
+
+  // ---- what a browser may change -------------------------------------------------------
+
+  /**
+   * Answers claude's question (AskUserQuestion) as this window's question card would. Only a
+   * question waiting for its answer: any other approval is refused, as tool approvals stay here.
+   */
+  private answer(msg: Extract<ToDesktop, { kind: 'chat.answer' }>): {
+    ok: boolean
+    error?: string
+  } {
+    const s = this.deps.store.getState()
+    if (!findPane(s.config, msg.paneId)) return { ok: false, error: 'That chat is gone.' }
+    const item = this.deps.chat
+      .thread(msg.paneId)
+      .items.find((it) => it.kind === 'tool' && it.approval?.reqId === msg.ask)
+    const a = item?.kind === 'tool' ? item.approval : null
+    if (!a?.questions?.length) return { ok: false, error: 'There is no such question to answer.' }
+    if (a.decided !== null) return { ok: false, error: 'That question was already answered.' }
+    if (msg.skip) {
+      s.chatApprove(msg.paneId, msg.ask, 'deny')
+      return { ok: true }
+    }
+    const asked = new Set(a.questions.map((q) => q.question))
+    const answers = msg.answers ?? {}
+    if (!Object.keys(answers).every((q) => asked.has(q)))
+      return { ok: false, error: 'Those answers don’t match the questions.' }
+    s.chatApprove(msg.paneId, msg.ask, 'allow', answers)
+    return { ok: true }
+  }
+
+  /** Switches a chat's model, effort or mode, only to what `wireSettings` offers. */
+  private setting(msg: Extract<ToDesktop, { kind: 'chat.set' }>): {
+    ok: boolean
+    error?: string
+  } {
+    const s = this.deps.store.getState()
+    const found = findPane(s.config, msg.paneId)
+    if (!found || paneView(s.config, msg.paneId) !== 'chat')
+      return { ok: false, error: 'That chat is gone.' }
+    const thread = this.deps.chat.thread(msg.paneId)
+    const offered = wireSettings(found.pane, thread)
+    if (msg.mode !== undefined) {
+      if (!offered.modes.includes(msg.mode))
+        return { ok: false, error: 'That mode can only be picked on the computer.' }
+      s.chatSetMode(msg.paneId, msg.mode as ChatMode)
+    } else if (msg.model !== undefined) {
+      if (
+        msg.model !== null &&
+        (!CHAT_MODEL_PATTERN.test(msg.model) || !thread.models.some((m) => m.value === msg.model))
+      )
+        return { ok: false, error: 'That model isn’t offered for this chat.' }
+      s.chatSetModel(msg.paneId, msg.model)
+    } else if (msg.effort !== undefined) {
+      const chosen =
+        thread.models.find((m) => m.value === (found.pane.model ?? 'default')) ?? thread.models[0]
+      const e = msg.effort
+      if (
+        e !== null &&
+        (!(CHAT_EFFORTS as readonly string[]).includes(e) || !chosen?.efforts.includes(e))
+      )
+        return { ok: false, error: 'That effort isn’t offered for this model.' }
+      s.chatSetEffort(msg.paneId, e as ChatEffort | null)
+    }
+    return { ok: true }
+  }
+
+  /** One frame of an image upload; uploads past their time or limits are dropped. */
+  private addImagePart(id: string, msg: Extract<ToDesktop, { kind: 'chat.image' }>): void {
+    const now = this.now()
+    let mine = this.uploads.get(id)
+    if (!mine) this.uploads.set(id, (mine = new Map()))
+    for (const [k, u] of mine) if (now - u.at > UPLOAD_MS) mine.delete(k)
+    let u = mine.get(msg.upload)
+    if (!u) {
+      if (mine.size >= UPLOADS_MAX) return
+      u = { mediaType: msg.mediaType, parts: new Array(msg.parts), got: 0, size: 0, at: now }
+      mine.set(msg.upload, u)
+    }
+    if (
+      u.parts.length !== msg.parts ||
+      u.mediaType !== msg.mediaType ||
+      u.parts[msg.part] !== undefined
+    )
+      return
+    if (u.size + msg.data.length > CHAT_IMAGE_MAX) {
+      mine.delete(msg.upload)
+      return
+    }
+    u.parts[msg.part] = msg.data
+    u.got++
+    u.size += msg.data.length
+  }
+
+  /** The finished uploads a message names, as images (and forgotten); or why not. */
+  private takeImages(
+    id: string,
+    ids: string[] | undefined
+  ): { images: ChatImage[] } | { error: string } {
+    if (!ids?.length) return { images: [] }
+    const mine = this.uploads.get(id)
+    const images: ChatImage[] = []
+    for (const k of ids) {
+      const u = mine?.get(k)
+      if (!u || u.got !== u.parts.length || this.now() - u.at > UPLOAD_MS)
+        return { error: 'An image didn’t arrive in full. Send it again.' }
+      const data = u.parts.join('')
+      if (data.length % 4 !== 0) return { error: 'An image didn’t arrive in full. Send it again.' }
+      images.push({ mediaType: u.mediaType, data })
+    }
+    for (const k of ids) mine?.delete(k)
+    return { images }
   }
 
   private stopStateTimer(): void {
@@ -766,19 +975,14 @@ export class RelayHost {
           for (const f of updates(paneId, thread, sent, this.lastBusy.get(key) ?? null))
             this.send(id, f)
           this.lastBusy.set(key, thread.busy)
-          // The CLI said its commands after the chat was opened (it starts on the first send).
-          const commands = wireCommands(thread)
-          const json = JSON.stringify(commands)
-          if (this.lastCommands.get(key) !== json) {
-            this.lastCommands.set(key, json)
-            this.send(id, { kind: 'chat.update', paneId, items: [], busy: thread.busy, commands })
-          }
+          this.sendExtras(id, paneId)
         }
       }
     }, this.timers.flush)
   }
 
   private closeAll(id: string): void {
+    this.uploads.delete(id)
     const panes = [...(this.open.get(id)?.keys() ?? [])]
     this.open.delete(id)
     for (const paneId of panes) this.unwatchIdle(paneId)

@@ -7,6 +7,7 @@ import { EMPTY_THREAD, type ChatItem, type ChatThread } from '../../src/renderer
 import { defaultConfig } from '../../src/shared/schema'
 import type { ChatCommand } from '../../src/shared/chat'
 import type { Config, Workspace } from '../../src/shared/types'
+import { ToDesktop } from '../../src/shared/relay/messages'
 import {
   COMMANDS_BUDGET,
   ITEM_TEXT_CAP,
@@ -15,7 +16,8 @@ import {
   state,
   updates,
   wireCommands,
-  wireItem
+  wireItem,
+  wireSettings
 } from '../../src/renderer/lib/relay/wire'
 
 const size = (m: unknown): number => new TextEncoder().encode(JSON.stringify(m)).length
@@ -168,5 +170,73 @@ describe('the CLI’s commands', () => {
 
   it('leaves commands out of a snapshot until the CLI has said them', () => {
     expect(snapshot('p', thread([])).commands).toBeUndefined()
+  })
+})
+
+describe('tool details, questions and settings (2.5.3)', () => {
+  it('sends a tool’s details, cut, and drops them when the item would not fit a frame', () => {
+    const w = wireItem(tool({ preview: { type: 'code', text: 'x'.repeat(10_000) } }))
+    expect(w.preview).toEqual({ type: 'code', text: 'x'.repeat(6000) })
+    const huge = wireItem(
+      tool({
+        output: '€'.repeat(ITEM_TEXT_CAP),
+        preview: { type: 'diff', path: 'a', before: '€'.repeat(6000), after: '€'.repeat(6000) }
+      })
+    )
+    expect(huge.preview).toBeUndefined()
+    expect(size({ v: 1, n: Date.now() * 1000, m: huge })).toBeLessThanOrEqual(PLAINTEXT_MAX)
+  })
+
+  it('counts a user message’s images', () => {
+    expect(wireItem({ kind: 'user', id: 'u', text: 'hi', images: 2 }).images).toBe(2)
+    expect(wireItem({ kind: 'user', id: 'u', text: 'hi', images: 0 }).images).toBeUndefined()
+  })
+
+  it('offers only modes that still ask, of those the CLI has', () => {
+    const s = wireSettings(
+      { model: 'haiku', effort: 'high', chatMode: 'bypassPermissions' },
+      { models: [], controls: null }
+    )
+    expect(s).toMatchObject({ model: 'haiku', effort: 'high', mode: 'bypassPermissions' })
+    expect(s.modes).toEqual(['default', 'acceptEdits', 'plan', 'dontAsk'])
+    const agy = wireSettings(
+      { model: null, effort: null, chatMode: null },
+      {
+        models: [],
+        controls: {
+          live: { interrupt: false, model: false, mode: false },
+          modes: ['default', 'plan'],
+          approvals: false
+        }
+      }
+    )
+    expect(agy.modes).toEqual(['default', 'plan'])
+    expect(agy.mode).toBe('default')
+  })
+
+  it('checks the new web messages', () => {
+    const ok = (m: unknown) => ToDesktop.safeParse(m).success
+    expect(ok({ kind: 'chat.send', req: 'r', paneId: 'p', text: '' })).toBe(false)
+    expect(ok({ kind: 'chat.send', req: 'r', paneId: 'p', text: '', images: ['u'] })).toBe(true)
+    expect(ok({ kind: 'chat.send', req: 'r', paneId: 'p', text: 'hi' })).toBe(true)
+    expect(ok({ kind: 'chat.set', req: 'r', paneId: 'p', model: 'a', mode: 'plan' })).toBe(false)
+    expect(ok({ kind: 'chat.set', req: 'r', paneId: 'p', effort: null })).toBe(true)
+    expect(ok({ kind: 'chat.answer', req: 'r', paneId: 'p', ask: 'q', skip: true })).toBe(true)
+    expect(
+      ok({ kind: 'chat.answer', req: 'r', paneId: 'p', ask: 'q', skip: true, answers: { a: 'b' } })
+    ).toBe(false)
+    expect(
+      ok({
+        kind: 'chat.image',
+        upload: 'u',
+        part: 0,
+        parts: 1,
+        mediaType: 'image/svg+xml',
+        data: 'AAAA'
+      })
+    ).toBe(false)
+    expect(
+      ok({ kind: 'chat.image', upload: 'u', part: 0, parts: 1, mediaType: 'image/png', data: '<>' })
+    ).toBe(false)
   })
 })
