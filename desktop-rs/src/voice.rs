@@ -216,16 +216,21 @@ impl Tap {
     }
 }
 
-/// How often the words are re-read while you talk (plus however long a pass takes).
-const LIVE_EVERY: Duration = Duration::from_millis(500);
-/// Not written down for good yet past this much speech: the head is, so each pass stays short.
-const COMMIT_AT: usize = RATE as usize * 20;
+/// How often the words are re-read while you talk (plus however long a pass takes): the box
+/// types out each new reading (src/renderer/lib/voice.ts `typeAhead`), so this sets how soon
+/// new words start appearing.
+const LIVE_EVERY: Duration = Duration::from_millis(200);
+/// Not written down for good yet past this much speech: the head is, so each pass stays short
+/// (a pass over 12 s takes ~0.7 s on a laptop, over 20 s ~1.5 s).
+const COMMIT_AT: usize = RATE as usize * 12;
 /// Where that cut goes: the quietest moment between these (from the start of the uncommitted audio).
-const CUT_FROM: usize = RATE as usize * 12;
-const CUT_TO: usize = RATE as usize * 19;
+const CUT_FROM: usize = RATE as usize * 7;
+const CUT_TO: usize = RATE as usize * 11;
 
-/// Heard this much before the language is taken as known (shorter guesses are unreliable).
-const LANG_AFTER: usize = RATE as usize * 3;
+/// No pass before this much audio: under it there are no words yet, and the first pass also
+/// detects the language (a whole extra 30 s pass of the model, ~2.5 s on a laptop), which then
+/// stays fixed for the recording.
+const FIRST_PASS_AT: usize = RATE as usize;
 
 /// What `Live` wrote down for good: the text, the raw sample it ends at (the rest is still to be
 /// read) and the language spoken, once known.
@@ -238,7 +243,7 @@ pub struct Written {
 
 /// The live transcript while recording: a thread that keeps re-reading the audio heard so far
 /// and calls `partial` with the text. Long speech is written down for good in pieces, cut at a
-/// pause, so a pass never reads more than ~20 s. The language is detected once (it costs a pass
+/// pause, so a pass never reads more than ~12 s. The language is detected once (it costs a pass
 /// of its own), then kept. `finish` gives back what was written down.
 pub struct Live {
     stop: Arc<AtomicBool>,
@@ -269,6 +274,9 @@ pub fn live(engine: Arc<Engine>, tap: Tap, partial: impl Fn(&str) + Send + 'stat
                     continue; // nothing new (the time limit stopped the mic)
                 }
                 seen = end;
+                if lang.is_none() && from + audio.len() < FIRST_PASS_AT {
+                    continue;
+                }
                 if audio.len() > COMMIT_AT {
                     let cut = quiet_cut(&audio, CUT_FROM, CUT_TO);
                     match engine.pass(&audio[..cut], false, lang, Some(&flag)) {
@@ -283,7 +291,7 @@ pub fn live(engine: Arc<Engine>, tap: Tap, partial: impl Fn(&str) + Send + 'stat
                 }
                 match engine.pass(&audio, true, lang, Some(&flag)) {
                     Ok((t, l)) => {
-                        if lang.is_none() && from + audio.len() >= LANG_AFTER && !t.is_empty() {
+                        if lang.is_none() && !t.is_empty() {
                             lang = l;
                         }
                         let text = joined(&done, &t);
@@ -638,9 +646,9 @@ mod tests {
 
     #[test]
     fn quiet_cut_finds_the_pause() {
-        // Loud, a pause at 14.0–14.2 s, loud again.
-        let mut audio = vec![0.5f32; RATE as usize * 22];
-        let pause = RATE as usize * 14;
+        // Loud, a pause at 9.0–9.2 s, loud again.
+        let mut audio = vec![0.5f32; RATE as usize * 14];
+        let pause = RATE as usize * 9;
         audio[pause..pause + RATE as usize / 5].fill(0.0);
         let cut = quiet_cut(&audio, CUT_FROM, CUT_TO);
         assert!(cut >= pause && cut <= pause + RATE as usize / 5, "{cut}");

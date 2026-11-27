@@ -1,6 +1,14 @@
 // Voice typing's pure parts (src/renderer/lib/voice.ts): where the spoken words land in the box.
 import { describe, expect, it } from 'vitest'
-import { clock, insertSpoken, megabytes, percent } from '../../src/renderer/lib/voice'
+import {
+  clock,
+  insertSpoken,
+  megabytes,
+  percent,
+  typeAhead,
+  TYPE_CATCH_UP_MS,
+  TYPE_MIN_CPS
+} from '../../src/renderer/lib/voice'
 
 describe('insertSpoken', () => {
   it('fills an empty box', () => {
@@ -41,5 +49,24 @@ describe('labels', () => {
     expect(percent(50, 200)).toBe(25)
     expect(percent(5, 0)).toBe(0)
     expect(percent(300, 200)).toBe(100)
+  })
+})
+
+describe('typeAhead', () => {
+  it('types at the steady pace when only a little is left', () => {
+    expect(typeAhead(0, 2, 1000 / TYPE_MIN_CPS)).toBeCloseTo(1)
+  })
+
+  it('catches up faster the further behind it is, never past the end', () => {
+    const behind = 100
+    const step = typeAhead(0, behind, 16)
+    expect(step).toBeCloseTo((behind * 16) / TYPE_CATCH_UP_MS)
+    expect(step).toBeGreaterThan((TYPE_MIN_CPS * 16) / 1000)
+    expect(typeAhead(99.9, 100, 1000)).toBe(100)
+  })
+
+  it('shows a shorter reading at once and stands still for a bad frame', () => {
+    expect(typeAhead(40, 10, 16)).toBe(10)
+    expect(typeAhead(5, 10, -50)).toBe(5)
   })
 })

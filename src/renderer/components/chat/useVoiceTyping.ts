@@ -3,6 +3,35 @@
 // it's said); `heard` is the final text on stop. The first use offers the model's download.
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { VoiceApi } from '@shared/ipc-contract'
+import { typeAhead } from '../../lib/voice'
+
+/**
+ * `target` typed out a character at a time (`typeAhead`), so the live words appear as if
+ * someone were typing them while you talk rather than in jumps each time Whisper reads again.
+ * A reading that changes earlier words changes them in place; only the new end is typed.
+ */
+export function useTypewriter(target: string): string {
+  const [n, setN] = useState(0)
+  const [still] = useState(() => matchMedia('(prefers-reduced-motion: reduce)').matches)
+  const shown = useRef(0)
+  // A new recording starts typing from nothing (React's reset-on-change, during render).
+  if (!target && n !== 0) setN(0)
+  useEffect(() => {
+    shown.current = Math.min(shown.current, target.length)
+    if (still || !target) return
+    let raf = 0
+    let last = performance.now()
+    const tick = (now: number): void => {
+      shown.current = typeAhead(shown.current, target.length, now - last)
+      last = now
+      setN(Math.floor(shown.current))
+      if (shown.current < target.length) raf = requestAnimationFrame(tick)
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [target, still])
+  return still ? target : target.slice(0, n)
+}
 
 export type VoiceState =
   | { kind: 'idle' }
