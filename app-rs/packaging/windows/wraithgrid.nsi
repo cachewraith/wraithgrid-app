@@ -1,4 +1,4 @@
-; The GPUI app's Windows installer (#166 phase 6), laid out as electron-builder's assisted NSIS
+; The Tauri app's (desktop-rs) Windows installer (#166 phase 6), laid out as electron-builder's assisted NSIS
 ; installer (electron-builder.yml `nsis:`), so installing it over the Electron app replaces it
 ; in place and electron-updater (latest.yml) can update into it:
 ;   - same product name, install folder (%LOCALAPPDATA%\Programs\Wraithgrid per user), exe

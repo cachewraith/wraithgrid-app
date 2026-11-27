@@ -1,7 +1,8 @@
 # ADR 0005: Rewrite the desktop app in Rust with GPUI
 
-- Status: **Proposed** (2026-11-12), issue #166. Phase 0 (spike) results for Linux below;
-  Windows, macOS and the hands-on input checks are still open, so this is not yet a go.
+- Status: **Rejected** (2026-11-27): the Tauri app (desktop-rs) ships instead, and the GPUI
+  app (`app-rs/crates/app`) and `gpui-spike/` were removed; both stay in git history and on
+  feat/gpui-rewrite-20261112. Was: Proposed (2026-11-12), issue #166.
 
 ## Context
 

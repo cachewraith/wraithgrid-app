@@ -7,4 +7,3 @@ test-results
 playwright-report
 host-rs/target
 app-rs
-gpui-spike

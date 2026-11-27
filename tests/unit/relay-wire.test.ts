@@ -14,11 +14,13 @@ import {
   markSent,
   snapshot,
   state,
+  thumbFrames,
   updates,
   wireCommands,
   wireItem,
   wireSettings
 } from '../../src/renderer/lib/relay/wire'
+import { IMAGE_CHUNK, THUMB_PARTS_MAX } from '../../src/shared/relay/messages'
 
 const size = (m: unknown): number => new TextEncoder().encode(JSON.stringify(m)).length
 const thread = (items: ChatItem[], busy = false): ChatThread => ({ ...EMPTY_THREAD, items, busy })
@@ -238,5 +240,45 @@ describe('tool details, questions and settings (2.5.3)', () => {
     expect(
       ok({ kind: 'chat.image', upload: 'u', part: 0, parts: 1, mediaType: 'image/png', data: '<>' })
     ).toBe(false)
+  })
+})
+
+describe('sent images’ thumbnails (2.5.4)', () => {
+  const png = (chars: number): string => `data:image/png;base64,${'A'.repeat(chars)}`
+
+  it('counts only thumbnails that are data URLs of an image kind', () => {
+    const u = (thumbs?: string[]): ChatItem => ({
+      kind: 'user',
+      id: 'u',
+      text: '',
+      images: 2,
+      thumbs
+    })
+    expect(wireItem(u([png(8), png(12)])).thumbs).toBe(2)
+    expect(
+      wireItem(u([png(8), 'https://evil.example/x.png', 'data:image/svg+xml;base64,AAAA'])).thumbs
+    ).toBe(1)
+    expect(wireItem(u()).thumbs).toBeUndefined()
+    expect(wireItem(u([])).thumbs).toBeUndefined()
+  })
+
+  it('cuts each thumbnail into frames that fit, keeping its index', () => {
+    const big = png(IMAGE_CHUNK * 2)
+    const frames = thumbFrames('p1', 'u1', [png(100), 'javascript:alert(1)', big])
+    expect(frames.filter((f) => f.index === 0)).toHaveLength(1)
+    expect(frames.some((f) => f.index === 1)).toBe(false)
+    const parts = frames.filter((f) => f.index === 2)
+    expect(parts.map((f) => f.part)).toEqual([0, 1, 2])
+    expect(parts.every((f) => f.parts === 3)).toBe(true)
+    expect(parts.map((f) => f.data).join('')).toBe(big)
+    for (const f of frames) {
+      expect(ToWeb.safeParse(f).success).toBe(true)
+      // The envelope `{"v":1,"n":…,"m":…}` adds well under 256 bytes.
+      expect(size(f) + 256).toBeLessThanOrEqual(PLAINTEXT_MAX)
+    }
+  })
+
+  it('leaves out a thumbnail too big for THUMB_PARTS_MAX frames', () => {
+    expect(thumbFrames('p1', 'u1', [png(IMAGE_CHUNK * THUMB_PARTS_MAX)])).toEqual([])
   })
 })
