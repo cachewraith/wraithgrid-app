@@ -1,4 +1,19 @@
-# What's new in 2.5.2: your icons and commands on the web
+# What's new in 2.5.3: answer Claude from your phone
+
+*v2.5.3 · 2026-11-27*
+
+Web access at app.wraithgrid.cachewraith.com does more of what this app does: answer Claude's questions, switch the model, send screenshots and photos, and see what each tool call did.
+
+| New | What it does |
+|---|---|
+| Answer Claude's questions on the web | When Claude asks you something, the browser shows the same question card as here: pick an option (or several), type your own answer, or Skip. Approving other tool calls still happens on this computer only |
+| Model, effort and mode on the web | Chips in the browser's message box switch the chat's model, effort and mode, or type `/model`, `/effort` or `/mode`. Full access and Auto can only be picked here |
+| Images from the web | Attach, paste or drop images into a message in the browser (a phone photo, a screenshot). Big photos are shrunk before they're sent |
+| Tool details on the web | Open a tool call in the browser to see the command it ran, the lines it changed, or its task list |
+
+---
+
+## Previously, in 2.5.2: your icons and commands on the web
 
 *v2.5.2 · 2026-11-26*
 

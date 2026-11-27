@@ -2,6 +2,7 @@
 
 ## 2026-11-27
 
+- [release] v2.5.3: questions, settings, images and tool details from the web app (files: desktop-rs/Cargo.toml, desktop-rs/Cargo.lock, desktop-rs/tauri.conf.json, docs/WHATS-NEW.md, docs/CONTEXT.md)
 - [relay] Web access, from a browser: answer claude's questions (`ask` on the waiting tool item, `chat.answer`; only a pending AskUserQuestion, never another approval), switch a chat's model, effort or a mode that still asks (`settings`, `chat.set`; never Full access or Auto), send images (`chat.image` frames, put together and checked here, dropped after 3 min or 7 MB), and see a tool call's command, diff or task list (`preview`, dropped when it wouldn't fit a frame); `state.features` says what this desktop can do (files: src/shared/relay/messages.ts, src/renderer/lib/relay/{wire,host}.ts, tests/unit/relay-{wire,host}.test.ts)
 
 ## 2026-11-26
