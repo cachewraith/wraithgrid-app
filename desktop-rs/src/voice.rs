@@ -1,0 +1,454 @@
+//! Voice typing: the microphone, recorded on this computer, turned into text by a local Whisper
+//! model (whisper.cpp), so speech never leaves the machine. The webview can't do it: WebKitGTK has
+//! no speech recognition and WebView2's needs a cloud key. The model (multilingual "small", q5_1)
+//! is downloaded once into `~/.wraithgrid/models`, checked against a pinned SHA-256, and shared by
+//! every user-data dir. ipc/voice.rs is the channel side.
+
+use std::io::{Read, Write};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
+
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::{FromSample, Sample, SampleFormat, SizedSample};
+use sha2::{Digest, Sha256};
+use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+
+pub const MODEL_FILE: &str = "ggml-small-q5_1.bin";
+/// Pinned to a commit of ggerganov/whisper.cpp on Hugging Face, so the file can't change under us.
+const MODEL_URL: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-small-q5_1.bin";
+const MODEL_SHA256: &str = "ae85e4a935d7a567bd102fe55afc16bb595bdb618e11b2fc7591bc08120411bb";
+pub const MODEL_BYTES: u64 = 190_085_487;
+
+/// Whisper's input: 16 kHz mono.
+const RATE: u32 = 16_000;
+/// A recording stops by itself after this long.
+pub const MAX_SECS: u64 = 300;
+/// Shorter than this is a click, not speech.
+const MIN_SAMPLES: usize = (RATE as usize) * 3 / 10;
+
+/// `~/.wraithgrid/models/<file>`.
+pub fn model_path() -> PathBuf {
+    wraithgrid_core::paths::home_dir()
+        .join(".wraithgrid")
+        .join("models")
+        .join(MODEL_FILE)
+}
+
+pub fn model_ready() -> bool {
+    std::fs::metadata(model_path()).is_ok_and(|m| m.len() == MODEL_BYTES)
+}
+
+/// Downloads the model to a `.part` file, checks its hash, then renames it into place.
+/// `progress(done, total)` is called as it goes; `cancel` stops it.
+pub fn download_model(
+    cancel: &AtomicBool,
+    mut progress: impl FnMut(u64, u64),
+) -> Result<(), String> {
+    let path = model_path();
+    let dir = path.parent().expect("model dir");
+    std::fs::create_dir_all(dir).map_err(|e| format!("Couldn't create {}: {e}", dir.display()))?;
+    let part = path.with_extension("bin.part");
+    let res = ureq::get(MODEL_URL)
+        .call()
+        .map_err(|e| format!("Couldn't download the speech model: {e}"))?;
+    let total = res
+        .headers()
+        .get("content-length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(MODEL_BYTES);
+    let mut body = res.into_body();
+    let mut reader = body.as_reader();
+    let mut file =
+        std::fs::File::create(&part).map_err(|e| format!("Couldn't save the speech model: {e}"))?;
+    let mut hash = Sha256::new();
+    let mut buf = vec![0u8; 256 * 1024];
+    let mut done = 0u64;
+    let mut last = Instant::now();
+    let result = (|| {
+        loop {
+            if cancel.load(Ordering::Relaxed) {
+                return Err("Download cancelled.".to_string());
+            }
+            let n = reader
+                .read(&mut buf)
+                .map_err(|e| format!("The download stopped: {e}"))?;
+            if n == 0 {
+                break;
+            }
+            hash.update(&buf[..n]);
+            file.write_all(&buf[..n])
+                .map_err(|e| format!("Couldn't save the speech model: {e}"))?;
+            done += n as u64;
+            if last.elapsed() >= Duration::from_millis(200) {
+                last = Instant::now();
+                progress(done, total);
+            }
+        }
+        file.sync_all()
+            .map_err(|e| format!("Couldn't save the speech model: {e}"))?;
+        let got = hex(&hash.finalize());
+        if got != MODEL_SHA256 {
+            return Err("The downloaded speech model is damaged. Try again.".to_string());
+        }
+        Ok(())
+    })();
+    drop(file);
+    if let Err(e) = result {
+        let _ = std::fs::remove_file(&part);
+        return Err(e);
+    }
+    progress(done, total);
+    std::fs::rename(&part, &path).map_err(|e| format!("Couldn't save the speech model: {e}"))
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// A recording in progress: the capture thread owns the stream (it isn't `Send` everywhere).
+pub struct Recording {
+    stop: mpsc::Sender<()>,
+    samples: Arc<Mutex<Vec<f32>>>,
+    rate: u32,
+    thread: Option<JoinHandle<()>>,
+}
+
+/// Opens the default microphone and records mono samples until `finish`. `level(0..1)` is called
+/// about ten times a second, so the button can show it hears you; the recording ends by itself
+/// after `MAX_SECS` (`ended` is called then).
+pub fn record(
+    level: impl Fn(f32) + Send + 'static,
+    ended: impl FnOnce() + Send + 'static,
+) -> Result<Recording, String> {
+    let (ready_tx, ready_rx) = mpsc::channel::<Result<u32, String>>();
+    let (stop_tx, stop_rx) = mpsc::channel::<()>();
+    let samples = Arc::new(Mutex::new(Vec::<f32>::new()));
+    let peak = Arc::new(AtomicU32::new(0));
+    let (s2, p2) = (samples.clone(), peak.clone());
+    let thread = std::thread::Builder::new()
+        .name("voice-capture".into())
+        .spawn(move || {
+            let stream = match open_input(s2, p2) {
+                Ok((stream, rate)) => {
+                    let _ = ready_tx.send(Ok(rate));
+                    stream
+                }
+                Err(e) => {
+                    let _ = ready_tx.send(Err(e));
+                    return;
+                }
+            };
+            let started = Instant::now();
+            // Until `finish` (or the Recording is dropped): the level, and the time limit.
+            while let Err(mpsc::RecvTimeoutError::Timeout) =
+                stop_rx.recv_timeout(Duration::from_millis(100))
+            {
+                level(f32::from_bits(peak.swap(0, Ordering::Relaxed)).min(1.0));
+                if started.elapsed() >= Duration::from_secs(MAX_SECS) {
+                    drop(stream);
+                    ended();
+                    return;
+                }
+            }
+            drop(stream);
+        })
+        .map_err(|e| e.to_string())?;
+    match ready_rx.recv() {
+        Ok(Ok(rate)) => Ok(Recording {
+            stop: stop_tx,
+            samples,
+            rate,
+            thread: Some(thread),
+        }),
+        Ok(Err(e)) => {
+            let _ = thread.join();
+            Err(e)
+        }
+        Err(_) => Err("The microphone stopped unexpectedly.".into()),
+    }
+}
+
+impl Recording {
+    /// Stops the microphone and gives the audio as 16 kHz mono.
+    pub fn finish(mut self) -> Vec<f32> {
+        let _ = self.stop.send(());
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+        let raw = std::mem::take(&mut *self.samples.lock().unwrap());
+        resample(&raw, self.rate, RATE)
+    }
+}
+
+impl Drop for Recording {
+    fn drop(&mut self) {
+        let _ = self.stop.send(());
+    }
+}
+
+fn open_input(
+    samples: Arc<Mutex<Vec<f32>>>,
+    peak: Arc<AtomicU32>,
+) -> Result<(cpal::Stream, u32), String> {
+    let host = cpal::default_host();
+    let device = host
+        .default_input_device()
+        .ok_or("No microphone found. Plug one in or check your sound settings.")?;
+    let config = device
+        .default_input_config()
+        .map_err(|e| format!("Couldn't use the microphone: {e}"))?;
+    let rate = config.sample_rate();
+    let channels = config.channels().max(1) as usize;
+    let cap = rate as usize * (MAX_SECS as usize + 1);
+    let stream = match config.sample_format() {
+        SampleFormat::F32 => build::<f32>(&device, config.into(), channels, cap, samples, peak),
+        SampleFormat::I16 => build::<i16>(&device, config.into(), channels, cap, samples, peak),
+        SampleFormat::U16 => build::<u16>(&device, config.into(), channels, cap, samples, peak),
+        SampleFormat::I32 => build::<i32>(&device, config.into(), channels, cap, samples, peak),
+        SampleFormat::I8 => build::<i8>(&device, config.into(), channels, cap, samples, peak),
+        SampleFormat::U8 => build::<u8>(&device, config.into(), channels, cap, samples, peak),
+        SampleFormat::F64 => build::<f64>(&device, config.into(), channels, cap, samples, peak),
+        f => {
+            return Err(format!(
+                "The microphone's sample format ({f:?}) isn't supported."
+            ))
+        }
+    }?;
+    stream
+        .play()
+        .map_err(|e| format!("Couldn't start the microphone: {e}"))?;
+    Ok((stream, rate))
+}
+
+fn build<T>(
+    device: &cpal::Device,
+    config: cpal::StreamConfig,
+    channels: usize,
+    cap: usize,
+    samples: Arc<Mutex<Vec<f32>>>,
+    peak: Arc<AtomicU32>,
+) -> Result<cpal::Stream, String>
+where
+    T: SizedSample,
+    f32: FromSample<T>,
+{
+    device
+        .build_input_stream(
+            config,
+            move |data: &[T], _: &cpal::InputCallbackInfo| {
+                let mut out = samples.lock().unwrap();
+                let mut loudest = f32::from_bits(peak.load(Ordering::Relaxed));
+                for frame in data.chunks(channels) {
+                    if out.len() >= cap {
+                        break;
+                    }
+                    let sum: f32 = frame.iter().map(|&s| f32::from_sample(s)).sum();
+                    let v = sum / frame.len() as f32;
+                    loudest = loudest.max(v.abs());
+                    out.push(v);
+                }
+                peak.store(loudest.to_bits(), Ordering::Relaxed);
+            },
+            |e| eprintln!("wraithgrid: microphone: {e}"),
+            None,
+        )
+        .map_err(|e| format!("Couldn't open the microphone: {e}"))
+}
+
+/// Linear resampling; plenty for speech going into Whisper.
+pub fn resample(input: &[f32], from: u32, to: u32) -> Vec<f32> {
+    if from == to || input.is_empty() {
+        return input.to_vec();
+    }
+    let ratio = from as f64 / to as f64;
+    let len = ((input.len() as f64) / ratio).floor() as usize;
+    (0..len)
+        .map(|i| {
+            let pos = i as f64 * ratio;
+            let j = pos.floor() as usize;
+            let frac = (pos - j as f64) as f32;
+            let a = input[j];
+            let b = *input.get(j + 1).unwrap_or(&a);
+            a + (b - a) * frac
+        })
+        .collect()
+}
+
+/// The loaded model, kept after the first use (loading takes a second or two).
+#[derive(Default)]
+pub struct Engine {
+    ctx: Mutex<Option<Arc<WhisperContext>>>,
+}
+
+impl Engine {
+    fn context(&self) -> Result<Arc<WhisperContext>, String> {
+        let mut slot = self.ctx.lock().unwrap();
+        if let Some(c) = slot.as_ref() {
+            return Ok(c.clone());
+        }
+        if !model_ready() {
+            return Err("The speech model isn't downloaded yet.".into());
+        }
+        whisper_rs::install_logging_hooks();
+        let path = model_path();
+        let ctx = WhisperContext::new_with_params(&path, WhisperContextParameters::default())
+            .map_err(|e| format!("Couldn't load the speech model: {e}"))?;
+        let ctx = Arc::new(ctx);
+        *slot = Some(ctx.clone());
+        Ok(ctx)
+    }
+
+    /// Loads the model now (while the user is still talking).
+    pub fn warm(&self) -> Result<(), String> {
+        self.context().map(|_| ())
+    }
+
+    /// 16 kHz mono → text, in the language spoken (detected). Empty for silence.
+    pub fn transcribe(&self, audio: &[f32]) -> Result<String, String> {
+        if audio.len() < MIN_SAMPLES || audio.iter().all(|s| s.abs() < 1e-3) {
+            return Ok(String::new());
+        }
+        let ctx = self.context()?;
+        let mut state = ctx
+            .create_state()
+            .map_err(|e| format!("Couldn't start the speech model: {e}"))?;
+        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+        params.set_language(Some("auto"));
+        params.set_translate(false);
+        params.set_n_threads(threads());
+        params.set_no_context(true);
+        params.set_no_timestamps(true);
+        params.set_suppress_blank(true);
+        params.set_suppress_nst(true);
+        params.set_print_special(false);
+        params.set_print_progress(false);
+        params.set_print_realtime(false);
+        params.set_print_timestamps(false);
+        // Whisper wants at least a second; pad short clips with silence.
+        let mut padded;
+        let audio = if audio.len() < RATE as usize + RATE as usize / 10 {
+            padded = audio.to_vec();
+            padded.resize(RATE as usize + RATE as usize / 10, 0.0);
+            &padded[..]
+        } else {
+            audio
+        };
+        state
+            .full(params, audio)
+            .map_err(|e| format!("Couldn't turn the speech into text: {e}"))?;
+        let mut text = String::new();
+        for i in 0..state.full_n_segments() {
+            if let Some(seg) = state.get_segment(i) {
+                if let Ok(s) = seg.to_str_lossy() {
+                    text.push_str(&s);
+                }
+            }
+        }
+        Ok(clean(&text))
+    }
+}
+
+fn threads() -> i32 {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .clamp(1, 8) as i32
+}
+
+/// Whisper's text, tidied: no leading space, and no "[BLANK_AUDIO]"/"(music)" style markers it
+/// writes for silence or noise.
+pub fn clean(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut depth = 0i32;
+    for c in text.chars() {
+        match c {
+            '[' | '(' => depth += 1,
+            ']' | ')' if depth > 0 => depth -= 1,
+            _ if depth == 0 => out.push(c),
+            _ => {}
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resample_halves_and_keeps_the_shape() {
+        let input: Vec<f32> = (0..8).map(|i| i as f32).collect();
+        assert_eq!(resample(&input, 32_000, 16_000), vec![0.0, 2.0, 4.0, 6.0]);
+        assert_eq!(resample(&input, 16_000, 16_000), input);
+        let up = resample(&[0.0, 1.0], 8_000, 16_000);
+        assert_eq!(up, vec![0.0, 0.5, 1.0, 1.0]);
+        assert_eq!(resample(&vec![0.0; 48_000], 48_000, 16_000).len(), 16_000);
+    }
+
+    #[test]
+    fn clean_drops_markers_and_extra_spaces() {
+        assert_eq!(clean(" Hello there."), "Hello there.");
+        assert_eq!(clean(" [BLANK_AUDIO]"), "");
+        assert_eq!(
+            clean("(music) Fix the  login bug [inaudible] now"),
+            "Fix the login bug now"
+        );
+    }
+
+    #[test]
+    fn silence_is_empty_without_a_model() {
+        let e = Engine::default();
+        assert_eq!(e.transcribe(&[0.0; 32_000]).unwrap(), "");
+        assert_eq!(e.transcribe(&[0.5; 100]).unwrap(), "");
+    }
+
+    /// Downloads the real model (into `$HOME/.wraithgrid/models`, run with a throwaway HOME) and
+    /// transcribes a 16-bit mono WAV: `WG_VOICE_WAV=jfk.wav HOME=$(mktemp -d) cargo test
+    /// --no-default-features voice::tests::live -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn live_download_and_transcribe() {
+        let wav = std::fs::read(std::env::var("WG_VOICE_WAV").expect("WG_VOICE_WAV")).unwrap();
+        let rate = u32::from_le_bytes(wav[24..28].try_into().unwrap());
+        let data = wav.windows(4).position(|w| w == b"data").unwrap() + 8;
+        let pcm: Vec<f32> = wav[data..]
+            .chunks_exact(2)
+            .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0)
+            .collect();
+        let mut calls = 0;
+        download_model(&AtomicBool::new(false), |_, _| calls += 1).unwrap();
+        assert!(model_ready() && calls > 0);
+        let t = Instant::now();
+        let text = Engine::default()
+            .transcribe(&resample(&pcm, rate, RATE))
+            .unwrap();
+        eprintln!("{:?} in {:?}", text, t.elapsed());
+        assert!(text
+            .to_lowercase()
+            .contains("ask not what your country can do for you"));
+    }
+
+    /// Opens the default microphone for 1.5 s (nothing is kept): `cargo test --no-default-features
+    /// voice::tests::live_mic -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn live_mic() {
+        let levels = Arc::new(Mutex::new(Vec::new()));
+        let l2 = levels.clone();
+        let rec = record(move |l| l2.lock().unwrap().push(l), || {}).unwrap();
+        std::thread::sleep(Duration::from_millis(1500));
+        let audio = rec.finish();
+        let n = levels.lock().unwrap().len();
+        eprintln!("{} samples at 16 kHz, {n} level events", audio.len());
+        assert!(audio.len() > RATE as usize && n >= 10);
+    }
+
+    #[test]
+    fn hex_is_lowercase() {
+        assert_eq!(hex(&[0, 15, 255]), "000fff");
+    }
+}

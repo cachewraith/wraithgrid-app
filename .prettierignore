@@ -7,3 +7,5 @@ test-results
 playwright-report
 host-rs/target
 app-rs
+desktop-rs/target
+desktop-rs/gen

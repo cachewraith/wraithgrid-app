@@ -274,6 +274,17 @@ const api: WraithApi = {
       subscribe<{ id: number; action: CliAction }>(IPC.cliAction, (m) => cb(m.id, m.action)),
     reply: (id, result) => send(IPC.cliResult, { id, result })
   },
+  voice: {
+    status: () => call(IPC.voiceStatus, {}),
+    download: () => call(IPC.voiceDownload, {}),
+    cancelDownload: () => call(IPC.voiceCancelDownload, {}),
+    onProgress: (cb) => subscribe<{ done: number; total: number }>(IPC.voiceProgress, cb),
+    start: () => call(IPC.voiceStart, {}),
+    stop: () => call(IPC.voiceStop, {}),
+    cancel: () => call(IPC.voiceCancel, {}),
+    onLevel: (cb) => subscribe<{ level: number }>(IPC.voiceLevel, (m) => cb(m.level)),
+    onEnded: (cb) => subscribe<Record<string, never>>(IPC.voiceEnded, () => cb())
+  },
   cloud: {
     status: () => call(IPC.cloudStatus, {}),
     config: () => call(IPC.cloudConfig, {}),

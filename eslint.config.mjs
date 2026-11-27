@@ -11,7 +11,10 @@ export default tseslint.config(
       'node_modules/**',
       'docs/**',
       'test-results/**',
-      'playwright-report/**'
+      'playwright-report/**',
+      // Cargo build output (whisper.cpp's CMake writes .ts dependency files there).
+      'desktop-rs/target/**',
+      'host-rs/target/**'
     ]
   },
   js.configs.recommended,
