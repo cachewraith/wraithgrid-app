@@ -1,3 +1,0 @@
-// The Windows icon of wraithgrid.exe (crates/app/build.rs): resource 1 is the one GPUI loads
-// for its windows, and Explorer, shortcuts and the Uninstall entry show it.
-1 ICON "wraithgrid.ico"

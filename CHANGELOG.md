@@ -2,6 +2,7 @@
 
 ## 2026-11-27
 
+- [build] Removed the GPUI rewrite: `app-rs/crates/app`, `gpui-spike/`, the GPUI icon resource and their CI jobs (spike on 4 runners, the GPUI release build); workflow `gpui` is now `desktop` (Tauri checks + installers), app-rs keeps the crates desktop-rs uses (Cargo.lock 932 → 172 packages); ADR 0005 rejected; release steps written down in CONTEXT (files: .github/workflows/desktop.yml, app-rs/Cargo.{toml,lock}, app-rs/crates/app/**, gpui-spike/**, app-rs/packaging/{windows/wraithgrid.rc,macos/package.sh}, docs/{CONTEXT,TODO,DECISIONS}.md, docs/adr/0005-gpui-rewrite.md, .gitignore, .prettierignore)
 - [release] v2.5.3: questions, settings, images and tool details from the web app (files: desktop-rs/Cargo.toml, desktop-rs/Cargo.lock, desktop-rs/tauri.conf.json, docs/WHATS-NEW.md, docs/CONTEXT.md)
 - [relay] Web access, from a browser: answer claude's questions (`ask` on the waiting tool item, `chat.answer`; only a pending AskUserQuestion, never another approval), switch a chat's model, effort or a mode that still asks (`settings`, `chat.set`; never Full access or Auto), send images (`chat.image` frames, put together and checked here, dropped after 3 min or 7 MB), and see a tool call's command, diff or task list (`preview`, dropped when it wouldn't fit a frame); `state.features` says what this desktop can do (files: src/shared/relay/messages.ts, src/renderer/lib/relay/{wire,host}.ts, tests/unit/relay-{wire,host}.test.ts)
 

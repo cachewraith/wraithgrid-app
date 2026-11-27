@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds the GPUI app's Windows installer with electron-builder's NSIS asset name
+# Builds the Tauri app's (desktop-rs) Windows installer with electron-builder's NSIS asset name
 # (Wraithgrid-Setup-<version>-x64.exe), so the in-app updater finds it
 # (wraithgrid_core::update::asset_name) and an Electron install upgrades in place
 # (wraithgrid.nsi), plus latest.yml for electron-updater (the bridge) and SHA256SUMS.txt.

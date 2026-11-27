@@ -4,8 +4,8 @@
 # and the pty host in Contents/Resources (Electron's process.resourcesPath), then per CPU a dmg
 # (to install) and a zip (what electron-updater reads), Wraithgrid-<version>-mac-<arch>.<ext>,
 # plus latest-mac.yml (the bridge) and SHA256SUMS.txt. Run on a Mac.
-# Needs: the app built per arch (app-rs/target/<triple>/release/wraithgrid; for this Mac's own
-# arch app-rs/target/release/wraithgrid also works) and the universal host
+# Needs: the app built per arch (desktop-rs/target/<triple>/release/wraithgrid; for this Mac's
+# own arch desktop-rs/target/release/wraithgrid also works) and the universal host
 # (scripts/build-mac-host.sh → host-rs/target/release/wraithgrid-host), as the Electron build.
 # Usage: package.sh [x64] [arm64]   (default: both)
 #

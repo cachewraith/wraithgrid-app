@@ -1,4 +1,5 @@
-# The GPUI rewrite (#166, ADR 0005). host-rs/ stays outside until the Electron app retires:
+# The crates the shipped Tauri app (desktop-rs) is built on: config, chat, git, cloud… The GPUI
+# app that started them (crates/app, ADR 0005) was removed on 2026-11-27. host-rs/ stays outside:
 # its build scripts and packaging point at host-rs/target.
 [workspace]
 resolver = "2"

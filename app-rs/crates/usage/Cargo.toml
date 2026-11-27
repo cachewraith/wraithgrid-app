@@ -10,7 +10,7 @@ anyhow.workspace = true
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-# Local calendar days (usage buckets) and the poll answer's ISO times. Same version as gpui-spike.
+# Local calendar days (usage buckets) and the poll answer's ISO times.
 chrono = { version = "=0.4.45", default-features = false, features = ["clock", "std"] }
 # The live-limits poll; blocking, so the caller runs it off the UI thread. rustls (ring) +
 # webpki roots, no gzip: the answer is a few hundred bytes.
