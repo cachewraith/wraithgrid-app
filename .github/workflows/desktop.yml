@@ -54,7 +54,7 @@ jobs:
       - name: Linux libraries (Tauri)
         run: >
           sudo apt-get update && sudo apt-get install -y
-          libgtk-3-dev libwebkit2gtk-4.1-dev libsoup-3.0-dev libayatana-appindicator3-dev librsvg2-dev
+          libgtk-3-dev libwebkit2gtk-4.1-dev libsoup-3.0-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version-file: package.json
@@ -82,7 +82,7 @@ jobs:
           sudo apt-get update
           # desktop-file-utils: appimagetool refuses to run without desktop-file-validate.
           sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libsoup-3.0-dev \
-            libayatana-appindicator3-dev librsvg2-dev libssl-dev zstd \
+            libayatana-appindicator3-dev librsvg2-dev libasound2-dev libssl-dev zstd \
             ruby ruby-dev rpm libarchive-tools imagemagick desktop-file-utils
           sudo gem install --no-document fpm -v 1.16.0
           curl -fsSL -o /usr/local/bin/appimagetool \

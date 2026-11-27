@@ -7,6 +7,7 @@
 mod ipc;
 mod panels;
 mod sys;
+mod voice;
 
 use serde_json::Value;
 use tauri::AppHandle;

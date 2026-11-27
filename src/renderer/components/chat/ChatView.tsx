@@ -709,6 +709,7 @@ const ChatFoot = memo(function ChatFoot({
         history={history}
         autoFocus={autoFocus}
         quote={quote}
+        voice={api.voice}
         meta={[cwdLabel, branch]}
         model={
           // Any CLI whose adapter reports models gets the controls.

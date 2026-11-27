@@ -26,6 +26,7 @@ import {
   IconClose,
   IconFile,
   IconGlobe,
+  IconMic,
   IconPaperclip,
   IconQuote,
   IconStop
@@ -44,6 +45,9 @@ import { SlashMenu, slashOptionId } from './SlashMenu'
 import { ImageViewer } from './ImageViewer'
 import { QUOTES_MAX, makeQuote, withQuotes, type Quote } from '../../lib/quotes'
 import { NOT_BROWSING, atEdge, historyStep, type HistoryNav } from '../../lib/prompt-history'
+import { clock, insertSpoken, megabytes, percent } from '../../lib/voice'
+import type { VoiceApi } from '@shared/ipc-contract'
+import { useVoiceTyping } from './useVoiceTyping'
 
 interface Props {
   placeholder: string
@@ -84,6 +88,8 @@ interface Props {
     reset: { label: string; hint: string } | null
     onQueue: (text: string, when: number | 'reset') => void
   }
+  /** Voice typing (Tauri): the mic button; what's said goes into the box, never sent. */
+  voice?: VoiceApi
 }
 
 const hm = (ms: number): string => toLocal(ms).slice(11)
@@ -124,7 +130,8 @@ export function Composer({
   sendLater,
   drop,
   onDropTaken,
-  quote
+  quote,
+  voice: voiceApi
 }: Props) {
   const [laterMenu, setLaterMenu] = useState<MenuPoint | null>(null)
   /** "At a time…": the date field in place of the menu. */
@@ -196,6 +203,11 @@ export function Composer({
     if (p.focus) box.focus()
     box.setSelectionRange(p.at, p.at)
   })
+  // Voice typing: what was said goes where the caret is, for the user to edit and send.
+  const voice = useVoiceTyping(voiceApi)
+  const vs = voice?.state.kind ?? 'idle'
+  const listening = vs === 'recording'
+  const heard = voice?.heard ?? null
   // ↑/↓ through sent prompts (#132); typing or sending ends browsing.
   const nav = useRef<HistoryNav>(NOT_BROWSING)
   const recall = (dir: -1 | 1, box: HTMLTextAreaElement): boolean => {
@@ -210,6 +222,17 @@ export function Composer({
     placeCaret.current = { text: step.text, at: step.text.length }
     return true
   }
+
+  useEffect(() => {
+    const box = ref.current
+    if (!heard || !box) return
+    const r = insertSpoken(box.value, box.selectionStart, box.selectionEnd, heard.text)
+    nav.current = NOT_BROWSING
+    placeCaret.current = { text: r.text, at: r.caret, focus: true }
+    setText(r.text)
+    setCaret(r.caret)
+    setDismissed(r.text)
+  }, [heard])
 
   const pick = (item: SlashItem): void => {
     if (item.group === 'app') {
@@ -280,6 +303,7 @@ export function Composer({
   }
   const send = (): void => {
     if (!canSend) return
+    if (voice?.state.kind === 'recording') voice.cancel()
     onSend(withNotes(withAttachments(text.trim(), files)), images)
     nav.current = NOT_BROWSING
     setText('')
@@ -447,6 +471,47 @@ export function Composer({
             onClose={() => setPreview(null)}
           />
         ) : null}
+        {voice && vs !== 'idle' ? (
+          <div className={`cc-voice ${vs}`} role="status" aria-live="polite">
+            {voice.state.kind === 'offer' ? (
+              <>
+                <span>
+                  Voice typing runs on this computer and needs a speech model, downloaded once (
+                  {megabytes(voice.state.bytes)}).
+                </span>
+                <button className="btn sm pri" onClick={voice.download}>
+                  Download
+                </button>
+                <button className="btn sm gh" onClick={voice.cancel}>
+                  Not now
+                </button>
+              </>
+            ) : voice.state.kind === 'downloading' ? (
+              <>
+                <span>
+                  Downloading the speech model… {percent(voice.state.done, voice.state.total)}%
+                </span>
+                <span className="cc-voice-bar" aria-hidden="true">
+                  <i style={{ width: `${percent(voice.state.done, voice.state.total)}%` }} />
+                </span>
+                <button className="btn sm gh" onClick={voice.cancel}>
+                  Cancel
+                </button>
+              </>
+            ) : voice.state.kind === 'recording' ? (
+              <VoiceClock since={voice.state.since} />
+            ) : voice.state.kind === 'transcribing' ? (
+              <span>Writing down what you said…</span>
+            ) : voice.state.kind === 'error' ? (
+              <>
+                <span className="cc-voice-err">{voice.state.message}</span>
+                <button className="btn sm gh" onClick={voice.cancel}>
+                  Dismiss
+                </button>
+              </>
+            ) : null}
+          </div>
+        ) : null}
         <textarea
           ref={ref}
           rows={1}
@@ -467,6 +532,20 @@ export function Composer({
           onSelect={syncCaret}
           onPaste={onPaste}
           onKeyDown={(e) => {
+            if (voice && vs !== 'idle' && vs !== 'transcribing') {
+              if (e.key === 'Escape') {
+                e.preventDefault()
+                e.stopPropagation()
+                voice.cancel()
+                return
+              }
+              // Enter while listening writes it down; it doesn't send the message.
+              if (listening && e.key === 'Enter' && !e.nativeEvent.isComposing) {
+                e.preventDefault()
+                voice.toggle()
+                return
+              }
+            }
             if (open && items.length && !e.nativeEvent.isComposing) {
               const step = e.key === 'ArrowDown' ? 1 : e.key === 'ArrowUp' ? -1 : 0
               if (step) {
@@ -548,6 +627,23 @@ export function Composer({
               }}
             >
               <IconClock small />
+            </button>
+          ) : null}
+          {voice ? (
+            <button
+              className={`cc-btn mic${listening ? ' on' : ''}${vs === 'transcribing' ? ' wait' : ''}`}
+              aria-label={listening ? 'Stop voice typing' : 'Voice typing'}
+              aria-pressed={listening}
+              title={
+                listening
+                  ? 'Stop and write it down (Enter) · Esc to cancel'
+                  : 'Voice typing: speak, and it’s written in the box'
+              }
+              disabled={vs === 'transcribing' || vs === 'downloading'}
+              style={listening ? { ['--lvl' as string]: Math.min(1, voice.level * 4) } : undefined}
+              onClick={voice.toggle}
+            >
+              <IconMic small />
             </button>
           ) : null}
           <button
@@ -639,5 +735,20 @@ export function Composer({
         ))}
       </div>
     </div>
+  )
+}
+
+/** "Listening… 0:07" under the box while recording, ticking each second. */
+function VoiceClock({ since }: { since: number }) {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 500)
+    return () => clearInterval(t)
+  }, [])
+  return (
+    <span>
+      <i className="cc-voice-dot" aria-hidden="true" />
+      Listening… {clock(now - since)} · click the mic or press Enter to write it down, Esc to cancel
+    </span>
   )
 }

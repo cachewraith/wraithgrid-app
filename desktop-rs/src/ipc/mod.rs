@@ -15,6 +15,7 @@ mod relay;
 mod themes;
 mod update;
 mod usage;
+mod voice;
 mod window;
 
 use serde_json::{json, Value};
@@ -36,6 +37,7 @@ pub fn setup(app: &AppHandle) {
     misc::setup(app);
     cloud::setup(app);
     relay::setup(app);
+    voice::setup(app);
 }
 
 pub async fn route(app: &AppHandle, channel: &str, payload: Value) -> Result<Value, String> {
@@ -56,6 +58,7 @@ pub async fn route(app: &AppHandle, channel: &str, payload: Value) -> Result<Val
         "preview" => preview::handle(app, channel, payload).await,
         "cloud" => cloud::handle(app, channel, payload).await,
         "relay" => relay::handle(app, channel, payload).await,
+        "voice" => voice::handle(app, channel, payload).await,
         "debug" => {
             eprintln!(
                 "renderer: {}",

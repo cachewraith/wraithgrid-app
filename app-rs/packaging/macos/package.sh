@@ -84,6 +84,7 @@ bundle() { # <arch> <binary>: Wraithgrid.app for one CPU
   <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
   <key>LSMinimumSystemVersion</key><string>12.0</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSMicrophoneUsageDescription</key><string>Voice typing turns what you say into text in the chat box, on this Mac.</string>
   <key>NSHumanReadableCopyright</key><string>Copyright © 2026 cachewraith</string>
   <key>NSRequiresAquaSystemAppearance</key><false/>
   <key>NSSupportsAutomaticGraphicsSwitching</key><true/>

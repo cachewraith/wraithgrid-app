@@ -804,6 +804,11 @@ export interface WraithApi {
     onLink(cb: () => void): () => void
   }
   /**
+   * Voice typing in the chat box (Tauri app only): the microphone, turned into text by a local
+   * Whisper model that is downloaded once (`download`). Nothing leaves the computer.
+   */
+  voice?: VoiceApi
+  /**
    * The Wraithgrid account on wraithgrid-server (Tauri app only; absent in the Electron build).
    * Not the agent CLIs' accounts.
    */
@@ -908,6 +913,35 @@ export interface CloudUser {
   plan: 'free' | 'pro' | 'team'
   status: 'active' | 'past_due' | 'suspended'
   createdAt: string
+}
+
+export interface VoiceStatus {
+  ok: true
+  /** The speech model is on disk. */
+  ready: boolean
+  /** Its download size. */
+  bytes: number
+  downloading: boolean
+  /** A recording stops by itself after this long (`onEnded`). */
+  maxSeconds: number
+}
+
+export interface VoiceApi {
+  status(): Promise<VoiceStatus>
+  /** Downloads the speech model (resolves when done); `onProgress` while it runs. */
+  download(): Promise<SimpleResult>
+  cancelDownload(): Promise<SimpleResult>
+  onProgress(cb: (p: { done: number; total: number }) => void): () => void
+  /** Starts the microphone; `code: 'no_model'` until the model is downloaded. */
+  start(): Promise<{ ok: true } | { ok: false; error: string; code?: string }>
+  /** Stops the microphone and gives what was said ('' for silence). */
+  stop(): Promise<{ ok: true; text: string } | { ok: false; error: string }>
+  /** Stops the microphone and throws the recording away. */
+  cancel(): Promise<SimpleResult>
+  /** How loud the microphone is (0–1), about ten times a second while recording. */
+  onLevel(cb: (level: number) => void): () => void
+  /** The recording hit its time limit and stopped itself: call `stop` for the text. */
+  onEnded(cb: () => void): () => void
 }
 
 /** The relay socket in main (`relay:event`). */

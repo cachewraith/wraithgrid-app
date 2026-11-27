@@ -1205,6 +1205,78 @@ li.done > .md-box,
   background: var(--raise);
   color: var(--tx);
 }
+/* Voice typing: the mic, ringed by how loud it hears you (--lvl 0–1), and the bar above the box. */
+.cc-btn.mic {
+  background: none;
+  color: var(--fa);
+  position: relative;
+}
+.cc-btn.mic:hover:not(:disabled) {
+  background: var(--raise);
+  color: var(--tx);
+}
+.cc-btn.mic.on {
+  background: color-mix(in srgb, var(--err) 18%, transparent);
+  color: var(--err);
+  box-shadow: 0 0 0 calc(1px + 5px * var(--lvl, 0)) color-mix(in srgb, var(--err) 28%, transparent);
+  transition:
+    box-shadow 0.1s linear,
+    background 0.15s;
+}
+.cc-btn.mic:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.cc-btn.mic.wait {
+  animation: cc-voice-pulse 1.2s ease-in-out infinite;
+}
+.cc-voice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 0 0 6px;
+  padding: 6px 10px;
+  border-radius: calc(8px * var(--rs, 1));
+  background: var(--raise);
+  color: var(--fa);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.cc-voice > span:first-child {
+  flex: 1 1 200px;
+}
+.cc-voice-err {
+  color: var(--err);
+}
+.cc-voice-bar {
+  flex: 0 0 120px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--sel);
+  overflow: hidden;
+}
+.cc-voice-bar i {
+  display: block;
+  height: 100%;
+  background: var(--acc);
+  transition: width 0.2s;
+}
+.cc-voice-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: var(--err);
+  vertical-align: 1px;
+  animation: cc-voice-pulse 1.2s ease-in-out infinite;
+}
+@keyframes cc-voice-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
 .cc.drop .cc-box {
   border-color: var(--acc);
   border-style: dashed;
@@ -1482,6 +1554,8 @@ li.done > .md-box,
   .chat-bar,
   .chat-jump,
   .cc-btn.stop,
+  .cc-btn.mic.wait,
+  .cc-voice-dot,
   .cc-img,
   .cc-quote,
   .cmsg.quote-hit,

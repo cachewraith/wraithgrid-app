@@ -13,8 +13,8 @@ mkdir -p "$out"
 
 # Run-time libraries of the binary (readelf -d … NEEDED), by each distro's package names.
 # The tray icon also uses libayatana-appindicator3 when present (loaded at run time).
-deb_deps=(libwebkit2gtk-4.1-0 libgtk-3-0 libsoup-3.0-0 libdbus-1-3 xdg-utils)
-rpm_deps=(webkit2gtk4.1 gtk3 libsoup3 dbus-libs xdg-utils)
+deb_deps=(libwebkit2gtk-4.1-0 libgtk-3-0 libsoup-3.0-0 libdbus-1-3 libasound2 xdg-utils)
+rpm_deps=(webkit2gtk4.1 gtk3 libsoup3 dbus-libs alsa-lib xdg-utils)
 pacman_deps=(webkit2gtk-4.1 gtk3 libsoup3 dbus xdg-utils)
 
 fpm_build() {
