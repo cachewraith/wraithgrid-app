@@ -1,4 +1,21 @@
-# What's new in 2.5.4: your images on the web
+# What's new in 2.6.0: talk to type
+
+*v2.6.0 · 2026-11-27*
+
+Press the new mic button in the chat box, say what you want, and it's written in the box for you to check and send. It runs on this computer: what you say never leaves it.
+
+| New | What it does |
+|---|---|
+| Voice typing | The mic button next to Send listens while you talk and writes what you said where the cursor is. Click the mic again or press Enter to finish, Esc to cancel. It never sends by itself |
+| Private and offline | Speech is turned into text on this computer by a Whisper model, in the language you speak. The first time, it asks to download the model once (190 MB) |
+
+| Fix | What changed |
+|---|---|
+| "Offline" on the web while this computer was on | After sleep or a network change, the web app could keep saying this computer was offline. The app now notices a dead connection within about a minute, and reconnects at once when it wakes up or gets back online |
+
+---
+
+## Previously, in 2.5.4: your images on the web
 
 *v2.5.4 · 2026-11-27*
 
