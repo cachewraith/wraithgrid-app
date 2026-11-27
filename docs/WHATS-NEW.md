@@ -1,4 +1,21 @@
-# What's new in 2.6.1: voice typing fixed
+# What's new in 2.7.0: see your words as you speak
+
+*v2.7.0 · 2026-11-27*
+
+Voice typing now writes in the message box while you're still talking, and the mic shows clearly that it's listening.
+
+| New | What it does |
+|---|---|
+| Live text while you talk | Your words appear in the message box as you say them, at the cursor. Stop, and the final text replaces them; Esc puts the box back the way it was |
+| A mic that shows it's listening | The mic pops when you click it and rings ripple out while it listens; a small waveform beside "Listening…" moves with your voice, and the message box glows |
+
+| Fix | What changed |
+|---|---|
+| Waiting after you stop talking | The text arrives about twice as fast after you stop, and long recordings stay quick |
+
+---
+
+## Previously, in 2.6.1: voice typing fixed
 
 *v2.6.1 · 2026-11-27*
 

@@ -2,6 +2,7 @@
 
 ## 2026-11-27
 
+- [release] v2.7.0: see your words as you speak (files: desktop-rs/Cargo.toml, desktop-rs/Cargo.lock, desktop-rs/tauri.conf.json, docs/WHATS-NEW.md, docs/CONTEXT.md, CHANGELOG.md)
 - [voice] Live text while you talk: during a recording a background pass re-reads the audio so far every ~0.5 s (encoder cut to the clip, language detected once then pinned: ~0.4–1.5 s a pass) and sends `voice:partial`; the box shows the words at the caret (read-only while recording), Stop swaps in the full-quality text, Esc restores the box; speech over 20 s is written down for good at a pause so passes stay short; Stop is ~2× faster (files: desktop-rs/src/voice.rs, desktop-rs/src/ipc/voice.rs, src/shared/ipc-channels.ts, src/shared/ipc-contract.ts, src/tauri/bridge.ts, src/renderer/components/chat/useVoiceTyping.ts, src/renderer/components/chat/Composer.tsx)
 - [voice] Mic animation: pop on click, two ripple rings while listening, a level-driven waveform in the "Listening…" bar, a glow round the box; off under reduced motion; the web app gets the same (wraithgrid-web: src/components/Composer.tsx, src/styles/shell.css) (files: src/renderer/styles/chat.css, src/renderer/components/chat/Composer.tsx)
 - [release] v2.6.1: voice typing no longer crashes the app (files: desktop-rs/Cargo.toml, desktop-rs/Cargo.lock, desktop-rs/tauri.conf.json, docs/WHATS-NEW.md, docs/CONTEXT.md, CHANGELOG.md)
