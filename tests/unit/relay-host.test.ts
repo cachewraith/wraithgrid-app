@@ -44,6 +44,10 @@ function setup() {
     }),
     chatSend: vi.fn(),
     chatInterrupt: vi.fn(),
+    chatApprove: vi.fn(),
+    chatSetMode: vi.fn(),
+    chatSetModel: vi.fn(),
+    chatSetEffort: vi.fn(),
     switchWorkspace: vi.fn(),
     createPane: vi.fn(() => {
       ws.panes.push({ ...pane, id: 'p2', title: 'New chat' } as Pane)
@@ -323,6 +327,150 @@ describe('RelayHost', () => {
         .slice(before)
         .some((m) => 'commands' in m)
     ).toBe(false)
+  })
+
+  it('answers claude’s question from the web, but never another approval', async () => {
+    const t = setup()
+    const { say, heard } = await paired(t)
+    const ask = (reqId: string, questions?: boolean) => ({
+      kind: 'tool' as const,
+      id: `t-${reqId}`,
+      name: questions ? 'AskUserQuestion' : 'Bash',
+      toolKind: 'other' as const,
+      subtitle: '',
+      preview: null,
+      output: null,
+      isError: false,
+      approval: {
+        reqId,
+        canAlways: false,
+        decided: null,
+        ...(questions
+          ? {
+              questions: [
+                {
+                  question: 'Which database?',
+                  header: 'DB',
+                  multiSelect: false,
+                  options: [
+                    { label: 'Postgres', description: '' },
+                    { label: 'SQLite', description: '' }
+                  ]
+                }
+              ]
+            }
+          : {})
+      }
+    })
+    t.setThread({ ...EMPTY_THREAD, items: [ask('q1', true), ask('b1')] })
+    say({ kind: 'chat.open', paneId: 'p1' })
+    await tick()
+    const snap = heard().at(-1) as Extract<ToWeb, { kind: 'chat.snapshot' }>
+    expect(snap.items[0]?.ask).toEqual({
+      id: 'q1',
+      questions: [
+        {
+          question: 'Which database?',
+          header: 'DB',
+          multiSelect: false,
+          options: [
+            { label: 'Postgres', description: '' },
+            { label: 'SQLite', description: '' }
+          ]
+        }
+      ]
+    })
+    expect(snap.items[1]?.ask).toBeUndefined()
+
+    say({ kind: 'chat.answer', req: 'a1', paneId: 'p1', ask: 'b1', answers: { x: 'yes' } })
+    await tick()
+    expect(heard().at(-1)).toMatchObject({ kind: 'ack', req: 'a1', ok: false })
+    say({ kind: 'chat.answer', req: 'a2', paneId: 'p1', ask: 'q1', answers: { Other: 'x' } })
+    await tick()
+    expect(heard().at(-1)).toMatchObject({ kind: 'ack', req: 'a2', ok: false })
+    expect(t.actions.chatApprove).not.toHaveBeenCalled()
+
+    say({
+      kind: 'chat.answer',
+      req: 'a3',
+      paneId: 'p1',
+      ask: 'q1',
+      answers: { 'Which database?': 'SQLite' }
+    })
+    await tick()
+    expect(heard().at(-1)).toEqual({ kind: 'ack', req: 'a3', ok: true })
+    expect(t.actions.chatApprove).toHaveBeenCalledWith('p1', 'q1', 'allow', {
+      'Which database?': 'SQLite'
+    })
+    say({ kind: 'chat.answer', req: 'a4', paneId: 'p1', ask: 'q1', skip: true })
+    await tick()
+    expect(t.actions.chatApprove).toHaveBeenLastCalledWith('p1', 'q1', 'deny')
+  })
+
+  it('switches model, effort and a mode that still asks; never Full access', async () => {
+    const t = setup()
+    const { say, heard } = await paired(t)
+    t.setThread({
+      ...EMPTY_THREAD,
+      models: [
+        { value: 'default', label: 'Default', description: '', efforts: ['low', 'high'] },
+        { value: 'haiku', label: 'Haiku', description: '', efforts: [] }
+      ]
+    })
+    say({ kind: 'chat.open', paneId: 'p1' })
+    await tick()
+    expect((heard().at(-1) as Extract<ToWeb, { kind: 'chat.snapshot' }>).settings).toMatchObject({
+      model: null,
+      mode: 'default',
+      modes: ['default', 'acceptEdits', 'plan', 'dontAsk']
+    })
+    const ack = async (m: Record<string, unknown>) => {
+      say({ kind: 'chat.set', req: 'r', paneId: 'p1', ...m })
+      await tick()
+      return heard()
+        .filter((x) => x.kind === 'ack')
+        .at(-1)
+    }
+    expect(await ack({ mode: 'bypassPermissions' })).toMatchObject({ ok: false })
+    expect(await ack({ mode: 'auto' })).toMatchObject({ ok: false })
+    expect(t.actions.chatSetMode).not.toHaveBeenCalled()
+    expect(await ack({ mode: 'plan' })).toMatchObject({ ok: true })
+    expect(t.actions.chatSetMode).toHaveBeenCalledWith('p1', 'plan')
+    expect(await ack({ model: 'gpt-9' })).toMatchObject({ ok: false })
+    expect(await ack({ model: 'haiku' })).toMatchObject({ ok: true })
+    expect(t.actions.chatSetModel).toHaveBeenCalledWith('p1', 'haiku')
+    expect(await ack({ effort: 'max' })).toMatchObject({ ok: false })
+    expect(await ack({ effort: 'high' })).toMatchObject({ ok: true })
+    expect(t.actions.chatSetEffort).toHaveBeenCalledWith('p1', 'high')
+  })
+
+  it('puts an image together from its frames and sends it with the message', async () => {
+    const t = setup()
+    const { say, heard } = await paired(t)
+    const img = (part: number, data: string) => ({
+      kind: 'chat.image',
+      upload: 'u1',
+      part,
+      parts: 2,
+      mediaType: 'image/png',
+      data
+    })
+    say(img(0, 'aGVs'))
+    say({ kind: 'chat.send', req: 's1', paneId: 'p1', text: '', images: ['u1'] })
+    await tick(20)
+    expect(heard().at(-1)).toMatchObject({ kind: 'ack', req: 's1', ok: false })
+    expect(t.actions.chatSend).not.toHaveBeenCalled()
+    say(img(1, 'bG8='))
+    say({ kind: 'chat.send', req: 's2', paneId: 'p1', text: 'look', images: ['u1'] })
+    await tick(20)
+    expect(heard().at(-1)).toEqual({ kind: 'ack', req: 's2', ok: true })
+    expect(t.actions.chatSend).toHaveBeenCalledWith('p1', 'look', [
+      { mediaType: 'image/png', data: 'aGVsbG8=' }
+    ])
+    // Used once: the same upload can't be sent again.
+    say({ kind: 'chat.send', req: 's3', paneId: 'p1', text: 'again', images: ['u1'] })
+    await tick(20)
+    expect(heard().at(-1)).toMatchObject({ kind: 'ack', req: 's3', ok: false })
   })
 
   it('drops a frame the server replays', async () => {
