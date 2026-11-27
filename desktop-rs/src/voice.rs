@@ -416,8 +416,10 @@ mod tests {
         let rate = u32::from_le_bytes(wav[24..28].try_into().unwrap());
         let data = wav.windows(4).position(|w| w == b"data").unwrap() + 8;
         let pcm: Vec<f32> = wav[data..]
-            .chunks_exact(2)
-            .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0)
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|b| i16::from_le_bytes(*b) as f32 / 32768.0)
             .collect();
         let mut calls = 0;
         download_model(&AtomicBool::new(false), |_, _| calls += 1).unwrap();
