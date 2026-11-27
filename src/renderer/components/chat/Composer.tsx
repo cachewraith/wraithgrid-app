@@ -208,6 +208,10 @@ export function Composer({
   const vs = voice?.state.kind ?? 'idle'
   const listening = vs === 'recording'
   const heard = voice?.heard ?? null
+  const live = voice?.live ?? ''
+  // The box as it was when recording started: the words heard go in at its caret, as they're
+  // said and then for good; Esc puts it back.
+  const voiceAt = useRef<{ text: string; start: number; end: number } | null>(null)
   // ↑/↓ through sent prompts (#132); typing or sending ends browsing.
   const nav = useRef<HistoryNav>(NOT_BROWSING)
   const recall = (dir: -1 | 1, box: HTMLTextAreaElement): boolean => {
@@ -223,16 +227,45 @@ export function Composer({
     return true
   }
 
-  useEffect(() => {
-    const box = ref.current
-    if (!heard || !box) return
-    const r = insertSpoken(box.value, box.selectionStart, box.selectionEnd, heard.text)
+  const putSpoken = (r: { text: string; caret: number }, focus: boolean): void => {
     nav.current = NOT_BROWSING
-    placeCaret.current = { text: r.text, at: r.caret, focus: true }
+    placeCaret.current = { text: r.text, at: r.caret, focus }
     setText(r.text)
     setCaret(r.caret)
     setDismissed(r.text)
+  }
+  // While recording: the words so far, at the caret where it started.
+  useEffect(() => {
+    const box = ref.current
+    if (!listening || !box) return
+    const at = (voiceAt.current ??= {
+      text: box.value,
+      start: box.selectionStart,
+      end: box.selectionEnd
+    })
+    if (live || box.value !== at.text)
+      putSpoken(insertSpoken(at.text, at.start, at.end, live), false)
+  }, [listening, live])
+  // Stopped: the final text replaces the live words.
+  useEffect(() => {
+    const box = ref.current
+    if (!heard || !box) return
+    const at = voiceAt.current
+    voiceAt.current = null
+    putSpoken(
+      at
+        ? insertSpoken(at.text, at.start, at.end, heard.text)
+        : insertSpoken(box.value, box.selectionStart, box.selectionEnd, heard.text),
+      true
+    )
   }, [heard])
+  // Cancelled, or nothing was said: the box goes back to how it was. (An error keeps the words.)
+  useEffect(() => {
+    const at = voiceAt.current
+    if (!at || vs === 'recording' || vs === 'transcribing') return
+    voiceAt.current = null
+    if (vs === 'idle') putSpoken({ text: at.text, caret: at.end }, true)
+  }, [vs])
 
   const pick = (item: SlashItem): void => {
     if (item.group === 'app') {
@@ -303,7 +336,10 @@ export function Composer({
   }
   const send = (): void => {
     if (!canSend) return
-    if (voice?.state.kind === 'recording') voice.cancel()
+    if (voice?.state.kind === 'recording') {
+      voiceAt.current = null // what's in the box is what's sent
+      voice.cancel()
+    }
     onSend(withNotes(withAttachments(text.trim(), files)), images)
     nav.current = NOT_BROWSING
     setText('')
@@ -361,7 +397,7 @@ export function Composer({
         />
       ) : null}
       <div
-        className="cc-box"
+        className={`cc-box${listening ? ' listening' : ''}`}
         onDragOver={(e) => {
           if (!e.dataTransfer.types.includes('Files')) return
           e.preventDefault()
@@ -499,7 +535,7 @@ export function Composer({
                 </button>
               </>
             ) : voice.state.kind === 'recording' ? (
-              <VoiceClock since={voice.state.since} />
+              <VoiceClock since={voice.state.since} level={voice.level} />
             ) : voice.state.kind === 'transcribing' ? (
               <span>Writing down what you said…</span>
             ) : voice.state.kind === 'error' ? (
@@ -518,6 +554,8 @@ export function Composer({
           value={text}
           placeholder={ready ? placeholder : 'Starting…'}
           aria-label="Message"
+          // The words heard are written in while recording: typing would be overwritten.
+          readOnly={listening}
           spellCheck
           role={menus ? 'combobox' : undefined}
           aria-expanded={menus ? open : undefined}
@@ -738,8 +776,9 @@ export function Composer({
   )
 }
 
-/** "Listening… 0:07" under the box while recording, ticking each second. */
-function VoiceClock({ since }: { since: number }) {
+/** "Listening… 0:07" above the box while recording, ticking each second, with a little
+ *  waveform that moves with how loud the mic hears you. */
+function VoiceClock({ since, level }: { since: number; level: number }) {
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 500)
@@ -747,7 +786,17 @@ function VoiceClock({ since }: { since: number }) {
   }, [])
   return (
     <span>
-      <i className="cc-voice-dot" aria-hidden="true" />
+      <i
+        className="cc-voice-wave"
+        aria-hidden="true"
+        style={{ ['--lvl' as string]: Math.min(1, level * 4) }}
+      >
+        <b />
+        <b />
+        <b />
+        <b />
+        <b />
+      </i>
       Listening… {clock(now - since)} · click the mic or press Enter to write it down, Esc to cancel
     </span>
   )

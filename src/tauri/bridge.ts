@@ -283,7 +283,8 @@ const api: WraithApi = {
     stop: () => call(IPC.voiceStop, {}),
     cancel: () => call(IPC.voiceCancel, {}),
     onLevel: (cb) => subscribe<{ level: number }>(IPC.voiceLevel, (m) => cb(m.level)),
-    onEnded: (cb) => subscribe<Record<string, never>>(IPC.voiceEnded, () => cb())
+    onEnded: (cb) => subscribe<Record<string, never>>(IPC.voiceEnded, () => cb()),
+    onPartial: (cb) => subscribe<{ text: string }>(IPC.voicePartial, (m) => cb(m.text))
   },
   cloud: {
     status: () => call(IPC.cloudStatus, {}),

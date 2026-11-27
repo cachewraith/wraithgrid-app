@@ -1,5 +1,6 @@
-// Voice typing in the chat box: mic → main records → local Whisper → text handed to the box
-// (`onText`), never sent by itself. The first use offers the speech model's one-time download.
+// Voice typing in the chat box: mic → main records → local Whisper → text handed to the box,
+// never sent by itself. While recording, `live` is what's been heard so far (shown in the box as
+// it's said); `heard` is the final text on stop. The first use offers the model's download.
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { VoiceApi } from '@shared/ipc-contract'
 
@@ -16,6 +17,8 @@ export interface VoiceTyping {
   state: VoiceState
   /** The last thing said (a new object each time), for the box to put in. */
   heard: { text: string } | null
+  /** While recording: the words heard so far ('' until the first ones). */
+  live: string
   /** 0–1 while recording. */
   level: number
   /** The mic button: start, or finish and write it down. */
@@ -29,6 +32,7 @@ export function useVoiceTyping(api: VoiceApi | undefined): VoiceTyping | null {
   const [state, setStateNow] = useState<VoiceState>({ kind: 'idle' })
   const [level, setLevel] = useState(0)
   const [heard, setHeard] = useState<{ text: string } | null>(null)
+  const [live, setLive] = useState('')
   // Read by the event callbacks; written with the state, never during render.
   const stateRef = useRef<VoiceState>({ kind: 'idle' })
   const setState = useCallback((s: VoiceState) => {
@@ -41,6 +45,7 @@ export function useVoiceTyping(api: VoiceApi | undefined): VoiceTyping | null {
     setState({ kind: 'transcribing' })
     setLevel(0)
     const r = await api.stop()
+    setLive('')
     if (!r.ok) setState({ kind: 'error', message: r.error })
     else {
       setState({ kind: 'idle' })
@@ -50,6 +55,7 @@ export function useVoiceTyping(api: VoiceApi | undefined): VoiceTyping | null {
 
   const start = useCallback(async () => {
     if (!api) return
+    setLive('')
     const r = await api.start()
     if (r.ok) setState({ kind: 'recording', since: Date.now() })
     else if (r.code === 'no_model') {
@@ -67,6 +73,9 @@ export function useVoiceTyping(api: VoiceApi | undefined): VoiceTyping | null {
     const offLevel = api.onLevel((l) => {
       if (stateRef.current.kind === 'recording') setLevel(l)
     })
+    const offPartial = api.onPartial((text) => {
+      if (stateRef.current.kind === 'recording') setLive(text)
+    })
     const offProgress = api.onProgress(({ done, total }) => {
       if (stateRef.current.kind === 'downloading') setState({ kind: 'downloading', done, total })
     })
@@ -76,6 +85,7 @@ export function useVoiceTyping(api: VoiceApi | undefined): VoiceTyping | null {
     })
     return () => {
       offLevel()
+      offPartial()
       offProgress()
       offEnded()
     }
@@ -116,9 +126,10 @@ export function useVoiceTyping(api: VoiceApi | undefined): VoiceTyping | null {
     if (k !== 'transcribing') {
       setState({ kind: 'idle' })
       setLevel(0)
+      setLive('')
     }
   }, [api, setState])
 
   if (!api) return null
-  return { state, heard, level, toggle, cancel, download: () => void download() }
+  return { state, heard, live, level, toggle, cancel, download: () => void download() }
 }
