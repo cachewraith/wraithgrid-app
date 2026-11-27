@@ -107,7 +107,8 @@ jobs:
       - name: No AVX-512 in whisper.cpp
         shell: bash
         run: |
-          lib=$(ls desktop-rs/target/release/build/whisper-rs-sys-*/out/lib/libggml-cpu.a | head -1)
+          lib=$(find desktop-rs/target/release/build -name libggml-cpu.a -path '*whisper-rs-sys-*' | head -1)
+          test -n "$lib" || { echo "libggml-cpu.a not found"; exit 1; }
           n=$(objdump -d --no-show-raw-insn "$lib" | grep -cE '%zmm[0-9]' || true)
           echo "$lib: $n AVX-512 instructions"
           test "$n" -eq 0
