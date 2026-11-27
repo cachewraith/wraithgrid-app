@@ -123,6 +123,7 @@ export const IPC = {
   voiceCancel: 'voice:cancel',
   voiceLevel: 'voice:level',
   voiceEnded: 'voice:ended',
+  voicePartial: 'voice:partial',
   cloudConfig: 'cloud:config',
   cloudSignIn: 'cloud:signIn',
   cloudEmailSignIn: 'cloud:emailSignIn',

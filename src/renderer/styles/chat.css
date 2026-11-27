@@ -1222,6 +1222,56 @@ li.done > .md-box,
   transition:
     box-shadow 0.1s linear,
     background 0.15s;
+  animation: cc-mic-pop 0.32s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+/* Listening: two rings ripple out from the mic, one after the other. */
+.cc-btn.mic.on::before,
+.cc-btn.mic.on::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  border: 1.5px solid color-mix(in srgb, var(--err) 55%, transparent);
+  pointer-events: none;
+  animation: cc-mic-ripple 1.8s ease-out infinite;
+}
+.cc-btn.mic.on::after {
+  animation-delay: 0.9s;
+}
+.cc-btn.mic.on svg {
+  transform: scale(calc(1 + 0.12 * var(--lvl, 0)));
+  transition: transform 0.1s linear;
+}
+@keyframes cc-mic-pop {
+  0% {
+    transform: scale(0.82);
+  }
+  60% {
+    transform: scale(1.12);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+@keyframes cc-mic-ripple {
+  from {
+    transform: scale(1);
+    opacity: 0.9;
+  }
+  to {
+    transform: scale(1.9);
+    opacity: 0;
+  }
+}
+/* The box glows while the words heard are written into it. */
+.cc-box.listening {
+  border-color: color-mix(in srgb, var(--err) 45%, var(--line2));
+  box-shadow:
+    0 2px 18px rgba(0, 0, 0, 0.18),
+    0 0 0 3px color-mix(in srgb, var(--err) 12%, transparent);
+}
+.cc-box.listening textarea {
+  cursor: default;
 }
 .cc-btn.mic:disabled {
   opacity: 0.4;
@@ -1262,15 +1312,45 @@ li.done > .md-box,
   background: var(--acc);
   transition: width 0.2s;
 }
-.cc-voice-dot {
-  display: inline-block;
-  width: 7px;
-  height: 7px;
-  margin-right: 6px;
-  border-radius: 50%;
+/* Five bars bouncing at their own pace, taller the louder you speak (--lvl 0–1). */
+.cc-voice-wave {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 14px;
+  margin-right: 8px;
+  vertical-align: -2px;
+}
+.cc-voice-wave b {
+  display: block;
+  width: 3px;
+  height: 100%;
+  border-radius: 2px;
   background: var(--err);
-  vertical-align: 1px;
-  animation: cc-voice-pulse 1.2s ease-in-out infinite;
+  transform-origin: center;
+  transform: scaleY(calc(0.25 + 0.75 * var(--lvl, 0)));
+  transition: transform 0.12s linear;
+  animation: cc-voice-bar 0.9s ease-in-out infinite alternate;
+}
+.cc-voice-wave b:nth-child(2) {
+  animation-delay: -0.3s;
+}
+.cc-voice-wave b:nth-child(3) {
+  animation-delay: -0.6s;
+}
+.cc-voice-wave b:nth-child(4) {
+  animation-delay: -0.15s;
+}
+.cc-voice-wave b:nth-child(5) {
+  animation-delay: -0.45s;
+}
+@keyframes cc-voice-bar {
+  from {
+    scale: 1 0.45;
+  }
+  to {
+    scale: 1 1;
+  }
 }
 @keyframes cc-voice-pulse {
   50% {
@@ -1539,6 +1619,12 @@ li.done > .md-box,
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .cc-btn.mic.on::before,
+  .cc-btn.mic.on::after {
+    display: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
   .chat-host,
   .chat-it.enter,
   .chat-hello,
@@ -1555,7 +1641,8 @@ li.done > .md-box,
   .chat-jump,
   .cc-btn.stop,
   .cc-btn.mic.wait,
-  .cc-voice-dot,
+  .cc-btn.mic.on,
+  .cc-voice-wave b,
   .cc-img,
   .cc-quote,
   .cmsg.quote-hit,

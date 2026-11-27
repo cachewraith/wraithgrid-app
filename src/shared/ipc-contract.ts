@@ -942,6 +942,8 @@ export interface VoiceApi {
   onLevel(cb: (level: number) => void): () => void
   /** The recording hit its time limit and stopped itself: call `stop` for the text. */
   onEnded(cb: () => void): () => void
+  /** Everything heard so far while recording, re-read every moment (`stop` gives the final text). */
+  onPartial(cb: (text: string) => void): () => void
 }
 
 /** The relay socket in main (`relay:event`). */

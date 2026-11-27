@@ -1,7 +1,7 @@
 //! `voice:*`: voice typing in the chat box (src/renderer/lib/voice.ts): the speech model's
 //! download, then record → stop → text. The work is in crate::voice; events go out as
-//! `voice:progress` (download), `voice:level` (how loud, while recording) and `voice:ended`
-//! (a recording that hit its time limit).
+//! `voice:progress` (download), `voice:level` (how loud, while recording), `voice:partial` (the
+//! words so far, while recording) and `voice:ended` (a recording that hit its time limit).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -9,11 +9,12 @@ use std::sync::{Arc, Mutex};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 
-use crate::voice::{self, Engine, Recording};
+use crate::voice::{self, Engine, Live, Recording};
 
 #[derive(Default)]
 pub struct Voice {
     rec: Mutex<Option<Recording>>,
+    live: Mutex<Option<Live>>,
     engine: Arc<Engine>,
     downloading: Arc<AtomicBool>,
     cancel: Arc<AtomicBool>,
@@ -84,6 +85,7 @@ pub async fn handle(
                 ));
             }
             // A new recording replaces one left running (another chat's box).
+            v.live.lock().unwrap().take();
             v.rec.lock().unwrap().take();
             let (a1, a2) = (app.clone(), app.clone());
             let started = blocking(move || {
@@ -95,12 +97,17 @@ pub async fn handle(
             .await;
             match started {
                 Ok(Ok(rec)) => {
-                    *v.rec.lock().unwrap() = Some(rec);
-                    // Load the model while the user talks, so stopping answers sooner.
+                    // Load the model while the user talks, so the first words show sooner.
                     let engine = v.engine.clone();
                     tauri::async_runtime::spawn_blocking(move || {
                         let _ = engine.warm();
                     });
+                    let a3 = app.clone();
+                    let live = voice::live(v.engine.clone(), rec.tap(), move |text| {
+                        super::emit(&a3, "voice:partial", json!({ "text": text }))
+                    });
+                    *v.live.lock().unwrap() = Some(live);
+                    *v.rec.lock().unwrap() = Some(rec);
                     super::ok()
                 }
                 Ok(Err(e)) | Err(e) => super::fail(e),
@@ -110,13 +117,21 @@ pub async fn handle(
             let Some(rec) = v.rec.lock().unwrap().take() else {
                 return Some(Ok(super::fail("Not recording.")));
             };
+            let live = v.live.lock().unwrap().take();
             let engine = v.engine.clone();
-            match blocking(move || engine.transcribe(&rec.finish())).await {
+            // What the live pass wrote down for good, plus the rest read properly now.
+            let r = blocking(move || {
+                let done = live.map(Live::finish).unwrap_or_default();
+                let rest = engine.transcribe_in(&rec.finish_since(done.until), done.lang)?;
+                Ok::<_, String>(voice::joined(&done.text, &rest))
+            });
+            match r.await {
                 Ok(Ok(text)) => json!({ "ok": true, "text": text }),
                 Ok(Err(e)) | Err(e) => super::fail(e),
             }
         }
         "voice:cancel" => {
+            v.live.lock().unwrap().take();
             v.rec.lock().unwrap().take();
             super::ok()
         }
