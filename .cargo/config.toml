@@ -1,0 +1,8 @@
+# whisper.cpp (desktop-rs voice typing, via whisper-rs-sys) is built with CMake, and whisper-rs-sys
+# passes every GGML_* variable to it. By default ggml is tuned for the build machine's CPU
+# (-march=native): CI runners have AVX-512, so 2.6.0 crashed with "invalid opcode" on CPUs
+# without it the moment the model loaded. OFF builds a fixed x86-64 baseline (SSE4.2, AVX, AVX2,
+# FMA, F16C, BMI2; no AVX-512), which desktop-rs/src/voice.rs checks for before loading the
+# model. Found from any cargo run under this repo (root with --manifest-path, or desktop-rs).
+[env]
+GGML_NATIVE = "OFF"

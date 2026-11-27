@@ -75,6 +75,9 @@ pub async fn handle(
             super::ok()
         }
         "voice:start" => {
+            if let Err(e) = voice::cpu_supported() {
+                return Some(Ok(super::fail(e)));
+            }
             if !voice::model_ready() {
                 return Some(Ok(
                     json!({ "ok": false, "code": "no_model", "error": "Download the speech model first." }),
