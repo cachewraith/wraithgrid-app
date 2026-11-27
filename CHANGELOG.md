@@ -2,6 +2,7 @@
 
 ## 2026-11-27
 
+- [release] v2.7.1: smooth voice typing (files: desktop-rs/Cargo.toml, desktop-rs/Cargo.lock, desktop-rs/tauri.conf.json, docs/WHATS-NEW.md, docs/CONTEXT.md, CHANGELOG.md)
 - [voice] Live text types out smoothly: `useTypewriter`/`typeAhead` type each new reading a character at a time (≥30 chars/s, catching up within ~350 ms) instead of jumping a phrase at a time; Whisper re-reads every 0.2 s (was 0.5), commits at 12 s (was 20), first pass at 1 s of audio pins the language at once (first words ~3.6 s, were ~6 s) (files: desktop-rs/src/voice.rs, src/renderer/lib/voice.ts, src/renderer/components/chat/useVoiceTyping.ts, src/renderer/components/chat/Composer.tsx, tests/unit/voice.test.ts)
 - [voice] New mic animation (replaces pop/ripples/waveform): the mic dissolves into a stop square, an arc of light orbits the button, a glow swells with the voice level, a light sweeps across "Listening…"; same on the web (files: src/renderer/styles/chat.css, src/renderer/components/chat/Composer.tsx)
 - [release] v2.7.0: see your words as you speak (files: desktop-rs/Cargo.toml, desktop-rs/Cargo.lock, desktop-rs/tauri.conf.json, docs/WHATS-NEW.md, docs/CONTEXT.md, CHANGELOG.md)

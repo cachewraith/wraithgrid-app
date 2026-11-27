@@ -1,4 +1,20 @@
-# What's new in 2.7.0: see your words as you speak
+# What's new in 2.7.1: smooth voice typing
+
+*v2.7.1 · 2026-11-27*
+
+Your words now type out in the message box as you talk, instead of landing a phrase at a time, and the mic has a new look while it listens.
+
+| Fix | What changed |
+|---|---|
+| Live text jumped in chunks | The words heard are typed out smoothly, character by character, and keep pace with you. The first words show up sooner (about 2 seconds sooner) and new ones follow about every second |
+
+| New | What it does |
+|---|---|
+| A new listening animation | When you click the mic it turns into a stop button, a ring of light circles it while it listens, a glow behind it follows your voice, and a light sweeps across "Listening…" |
+
+---
+
+## Previously, in 2.7.0: see your words as you speak
 
 *v2.7.0 · 2026-11-27*
 
