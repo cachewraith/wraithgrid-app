@@ -1,4 +1,16 @@
-# What's new in 2.5.3: answer Claude from your phone
+# What's new in 2.5.4: your images on the web
+
+*v2.5.4 · 2026-11-27*
+
+Images you sent in a chat, pasted here or attached in the browser, now show up in the web app's chat too, not just as "1 image".
+
+| New | What it does |
+|---|---|
+| See sent images on the web | A message's images show as tiles in the browser, the same thumbnails as here. Tap one to open it full screen; on a computer, the arrow keys move between them |
+
+---
+
+## Previously, in 2.5.3: answer Claude from your phone
 
 *v2.5.3 · 2026-11-27*
 
