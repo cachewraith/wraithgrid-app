@@ -37,3 +37,18 @@ export function megabytes(bytes: number): string {
 export function percent(done: number, total: number): number {
   return total > 0 ? Math.min(100, Math.floor((done / total) * 100)) : 0
 }
+
+/** The live words type out at least this fast (characters a second)… */
+export const TYPE_MIN_CPS = 30
+/** …and faster when behind, so they never trail what was heard by more than about this. */
+export const TYPE_CATCH_UP_MS = 350
+
+/**
+ * One frame of typing the words heard: from `shown` characters toward `target`, `dtMs` later.
+ * Fractional, so slow frames and fast ones type the same; floor it to show.
+ */
+export function typeAhead(shown: number, target: number, dtMs: number): number {
+  if (shown >= target) return target
+  const cps = Math.max(TYPE_MIN_CPS, ((target - shown) * 1000) / TYPE_CATCH_UP_MS)
+  return Math.min(target, shown + (cps * Math.max(0, dtMs)) / 1000)
+}

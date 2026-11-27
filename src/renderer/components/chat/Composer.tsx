@@ -47,7 +47,7 @@ import { QUOTES_MAX, makeQuote, withQuotes, type Quote } from '../../lib/quotes'
 import { NOT_BROWSING, atEdge, historyStep, type HistoryNav } from '../../lib/prompt-history'
 import { clock, insertSpoken, megabytes, percent } from '../../lib/voice'
 import type { VoiceApi } from '@shared/ipc-contract'
-import { useVoiceTyping } from './useVoiceTyping'
+import { useTypewriter, useVoiceTyping } from './useVoiceTyping'
 
 interface Props {
   placeholder: string
@@ -208,7 +208,8 @@ export function Composer({
   const vs = voice?.state.kind ?? 'idle'
   const listening = vs === 'recording'
   const heard = voice?.heard ?? null
-  const live = voice?.live ?? ''
+  // What's been heard, typed out as you talk rather than appearing in jumps.
+  const live = useTypewriter(voice?.live ?? '')
   // The box as it was when recording started: the words heard go in at its caret, as they're
   // said and then for good; Esc puts it back.
   const voiceAt = useRef<{ text: string; start: number; end: number } | null>(null)
@@ -535,7 +536,7 @@ export function Composer({
                 </button>
               </>
             ) : voice.state.kind === 'recording' ? (
-              <VoiceClock since={voice.state.since} level={voice.level} />
+              <VoiceClock since={voice.state.since} />
             ) : voice.state.kind === 'transcribing' ? (
               <span>Writing down what you said…</span>
             ) : voice.state.kind === 'error' ? (
@@ -681,7 +682,10 @@ export function Composer({
               style={listening ? { ['--lvl' as string]: Math.min(1, voice.level * 4) } : undefined}
               onClick={voice.toggle}
             >
-              <IconMic small />
+              <span className="mic-i">
+                <IconMic small />
+              </span>
+              <span className="mic-stop" aria-hidden="true" />
             </button>
           ) : null}
           <button
@@ -776,9 +780,9 @@ export function Composer({
   )
 }
 
-/** "Listening… 0:07" above the box while recording, ticking each second, with a little
- *  waveform that moves with how loud the mic hears you. */
-function VoiceClock({ since, level }: { since: number; level: number }) {
+/** "Listening… 0:07" above the box while recording, ticking each second; a light sweeps
+ *  across "Listening…". */
+function VoiceClock({ since }: { since: number }) {
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 500)
@@ -786,18 +790,8 @@ function VoiceClock({ since, level }: { since: number; level: number }) {
   }, [])
   return (
     <span>
-      <i
-        className="cc-voice-wave"
-        aria-hidden="true"
-        style={{ ['--lvl' as string]: Math.min(1, level * 4) }}
-      >
-        <b />
-        <b />
-        <b />
-        <b />
-        <b />
-      </i>
-      Listening… {clock(now - since)} · click the mic or press Enter to write it down, Esc to cancel
+      <span className="cc-voice-live">Listening…</span> {clock(now - since)} · click the mic or
+      press Enter to write it down, Esc to cancel
     </span>
   )
 }

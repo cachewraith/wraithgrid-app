@@ -1,7 +1,7 @@
 # TODO
 
 ## Now
-- Live voice text (2026-11-27): tested with unit tests + `live_partials` (JFK sample played in real time against the real model); not yet clicked through in the real Tauri app with a mic, nor timed on Windows/macOS CPUs. Web app in Brave still has no voice typing (no Web Speech): option is mic → relay → the paired computer's Whisper
+- Live voice text (2026-11-27): typing + new animation checked in headless Chrome (real Composer, fake speech engine: ≤3 chars a frame) and `live_partials` against the real model (first words 3.6 s, then every ~1 s); not yet clicked through in the real Tauri app with a mic, nor timed on Windows/macOS CPUs. Web app in Brave still has no voice typing (no Web Speech): option is mic → relay → the paired computer's Whisper
 - Voice typing (2026-11-27): tested by unit tests, a live model download + JFK sample transcription and a live mic capture on Linux; not yet clicked through in the real Tauri app, nor built on CI for Windows/macOS (whisper.cpp needs cmake + libclang there; the macOS x64 slice cross-compiles whisper.cpp). Ubuntu 24.04+ names ALSA `libasound2t64` (provides `libasound2`): check the .deb installs there
 - Relay presence fix (2026-11-27): try sleep/wake and a Wi-Fi switch with the web app open; the web shows "online" again within ~70 s (desktop ping) or at once on wake
 - Web access (relay host, feat/web-access-relay-20261123): tested by unit tests + a live run against a local server (`tests/unit/relay-live.test.ts`); not yet clicked through in the real Tauri app with wraithgrid-web, nor on Windows/macOS; a chat whose process had exited is not restarted by a relayed send (it answers "could not start"); the web can't approve tools (by design for now); phone app: later, not planned now
